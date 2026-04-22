@@ -25,11 +25,11 @@ class _SlideInMessageState extends State<SlideInMessage> with SingleTickerProvid
       duration: const Duration(milliseconds: 300),
     );
     _slideAnimation = Tween<Offset>(
-      begin: const Offset(0, 0.15),
+      begin: const Offset(0, 0.08),
       end: Offset.zero,
-    ).chain(CurveTween(curve: Curves.easeOutCubic)).animate(_controller);
+    ).chain(CurveTween(curve: Curves.easeOutQuart)).animate(_controller);
     _fadeAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(parent: _controller, curve: Curves.easeOut),
+      CurvedAnimation(parent: _controller, curve: Curves.easeOutQuart),
     );
 
     if (widget.isActive) {

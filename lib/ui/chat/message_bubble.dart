@@ -34,7 +34,7 @@ class MessageBubble extends StatelessWidget {
       child: Align(
         alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
         child: Container(
-          margin: const EdgeInsets.symmetric(vertical: 3),
+          margin: EdgeInsets.zero,
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
           constraints: BoxConstraints(
             maxWidth: MediaQuery.of(context).size.width * 0.8,
@@ -138,13 +138,16 @@ class MessageBubble extends StatelessWidget {
                 ),
               // Timestamp
               if (timestamp != null && !isStreaming)
-                Padding(
-                  padding: const EdgeInsets.only(top: 4),
-                  child: Text(
-                    timestamp!,
-                    style: TextStyle(
-                      fontSize: 10,
-                      color: cs.onSurface.withValues(alpha: 0.35),
+                Align(
+                  alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
+                  child: Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: Text(
+                      timestamp!,
+                      style: TextStyle(
+                        fontSize: 10,
+                        color: cs.onSurface.withValues(alpha: 0.35),
+                      ),
                     ),
                   ),
                 ),
@@ -206,35 +209,42 @@ class _ImageGrid extends StatelessWidget {
 
   void _openFullscreen(BuildContext context, String path) {
     Haptics.selection();
-    showDialog(
-      context: context,
-      builder: (_) => Dialog(
-        backgroundColor: Colors.transparent,
-        insetPadding: EdgeInsets.zero,
-        child: Stack(
-          children: [
-            GestureDetector(
-              onTap: () => Navigator.pop(context),
-              child: InteractiveViewer(
-                child: Center(
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(4),
-                    child: Image.file(File(path), fit: BoxFit.contain, errorBuilder: (_, __, ___) =>
-                      const Icon(Icons.broken_image, size: 48, color: Colors.white54)),
+    Navigator.of(context).push(
+      PageRouteBuilder(
+        opaque: false,
+        pageBuilder: (context, animation, secondaryAnimation) => Scaffold(
+          backgroundColor: Colors.black87,
+          body: Stack(
+            children: [
+              GestureDetector(
+                onTap: () => Navigator.pop(context),
+                child: InteractiveViewer(
+                  child: Center(
+                    child: Hero(
+                      tag: 'image_$path',
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(4),
+                        child: Image.file(File(path), fit: BoxFit.contain, errorBuilder: (_, __, ___) =>
+                          const Icon(Icons.broken_image, size: 48, color: Colors.white54)),
+                      ),
+                    ),
                   ),
                 ),
               ),
-            ),
-            Positioned(
-              top: 40, right: 16,
-              child: IconButton(
-                icon: const Icon(Icons.close, color: Colors.white),
-                onPressed: () => Navigator.pop(context),
-                style: IconButton.styleFrom(backgroundColor: Colors.black54),
+              Positioned(
+                top: 40, right: 16,
+                child: IconButton(
+                  icon: const Icon(Icons.close, color: Colors.white),
+                  onPressed: () => Navigator.pop(context),
+                  style: IconButton.styleFrom(backgroundColor: Colors.black54),
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
+        transitionsBuilder: (context, animation, secondaryAnimation, child) {
+          return FadeTransition(opacity: animation, child: child);
+        },
       ),
     );
   }
@@ -245,7 +255,9 @@ class _ImageGrid extends StatelessWidget {
     if (imagePaths.length == 1) {
       return GestureDetector(
         onTap: () => _openFullscreen(context, imagePaths.first),
-        child: ClipRRect(
+        child: Hero(
+          tag: 'image_${imagePaths.first}',
+          child: ClipRRect(
           borderRadius: BorderRadius.circular(10),
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxHeight: 200, maxWidth: 240),
@@ -264,6 +276,7 @@ class _ImageGrid extends StatelessWidget {
             ),
           ),
         ),
+        ),
       );
     }
 
@@ -272,7 +285,9 @@ class _ImageGrid extends StatelessWidget {
       runSpacing: 4,
       children: imagePaths.map((path) => GestureDetector(
         onTap: () => _openFullscreen(context, path),
-        child: ClipRRect(
+        child: Hero(
+          tag: 'image_$path',
+          child: ClipRRect(
           borderRadius: BorderRadius.circular(8),
           child: Image.file(
             File(path),
@@ -289,6 +304,7 @@ class _ImageGrid extends StatelessWidget {
               child: Icon(Icons.broken_image, color: cs.onSurface.withValues(alpha: 0.3)),
             ),
           ),
+        ),
         ),
       )).toList(),
     );
@@ -535,18 +551,19 @@ class _SyntaxHighlight extends StatelessWidget {
   }
 
   TextStyle _styleForClass(String? className, ColorScheme cs) {
+    final isDark = cs.brightness == Brightness.dark;
     switch (className) {
-      case 'keyword':      return TextStyle(color: const Color(0xFFC678DD), fontWeight: FontWeight.bold, fontSize: 13, fontFamily: 'monospace');
-      case 'string':        return TextStyle(color: const Color(0xFF98C379), fontSize: 13, fontFamily: 'monospace');
-      case 'number':        return TextStyle(color: const Color(0xFFD19A66), fontSize: 13, fontFamily: 'monospace');
-      case 'comment':       return TextStyle(color: const Color(0xFF5C6370), fontStyle: FontStyle.italic, fontSize: 13, fontFamily: 'monospace');
-      case 'function':      return TextStyle(color: const Color(0xFF61AFEF), fontSize: 13, fontFamily: 'monospace');
-      case 'title':         return TextStyle(color: const Color(0xFF61AFEF), fontWeight: FontWeight.bold, fontSize: 13, fontFamily: 'monospace');
-      case 'params':        return TextStyle(color: const Color(0xFFE06C75), fontSize: 13, fontFamily: 'monospace');
-      case 'built_in':      return TextStyle(color: const Color(0xFFE5C07B), fontSize: 13, fontFamily: 'monospace');
-      case 'attr':          return TextStyle(color: const Color(0xFFD19A66), fontSize: 13, fontFamily: 'monospace');
-      case 'literal':       return TextStyle(color: const Color(0xFFD19A66), fontSize: 13, fontFamily: 'monospace');
-      case 'type':          return TextStyle(color: const Color(0xFFE5C07B), fontSize: 13, fontFamily: 'monospace');
+      case 'keyword':      return TextStyle(color: isDark ? const Color(0xFFC678DD) : const Color(0xFF7B30A0), fontWeight: FontWeight.bold, fontSize: 13, fontFamily: 'monospace');
+      case 'string':        return TextStyle(color: isDark ? const Color(0xFF98C379) : const Color(0xFF2E7D32), fontSize: 13, fontFamily: 'monospace');
+      case 'number':        return TextStyle(color: isDark ? const Color(0xFFD19A66) : const Color(0xFFB8600D), fontSize: 13, fontFamily: 'monospace');
+      case 'comment':       return TextStyle(color: isDark ? const Color(0xFF5C6370) : const Color(0xFF8E8E8E), fontStyle: FontStyle.italic, fontSize: 13, fontFamily: 'monospace');
+      case 'function':      return TextStyle(color: isDark ? const Color(0xFF61AFEF) : const Color(0xFF1565C0), fontSize: 13, fontFamily: 'monospace');
+      case 'title':         return TextStyle(color: isDark ? const Color(0xFF61AFEF) : const Color(0xFF1565C0), fontWeight: FontWeight.bold, fontSize: 13, fontFamily: 'monospace');
+      case 'params':        return TextStyle(color: isDark ? const Color(0xFFE06C75) : const Color(0xFFC62828), fontSize: 13, fontFamily: 'monospace');
+      case 'built_in':      return TextStyle(color: isDark ? const Color(0xFFE5C07B) : const Color(0xFF9E6D00), fontSize: 13, fontFamily: 'monospace');
+      case 'attr':          return TextStyle(color: isDark ? const Color(0xFFD19A66) : const Color(0xFFB8600D), fontSize: 13, fontFamily: 'monospace');
+      case 'literal':       return TextStyle(color: isDark ? const Color(0xFFD19A66) : const Color(0xFFB8600D), fontSize: 13, fontFamily: 'monospace');
+      case 'type':          return TextStyle(color: isDark ? const Color(0xFFE5C07B) : const Color(0xFF9E6D00), fontSize: 13, fontFamily: 'monospace');
       default:              return TextStyle(color: cs.onSurface, fontSize: 13, fontFamily: 'monospace');
     }
   }

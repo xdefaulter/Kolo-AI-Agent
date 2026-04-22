@@ -9,15 +9,22 @@ class ScrollToBottomFab extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    if (!visible) return const SizedBox.shrink();
-    return AnimatedOpacity(
-      opacity: visible ? 1.0 : 0.0,
-      duration: const Duration(milliseconds: 200),
-      child: FloatingActionButton.small(
-        onPressed: onTap,
-        backgroundColor: cs.surfaceContainerHigh,
-        elevation: 2,
-        child: Icon(Icons.keyboard_arrow_down, color: cs.onSurface),
+    return IgnorePointer(
+      ignoring: !visible,
+      child: AnimatedScale(
+        scale: visible ? 1.0 : 0.0,
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeOutBack,
+        child: AnimatedOpacity(
+          opacity: visible ? 1.0 : 0.0,
+          duration: const Duration(milliseconds: 200),
+          child: FloatingActionButton.small(
+            onPressed: onTap,
+            backgroundColor: cs.surfaceContainerHigh,
+            elevation: 2,
+            child: Icon(Icons.keyboard_arrow_down, color: cs.onSurface),
+          ),
+        ),
       ),
     );
   }

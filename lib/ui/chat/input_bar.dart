@@ -129,6 +129,11 @@ class InputBarState extends State<InputBar> {
     _controller.selection = TextSelection.fromPosition(TextPosition(offset: text.length));
   }
 
+  /// Public method to request focus on the input field
+  void focus() {
+    _focusNode.requestFocus();
+  }
+
   /// Public method to get current text (for draft saving)
   String get currentText => _controller.text;
 
@@ -368,6 +373,7 @@ class InputBarState extends State<InputBar> {
                         borderSide: BorderSide(color: cs.primary, width: 1.5),
                       ),
                       contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                      semanticCounterText: 'Message input field',
                     ),
                     onSubmitted: (_) => _handleSend(),
                   ),
@@ -500,7 +506,8 @@ class InputBarState extends State<InputBar> {
     required Color color,
     required VoidCallback onTap,
   }) {
-    return GestureDetector(
+    return InkWell(
+      borderRadius: BorderRadius.circular(16),
       onTap: onTap,
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -582,14 +589,18 @@ class _AttachmentChip extends StatelessWidget {
           top: -6,
           right: -6,
           child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
             onTap: onRemove,
-            child: Container(
-              padding: const EdgeInsets.all(2),
-              decoration: BoxDecoration(
-                color: cs.error,
-                shape: BoxShape.circle,
+            child: Padding(
+              padding: const EdgeInsets.all(8),
+              child: Container(
+                padding: const EdgeInsets.all(2),
+                decoration: BoxDecoration(
+                  color: cs.error,
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(Icons.close, size: 14, color: cs.onError),
               ),
-              child: Icon(Icons.close, size: 14, color: cs.onError),
             ),
           ),
         ),

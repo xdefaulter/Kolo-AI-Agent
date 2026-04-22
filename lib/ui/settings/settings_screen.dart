@@ -19,10 +19,21 @@ import 'tools_permission_screen.dart';
 class SettingsScreen extends ConsumerWidget {
   const SettingsScreen({super.key});
 
+  static Widget _sectionHeader(BuildContext context, String title, String subtitle) {
+    final cs = Theme.of(context).colorScheme;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(title, style: Theme.of(context).textTheme.titleLarge),
+        const SizedBox(height: 8),
+        Text(subtitle, style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: cs.onSurface.withValues(alpha: 0.6))),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final providers = ref.watch(providersProvider);
-    final cs = Theme.of(context).colorScheme;
 
     return Scaffold(
       appBar: AppBar(title: const Text('Settings')),
@@ -30,10 +41,8 @@ class SettingsScreen extends ConsumerWidget {
         padding: const EdgeInsets.all(16),
         children: [
           // ---- API Providers ----
-          Text('API Providers', style: Theme.of(context).textTheme.titleLarge),
-          const SizedBox(height: 4),
-          Text('Manage your OpenAI-compatible API endpoints. Each can have multiple models.', style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: cs.onSurface.withValues(alpha: 0.6))),
-          const SizedBox(height: 12),
+          _sectionHeader(context, 'API Providers', 'Manage your OpenAI-compatible API endpoints. Each can have multiple models.'),
+          const SizedBox(height: 8),
 
           ...providers.map((p) => _ProviderCard(provider: p)),
           const SizedBox(height: 8),
@@ -55,12 +64,10 @@ class SettingsScreen extends ConsumerWidget {
             ],
           ),
 
-          const SizedBox(height: 24),
+          const SizedBox(height: 16),
 
           // ---- Tool Permissions ----
-          Text('Tool Permissions', style: Theme.of(context).textTheme.titleLarge),
-          const SizedBox(height: 4),
-          Text('Configure which tools require confirmation.', style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: cs.onSurface.withValues(alpha: 0.6))),
+          _sectionHeader(context, 'Tool Permissions', 'Configure which tools require confirmation.'),
           const SizedBox(height: 8),
           FilledButton.tonalIcon(
             onPressed: () => pushSlideRight(context, const ToolsPermissionScreen()),
@@ -68,30 +75,24 @@ class SettingsScreen extends ConsumerWidget {
             label: Text('Manage ${bootstrapTools().all.length} Tools'),
           ),
 
-          const SizedBox(height: 24),
+          const SizedBox(height: 16),
 
           // ---- Vision Model ----
-          Text('Vision Model', style: Theme.of(context).textTheme.titleLarge),
-          const SizedBox(height: 4),
-          Text('Configure the model for screen analysis & phone control. Some models (GPT-4o, Gemini) support both text and vision.', style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: cs.onSurface.withValues(alpha: 0.6))),
+          _sectionHeader(context, 'Vision Model', 'Configure the model for screen analysis & phone control. Some models (GPT-4o, Gemini) support both text and vision.'),
           const SizedBox(height: 8),
           const _VisionModelSection(),
 
-          const SizedBox(height: 24),
+          const SizedBox(height: 16),
 
           // ---- Agent Settings ----
-          Text('Agent', style: Theme.of(context).textTheme.titleLarge),
-          const SizedBox(height: 4),
-          Text('Configure how the agent behaves during conversations.', style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: cs.onSurface.withValues(alpha: 0.6))),
+          _sectionHeader(context, 'Agent', 'Configure how the agent behaves during conversations.'),
           const SizedBox(height: 8),
           _MaxIterationsTile(),
 
-          const SizedBox(height: 24),
+          const SizedBox(height: 16),
 
           // ---- Data Management ----
-          Text('Data', style: Theme.of(context).textTheme.titleLarge),
-          const SizedBox(height: 4),
-          Text('Manage your chat history and app data.', style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: cs.onSurface.withValues(alpha: 0.6))),
+          _sectionHeader(context, 'Data', 'Manage your chat history and app data.'),
           const SizedBox(height: 8),
           Card(
             child: Column(
@@ -113,19 +114,17 @@ class SettingsScreen extends ConsumerWidget {
                 ListTile(
                   leading: const Icon(Icons.info_outline),
                   title: const Text('About'),
-                  subtitle: Text('v0.1.0 · ${bootstrapTools().all.length} tools', style: TextStyle(fontSize: 12, color: cs.onSurface.withValues(alpha: 0.5))),
+                  subtitle: Text('v0.1.0 · ${bootstrapTools().all.length} tools', style: TextStyle(fontSize: 12, color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.5))),
                   onTap: () => _showAbout(context),
                 ),
               ],
             ),
           ),
 
-          const SizedBox(height: 24),
+          const SizedBox(height: 16),
 
           // ---- Input Settings ----
-          Text('Input', style: Theme.of(context).textTheme.titleLarge),
-          const SizedBox(height: 4),
-          Text('Customize how you interact with the assistant.', style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: cs.onSurface.withValues(alpha: 0.6))),
+          _sectionHeader(context, 'Input', 'Customize how you interact with the assistant.'),
           const SizedBox(height: 8),
           const _EnterSendToggle(),
         ],
@@ -328,13 +327,14 @@ class _ProviderCard extends ConsumerWidget {
               else
                 Text('No model selected', style: TextStyle(fontSize: 13, color: cs.error)),
               const SizedBox(height: 8),
-              Row(
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
                 children: [
                   Chip(
                     label: Text('${provider.models.length} model${provider.models.length == 1 ? '' : 's'}'),
                     visualDensity: VisualDensity.compact,
                   ),
-                  const SizedBox(width: 8),
                   if (provider.canFetchModels)
                     ActionChip(
                       label: const Text('Fetch'),
@@ -348,13 +348,11 @@ class _ProviderCard extends ConsumerWidget {
                         }
                       },
                     ),
-                  const SizedBox(width: 8),
                   if (!provider.isActive)
                     ActionChip(
                       label: const Text('Set Active'),
                       onPressed: () => ref.read(providersProvider.notifier).setActiveProvider(provider.id),
                     ),
-                  const SizedBox(width: 8),
                   _TestConnectionChip(provider: provider),
                 ],
               ),

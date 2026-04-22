@@ -119,32 +119,24 @@ class ToolResultCard extends StatelessWidget {
               ],
             ],
           ),
-          trailing: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              // Copy button
-              InkWell(
-                borderRadius: BorderRadius.circular(8),
-                onTap: () {
-                  Haptics.light();
-                  Clipboard.setData(ClipboardData(text: result));
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: const Text('Result copied'),
-                      duration: const Duration(seconds: 1),
-                      behavior: SnackBarBehavior.floating,
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                    ),
-                  );
-                },
-                child: Padding(
-                  padding: const EdgeInsets.all(6),
-                  child: Icon(Icons.copy, size: 16, color: cs.onSurface.withValues(alpha: 0.5)),
+          trailing: InkWell(
+            borderRadius: BorderRadius.circular(8),
+            onTap: () {
+              Haptics.light();
+              Clipboard.setData(ClipboardData(text: result));
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: const Text('Result copied'),
+                  duration: const Duration(seconds: 1),
+                  behavior: SnackBarBehavior.floating,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
                 ),
-              ),
-              // Expand icon
-              Icon(Icons.expand_more, size: 18, color: cs.onSurface.withValues(alpha: 0.4)),
-            ],
+              );
+            },
+            child: Padding(
+              padding: const EdgeInsets.all(6),
+              child: Icon(Icons.copy, size: 16, color: cs.onSurface.withValues(alpha: 0.5)),
+            ),
           ),
           children: [
             Container(

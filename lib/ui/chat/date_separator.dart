@@ -8,7 +8,10 @@ class DateSeparator extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    return Padding(
+    return Semantics(
+      label: label,
+      header: true,
+      child: Padding(
       padding: const EdgeInsets.symmetric(vertical: 12),
       child: Row(
         children: [
@@ -27,6 +30,7 @@ class DateSeparator extends StatelessWidget {
           Expanded(child: Divider(color: cs.outlineVariant.withValues(alpha: 0.3))),
         ],
       ),
+    ),
     );
   }
 }

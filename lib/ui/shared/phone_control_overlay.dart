@@ -171,7 +171,10 @@ class _PhoneControlOverlayState extends State<PhoneControlOverlay>
           ),
           const SizedBox(height: 8),
           // STOP button
-          GestureDetector(
+          Semantics(
+            button: true,
+            label: 'Stop phone control',
+            child: GestureDetector(
             onDoubleTap: () => setState(() => _isMinimized = true),
             onTap: widget.onStop,
             child: Container(
@@ -189,6 +192,7 @@ class _PhoneControlOverlayState extends State<PhoneControlOverlay>
                 child: Text('⏹', style: TextStyle(color: Colors.white, fontSize: 24)),
               ),
             ),
+          ),
           ),
         ],
       ),

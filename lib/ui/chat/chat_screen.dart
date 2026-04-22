@@ -590,6 +590,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
             ),
           ),
           InputBar(
+            key: _inputBarKey,
             onSend: _sendMessage,
             isLoading: sessionState.isRunning,
             onCancel: sessionState.isRunning ? _cancelRun : null,
@@ -639,7 +640,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
     return SlideInMessage(
       isActive: msg.isNew,
-      child: Column(
+      child: Padding(
+        padding: EdgeInsets.only(bottom: isLastInGroup ? 12.0 : 4.0),
+        child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           MessageBubble(
@@ -682,6 +685,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
             ),
           ],
         ],
+      ),
       ),
     );
   }
@@ -900,21 +904,25 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         child: Column(
           children: [
             // Header with brand gradient
-            Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  colors: [cs.primary.withValues(alpha: 0.15), cs.primaryContainer.withValues(alpha: 0.1)],
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
+            Semantics(
+              header: true,
+              label: 'Kolo AI Agent',
+              child: Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [cs.primary.withValues(alpha: 0.15), cs.primaryContainer.withValues(alpha: 0.1)],
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                  ),
                 ),
-              ),
-              child: Row(
-                children: [
-                  Icon(Icons.smart_toy, color: cs.primary, size: 28),
-                  const SizedBox(width: 10),
-                  Text('Kolo AI Agent', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: cs.primary)),
-                ],
+                child: Row(
+                  children: [
+                    Icon(Icons.smart_toy, color: cs.primary, size: 28),
+                    const SizedBox(width: 10),
+                    Text('Kolo AI Agent', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: cs.primary)),
+                  ],
+                ),
               ),
             ),
             Padding(
@@ -963,7 +971,18 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                       itemBuilder: (ctx, i) {
                         final chat = filteredChats[i];
                         final isActive = chat.id == activeId;
-                        return ListTile(
+                        return Dismissible(
+                          key: ValueKey(chat.id),
+                          direction: DismissDirection.endToStart,
+                          background: Container(
+                            alignment: Alignment.centerRight,
+                            padding: const EdgeInsets.only(right: 20),
+                            color: Colors.red,
+                            child: const Icon(Icons.delete, color: Colors.white),
+                          ),
+                          confirmDismiss: (_) async => true,
+                          onDismissed: (_) => _deleteChat(chat.id),
+                          child: ListTile(
                           selected: isActive,
                           selectedTileColor: cs.primary.withValues(alpha: 0.1),
                           leading: Stack(
@@ -1011,6 +1030,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                             _loadChat(chat);
                             _markRead(chat.id);
                           },
+                        ),
                         );
                       },
                     ),
@@ -1159,7 +1179,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       labelStyle: TextStyle(fontSize: 13, color: cs.onSurface),
       onPressed: () {
         Haptics.light();
-        _sendMessage(prefix);
+        _inputBarKey.currentState?.setText(prefix);
+        _inputBarKey.currentState?.focus();
       },
     );
   }
