@@ -166,6 +166,8 @@ class InputBarState extends State<InputBar> {
       _focusNode.requestFocus();
     } else {
       // Start listening
+      _sttPartialSub?.cancel();
+      _sttFinalSub?.cancel();
       _sttBuffer = '';
       _sttPartialSub = SttService.instance.partialResults.listen(_sttOnPartial);
       _sttFinalSub = SttService.instance.finalResults.listen(_sttOnFinal);

@@ -393,8 +393,8 @@ class _ThinkingSectionState extends State<_ThinkingSection> {
 /// Markdown code block builder that adds syntax highlighting
 class _CodeBlockBuilder extends MarkdownElementBuilder {
   @override
-  Widget visitText(context, node) {
-    return const SizedBox.shrink();
+  Widget? visitText(text, preferredStyle) {
+    return CodeBlockWithCopy(code: text.textContent);
   }
 }
 

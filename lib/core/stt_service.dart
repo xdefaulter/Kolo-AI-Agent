@@ -98,7 +98,9 @@ class SttService {
     if (error.errorMsg == 'no_match_error' || error.errorMsg == 'interrupted') {
       return;
     }
-    _resultController.addError(error.errorMsg);
+    if (!_resultController.isClosed) {
+      _resultController.addError(error.errorMsg);
+    }
   }
 
   void _onStatus(String status) {

@@ -57,13 +57,13 @@ class AgentSession {
   /// Get the active API provider from settings (reads from same provider UI uses)
   ApiProvider? get _activeProvider {
     final providers = _ref.read(providersProvider);
-    print('[AgentSession] providers: ${providers.length}');
+
     if (providers.isEmpty) return null;
     final providerConfig = providers.firstWhere(
       (p) => p.isActive,
       orElse: () => providers.first,
     );
-    print('[AgentSession] active: ${providerConfig.name} | baseUrl: ${providerConfig.baseUrl} | apiKey: ${providerConfig.apiKey.isEmpty ? "EMPTY" : "${providerConfig.apiKey.substring(0, 4)}..."} | model: ${providerConfig.activeModel?.modelId ?? "null"}');
+
     final model = providerConfig.activeModel;
     if (model == null) return null;
     return ApiProvider(

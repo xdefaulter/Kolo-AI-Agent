@@ -51,6 +51,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   bool _showScrollFab = false;
   String _searchQuery = '';
   bool _enterToSend = false;
+  ProviderSubscription<AgentSessionState>? _sessionSub;
 
   @override
   void initState() {
@@ -60,11 +61,16 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       _initSession();
       _loadChats();
       _loadSettings();
+      _sessionSub = ref.listenManual<AgentSessionState>(
+        agentSessionProvider,
+        (prev, next) => _onSessionStateChanged(prev, next),
+      );
     });
   }
 
   @override
   void dispose() {
+    _sessionSub?.close();
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
     super.dispose();
@@ -289,7 +295,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       id: _uuid.v4(),
       chatId: chatId,
       role: 'user',
-      content: displayText,
+      content: fullContent,
     ));
 
     _scrollToBottom();
@@ -484,9 +490,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   /// Format a DateTime as a date separator label
   String _dateLabel(DateTime dt) {
     final now = DateTime.now();
-    final diff = now.difference(dt);
-    if (diff.inDays == 0) return 'Today';
-    if (diff.inDays == 1) return 'Yesterday';
+    final today = DateTime(now.year, now.month, now.day);
+    final msgDay = DateTime(dt.year, dt.month, dt.day);
+    final diffDays = today.difference(msgDay).inDays;
+    if (diffDays == 0) return 'Today';
+    if (diffDays == 1) return 'Yesterday';
     return '${_monthName(dt.month)} ${dt.day}';
   }
 
@@ -503,11 +511,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   Widget build(BuildContext context) {
     final messages = ref.watch(chatMessagesProvider);
     final sessionState = ref.watch(agentSessionProvider);
-
-    // Listen to session state changes for real-time UI updates
-    ref.listen<AgentSessionState>(agentSessionProvider, (prev, next) {
-      _onSessionStateChanged(prev, next);
-    });
 
     return Scaffold(
       appBar: AppBar(
@@ -569,7 +572,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                             if (item is _DateSep) {
                               return DateSeparator(label: item.label);
                             }
-                            return _buildMessageBubble(item as ChatMessageUI, messages);
+                            final mi = item as _MsgItem;
+                            return _buildMessageBubble(mi.msg, messages, mi.index);
                           },
                         );
                       }),
@@ -604,19 +608,19 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   List<dynamic> _buildInterleavedItems(List<ChatMessageUI> messages) {
     final items = <dynamic>[];
     DateTime? lastDate;
-    for (final m in messages) {
+    for (var i = 0; i < messages.length; i++) {
+      final m = messages[i];
       if (m.timestamp != null && (lastDate == null || !_sameDay(lastDate, m.timestamp!))) {
         items.add(_DateSep(label: _dateLabel(m.timestamp!)));
         lastDate = m.timestamp;
       }
-      items.add(m);
+      items.add(_MsgItem(msg: m, index: i));
     }
     return items;
   }
 
   /// Build a single message bubble (date separators handled in ListView)
-  Widget _buildMessageBubble(ChatMessageUI msg, List<ChatMessageUI> messages) {
-    final msgIndex = messages.indexOf(msg);
+  Widget _buildMessageBubble(ChatMessageUI msg, List<ChatMessageUI> messages, int msgIndex) {
     // Determine if next message is same role for grouping
     final isLastInGroup = msgIndex == messages.length - 1 ||
         messages[msgIndex + 1].role != msg.role;
@@ -1096,6 +1100,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         ],
       ),
     );
+    controller.dispose();
     if (result != null) {
       ref.read(customInstructionsProvider.notifier).state = result;
       await AppDatabase.instance.saveSetting('custom_instructions', result);
@@ -1110,16 +1115,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            // Animated robot icon
-            TweenAnimationBuilder<double>(
-              tween: Tween(begin: 0.95, end: 1.05),
-              duration: const Duration(seconds: 2),
-              curve: Curves.easeInOut,
-              builder: (context, scale, child) {
-                return Transform.scale(scale: scale, child: child);
-              },
-              child: Icon(Icons.smart_toy_outlined, size: 80, color: cs.primary.withValues(alpha: 0.5)),
-            ),
+            // Breathing robot icon
+            _BreathingIcon(color: cs.primary.withValues(alpha: 0.5)),
             const SizedBox(height: 16),
             Text('Kolo AI Agent', style: Theme.of(context).textTheme.headlineMedium?.copyWith(color: cs.primary)),
             const SizedBox(height: 8),
@@ -1168,10 +1165,59 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   }
 }
 
+/// Breathing scale animation for the empty-state icon
+class _BreathingIcon extends StatefulWidget {
+  final Color color;
+  const _BreathingIcon({required this.color});
+
+  @override
+  State<_BreathingIcon> createState() => _BreathingIconState();
+}
+
+class _BreathingIconState extends State<_BreathingIcon>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 2),
+      lowerBound: 0.95,
+      upperBound: 1.05,
+    )..repeat(reverse: true);
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _ctrl,
+      builder: (context, child) {
+        return Transform.scale(scale: _ctrl.value, child: child);
+      },
+      child: Icon(Icons.smart_toy_outlined, size: 80, color: widget.color),
+    );
+  }
+}
+
 /// Simple data class for date separators in the interleaved list
 class _DateSep {
   final String label;
   const _DateSep({required this.label});
+}
+
+/// Wrapper to carry the original index alongside the message
+class _MsgItem {
+  final ChatMessageUI msg;
+  final int index;
+  const _MsgItem({required this.msg, required this.index});
 }
 
 /// UI model for a chat message — now includes timestamp
