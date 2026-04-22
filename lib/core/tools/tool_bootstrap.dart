@@ -6,6 +6,10 @@ import 'cross_platform/calculator.dart';
 import 'cross_platform/web_search.dart';
 import 'cross_platform/clipboard.dart';
 import 'cross_platform/new_tools.dart';
+import 'cross_platform/edit_file.dart';
+import 'cross_platform/search_files.dart';
+import 'cross_platform/project_tools.dart';
+import 'cross_platform/flutter_task.dart';
 import 'cross_platform/web_scrape.dart';
 import 'cross_platform/qr_code.dart';
 import 'cross_platform/location.dart';
@@ -80,6 +84,12 @@ ToolRegistry bootstrapTools() {
   // ── Contacts & search (2) ──
   registry.register(GrepTool());
   registry.register(ContactsTool());
+
+  // ── Coding tools (4) ──
+  registry.register(EditFileTool());
+  registry.register(SearchFilesTool());
+  registry.register(SetProjectRootTool());
+  registry.register(FlutterTaskTool());
 
   // ── Timers (1) ──
   registry.register(TimerTool());
