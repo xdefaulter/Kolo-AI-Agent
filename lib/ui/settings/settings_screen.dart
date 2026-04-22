@@ -79,8 +79,75 @@ class SettingsScreen extends ConsumerWidget {
           Text('Configure how the agent behaves during conversations.', style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: cs.onSurface.withValues(alpha: 0.6))),
           const SizedBox(height: 8),
           _MaxIterationsTile(),
+
+          const SizedBox(height: 24),
+
+          // ---- Data Management ----
+          Text('Data', style: Theme.of(context).textTheme.titleLarge),
+          const SizedBox(height: 4),
+          Text('Manage your chat history and app data.', style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: cs.onSurface.withValues(alpha: 0.6))),
+          const SizedBox(height: 8),
+          Card(
+            child: Column(
+              children: [
+                ListTile(
+                  leading: const Icon(Icons.delete_sweep_outlined),
+                  title: const Text('Clear All Chats'),
+                  subtitle: const Text('Delete all conversations permanently'),
+                  onTap: () => _clearAllChats(context),
+                ),
+                const Divider(height: 1),
+                ListTile(
+                  leading: const Icon(Icons.info_outline),
+                  title: const Text('About'),
+                  subtitle: Text('v0.1.0 · ${bootstrapTools().all.length} tools', style: TextStyle(fontSize: 12, color: cs.onSurface.withValues(alpha: 0.5))),
+                  onTap: () => _showAbout(context),
+                ),
+              ],
+            ),
+          ),
         ],
       ),
+    );
+  }
+
+  Future<void> _clearAllChats(BuildContext context) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Clear All Chats?'),
+        content: const Text('This will permanently delete all conversations. This cannot be undone.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: FilledButton.styleFrom(backgroundColor: Theme.of(ctx).colorScheme.error),
+            child: const Text('Delete All'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) {
+      await AppDatabase.instance.deleteAllChats();
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('All chats deleted'), behavior: SnackBarBehavior.floating),
+        );
+      }
+    }
+  }
+
+  void _showAbout(BuildContext context) {
+    showAboutDialog(
+      context: context,
+      applicationName: 'Kolo AI Agent',
+      applicationVersion: '0.1.0',
+      applicationIcon: Icon(Icons.smart_toy, size: 48, color: Theme.of(context).colorScheme.primary),
+      children: [
+        Text('Unlimited AI assistant with ${bootstrapTools().all.length} tools.'),
+        const SizedBox(height: 8),
+        const Text('Built with Flutter. Powered by OpenAI-compatible APIs.'),
+      ],
     );
   }
 
@@ -271,6 +338,7 @@ class _ProviderDetailScreenState extends ConsumerState<ProviderDetailScreen> {
             ),
           ),
           const SizedBox(height: 8),
+          // Fetch Models button
           if (_provider.canFetchModels)
             Align(
               alignment: Alignment.centerRight,
@@ -279,7 +347,10 @@ class _ProviderDetailScreenState extends ConsumerState<ProviderDetailScreen> {
                   final count = await ref.read(providersProvider.notifier).fetchModels(_provider.id);
                   if (context.mounted) {
                     _refreshProvider();
-                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(count > 0 ? 'Added $count new models' : 'No new models found')));
+                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                      content: Text(count > 0 ? 'Added $count new models' : 'No new models found'),
+                      behavior: SnackBarBehavior.floating,
+                    ));
                   }
                 },
                 icon: const Icon(Icons.refresh),

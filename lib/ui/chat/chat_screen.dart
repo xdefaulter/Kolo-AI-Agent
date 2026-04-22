@@ -7,6 +7,8 @@ import 'package:share_plus/share_plus.dart';
 import 'message_bubble.dart';
 import 'input_bar.dart';
 import 'tool_result_card.dart';
+import 'date_separator.dart';
+import 'scroll_to_bottom_fab.dart';
 import '../../core/agent/agent_session.dart';
 import '../../core/agent/conversation_manager.dart';
 import '../../core/storage/database.dart';
@@ -16,6 +18,7 @@ import '../../core/tools/tool_base.dart';
 import '../../core/theme_provider.dart';
 import '../../core/providers.dart';
 import '../../core/providers_state.dart';
+import '../../core/haptics.dart';
 import '../settings/settings_screen.dart';
 import '../settings/tools_permission_screen.dart';
 
@@ -24,7 +27,7 @@ const _uuid = Uuid();
 // Tool registry — initialized once
 final toolRegistryProvider = Provider<ToolRegistry>((ref) => bootstrapTools());
 
-// Chat messages UI state
+// Chat messages UI state — now includes timestamp
 final chatMessagesProvider = StateProvider<List<ChatMessageUI>>((ref) => []);
 
 // Chat list state
@@ -41,14 +44,34 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   final ScrollController _scrollController = ScrollController();
   bool _sessionInitialized = false;
   String? _lastErrorMessage;
+  bool _showScrollFab = false;
+  String _searchQuery = '';
 
   @override
   void initState() {
     super.initState();
+    _scrollController.addListener(_onScroll);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _initSession();
       _loadChats();
     });
+  }
+
+  @override
+  void dispose() {
+    _scrollController.removeListener(_onScroll);
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  void _onScroll() {
+    if (!_scrollController.hasClients) return;
+    final maxScroll = _scrollController.position.maxScrollExtent;
+    final currentScroll = _scrollController.position.pixels;
+    final show = maxScroll - currentScroll > 200;
+    if (show != _showScrollFab) {
+      setState(() => _showScrollFab = show);
+    }
   }
 
   void _initSession() {
@@ -77,6 +100,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       content: m.content,
       toolName: m.toolName,
       toolSuccess: m.toolSuccess,
+      timestamp: m.createdAt,
     )).toList();
     ref.read(chatMessagesProvider.notifier).state = uiMessages;
 
@@ -106,6 +130,25 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   }
 
   Future<void> _deleteChat(String chatId) async {
+    // Confirm before deleting
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete Chat?'),
+        content: const Text('This chat and all its messages will be permanently deleted.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: FilledButton.styleFrom(backgroundColor: Theme.of(ctx).colorScheme.error),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    Haptics.medium();
     await AppDatabase.instance.deleteChat(chatId);
     final chats = await AppDatabase.instance.getAllChats();
     ref.read(chatListProvider.notifier).state = chats;
@@ -121,6 +164,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   Future<void> _sendMessage(String text, {List<ChatAttachment>? attachments}) async {
     if (text.trim().isEmpty && (attachments == null || attachments.isEmpty)) return;
 
+    Haptics.light();
     _lastErrorMessage = null;
 
     // Build display text (include attachment names)
@@ -132,11 +176,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     String fullContent = text;
     if (attachments != null && attachments.isNotEmpty) {
       for (final att in attachments) {
-        if (att.mimeType.startsWith('image/')) {
-          // Images are handled separately via vision content
-          continue;
-        }
-        // For text files, include content inline
+        if (att.mimeType.startsWith('image/')) continue;
         if (att.mimeType.startsWith('text/') || att.mimeType == 'application/json') {
           try {
             final decoded = String.fromCharCodes(base64Decode(att.base64Data));
@@ -150,12 +190,14 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       }
     }
 
-    // Add user message to UI immediately
+    // Add user message to UI immediately with timestamp
+    final now = DateTime.now();
     final messages = List<ChatMessageUI>.from(ref.read(chatMessagesProvider));
     messages.add(ChatMessageUI(
       role: 'user',
       content: displayText,
       imagePaths: attachments?.where((a) => a.mimeType.startsWith('image/')).map((a) => a.filePath).whereType<String>().toList(),
+      timestamp: now,
     ));
     ref.read(chatMessagesProvider.notifier).state = messages;
 
@@ -170,7 +212,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
     _scrollToBottom();
 
-    // Set permission callbacks fresh (avoids stale context)
+    // Set permission callbacks fresh
     final notifier = ref.read(agentSessionProvider.notifier);
     notifier.setPermissionCallbacks(
       promptUser: (toolName, params, permission) => _showPermissionDialog(
@@ -190,7 +232,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     List<ChatAttachment>? imageAttachments;
     if (attachments != null) {
       imageAttachments = attachments.where((a) => a.mimeType.startsWith('image/')).toList();
-      // If there are text files that were inlined, fullContent already has them
     }
 
     // Run agent loop with attachments
@@ -207,16 +248,15 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     }
   }
 
-  /// Retry the last user message (re-send after error)
+  /// Retry the last user message
   void _retryLastMessage() {
+    Haptics.light();
     final messages = ref.read(chatMessagesProvider);
-    // Find the last user message
     final lastUserMsg = messages.lastWhere(
       (m) => m.role == 'user',
       orElse: () => ChatMessageUI(role: 'user', content: ''),
     );
     if (lastUserMsg.content.isNotEmpty) {
-      // Remove the error message
       final updated = List<ChatMessageUI>.from(messages);
       if (updated.isNotEmpty && updated.last.role == 'assistant' && _lastErrorMessage != null) {
         updated.removeLast();
@@ -226,32 +266,35 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     }
   }
 
-  /// Edit the last user message — populate input bar with the text
+  /// Edit the last user message
   void _editLastMessage() {
+    Haptics.selection();
     final messages = ref.read(chatMessagesProvider);
     final lastUserIdx = messages.lastIndexWhere((m) => m.role == 'user');
     if (lastUserIdx >= 0) {
-      // Remove everything from that user message onward
       final updated = messages.sublist(0, lastUserIdx);
       ref.read(chatMessagesProvider.notifier).state = updated;
-      // The user can type in the input bar and send
     }
   }
 
   void _cancelRun() {
+    Haptics.medium();
     ref.read(agentSessionProvider.notifier).cancel();
   }
 
-  /// Share a message's content
   void _shareMessage(String content) {
     Share.share(content);
   }
 
-  /// Copy a message's content to clipboard
   void _copyMessage(String content) {
+    Haptics.light();
     Clipboard.setData(ClipboardData(text: content));
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Copied to clipboard'), duration: Duration(seconds: 1)),
+      SnackBar(
+        content: const Text('Copied to clipboard'),
+        duration: const Duration(seconds: 1),
+        behavior: SnackBarBehavior.floating,
+      ),
     );
   }
 
@@ -329,7 +372,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       ),
     );
     if (result == true && alwaysAllow) {
-      // Mark this tool as always-allowed in the session
       final session = ref.read(agentSessionProvider.notifier).session;
       session?.permissionManager.alwaysAllow(toolName);
     }
@@ -347,6 +389,33 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       }
     });
   }
+
+  /// Format a DateTime as a short time string
+  String _formatTime(DateTime dt) {
+    final h = dt.hour;
+    final m = dt.minute.toString().padLeft(2, '0');
+    final period = h >= 12 ? 'PM' : 'AM';
+    final hour12 = h > 12 ? h - 12 : (h == 0 ? 12 : h);
+    return '$hour12:$m $period';
+  }
+
+  /// Format a DateTime as a date separator label
+  String _dateLabel(DateTime dt) {
+    final now = DateTime.now();
+    final diff = now.difference(dt);
+    if (diff.inDays == 0) return 'Today';
+    if (diff.inDays == 1) return 'Yesterday';
+    return '${_monthName(dt.month)} ${dt.day}';
+  }
+
+  String _monthName(int month) => [
+    '', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+  ][month];
+
+  /// Check if two DateTimes are on the same day
+  bool _sameDay(DateTime a, DateTime b) =>
+      a.year == b.year && a.month == b.month && a.day == b.day;
 
   @override
   Widget build(BuildContext context) {
@@ -388,69 +457,33 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       drawer: _buildChatDrawer(),
       body: Column(
         children: [
+          // Offline banner
+          // (placeholder: when connectivity_plus is wired, show banner here)
           Expanded(
-            child: messages.isEmpty
-                ? _buildEmptyState(context)
-                : ListView.builder(
-                    controller: _scrollController,
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                    itemCount: messages.length,
-                    itemBuilder: (context, index) {
-                      final msg = messages[index];
-                      if (msg.role == 'tool') {
-                        return ToolResultCard(
-                          toolName: msg.toolName ?? 'unknown',
-                          result: msg.content,
-                          success: msg.toolSuccess,
-                        );
-                      }
-                      // Check if this is the last assistant message and it's an error
-                      final isError = msg.role == 'assistant' && 
-                          msg.content.startsWith('Error:') && 
-                          index == messages.length - 1;
-                      return Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          MessageBubble(
-                            role: msg.role,
-                            content: msg.content,
-                            thinkingContent: msg.thinkingContent,
-                            isStreaming: msg.isStreaming,
-                            imagePaths: msg.imagePaths,
-                          ),
-                          // Action buttons for messages
-                          if (msg.role == 'assistant' && !msg.isStreaming) ...[
-                            Padding(
-                              padding: const EdgeInsets.only(left: 48, bottom: 8),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  _actionChip(Icons.share_outlined, 'Share', () => _shareMessage(msg.content)),
-                                  if (isError) ...[
-                                    const SizedBox(width: 6),
-                                    _actionChip(Icons.refresh, 'Retry', _retryLastMessage),
-                                    const SizedBox(width: 6),
-                                    _actionChip(Icons.edit_outlined, 'Edit', _editLastMessage),
-                                  ],
-                                ],
-                              ),
-                            ),
-                          ],
-                          if (msg.role == 'user' && !msg.isStreaming) ...[
-                            Padding(
-                              padding: const EdgeInsets.only(left: 8, bottom: 8),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  _actionChip(Icons.copy, 'Copy', () => _copyMessage(msg.content)),
-                                ],
-                              ),
-                            ),
-                          ],
-                        ],
-                      );
-                    },
+            child: Stack(
+              children: [
+                messages.isEmpty
+                    ? _buildEmptyState(context)
+                    : ListView.builder(
+                        controller: _scrollController,
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                        itemCount: messages.length + _dateSeparatorCount(messages),
+                        itemBuilder: (context, index) {
+                          // Interleave date separators
+                          return _buildMessageOrSeparator(messages, index);
+                        },
+                      ),
+                // Scroll-to-bottom FAB
+                Positioned(
+                  right: 16,
+                  bottom: 16,
+                  child: ScrollToBottomFab(
+                    visible: _showScrollFab,
+                    onTap: _scrollToBottom,
                   ),
+                ),
+              ],
+            ),
           ),
           InputBar(
             onSend: _sendMessage,
@@ -462,18 +495,120 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     );
   }
 
+  /// Calculate how many date separators to add
+  int _dateSeparatorCount(List<ChatMessageUI> messages) {
+    int count = 0;
+    DateTime? lastDate;
+    for (final m in messages) {
+      if (m.timestamp != null) {
+        if (lastDate == null || !_sameDay(lastDate, m.timestamp!)) {
+          count++;
+          lastDate = m.timestamp;
+        }
+      }
+    }
+    return count;
+  }
+
+  /// Build either a date separator or a message bubble
+  Widget _buildMessageOrSeparator(List<ChatMessageUI> messages, int index) {
+    // We need to interleave date separators as virtual items
+    int msgIndex = 0;
+    int virtualIndex = 0;
+    DateTime? lastDate;
+
+    for (final m in messages) {
+      if (m.timestamp != null && (lastDate == null || !_sameDay(lastDate, m.timestamp!))) {
+        if (virtualIndex == index) {
+          return DateSeparator(label: _dateLabel(m.timestamp!));
+        }
+        virtualIndex++;
+        lastDate = m.timestamp;
+      }
+      if (virtualIndex == index) {
+        final msg = messages[msgIndex];
+        // Determine if next message is same role for grouping
+        final isLastInGroup = msgIndex == messages.length - 1 ||
+            messages[msgIndex + 1].role != msg.role;
+
+        if (msg.role == 'tool') {
+          return ToolResultCard(
+            toolName: msg.toolName ?? 'unknown',
+            result: msg.content,
+            success: msg.toolSuccess,
+          );
+        }
+
+        final isError = msg.role == 'assistant' &&
+            msg.content.startsWith('Error:') &&
+            msgIndex == messages.length - 1;
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            MessageBubble(
+              role: msg.role,
+              content: msg.content,
+              thinkingContent: msg.thinkingContent,
+              isStreaming: msg.isStreaming,
+              imagePaths: msg.imagePaths,
+              timestamp: msg.timestamp != null ? _formatTime(msg.timestamp!) : null,
+            ),
+            // Action buttons for messages
+            if (msg.role == 'assistant' && !msg.isStreaming) ...[
+              Padding(
+                padding: EdgeInsets.only(left: 48, bottom: isLastInGroup ? 8.0 : 2.0),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _actionChip(Icons.share_outlined, 'Share', () => _shareMessage(msg.content)),
+                    const SizedBox(width: 6),
+                    _actionChip(Icons.copy, 'Copy', () => _copyMessage(msg.content)),
+                    if (isError) ...[
+                      const SizedBox(width: 6),
+                      _actionChip(Icons.refresh, 'Retry', _retryLastMessage),
+                      const SizedBox(width: 6),
+                      _actionChip(Icons.edit_outlined, 'Edit', _editLastMessage),
+                    ],
+                  ],
+                ),
+              ),
+            ],
+            if (msg.role == 'user' && !msg.isStreaming && isLastInGroup) ...[
+              Padding(
+                padding: const EdgeInsets.only(left: 8, bottom: 8),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _actionChip(Icons.copy, 'Copy', () => _copyMessage(msg.content)),
+                  ],
+                ),
+              ),
+            ],
+          ],
+        );
+      }
+      virtualIndex++;
+      msgIndex++;
+    }
+    return const SizedBox.shrink();
+  }
+
   Widget _actionChip(IconData icon, String label, VoidCallback onTap) {
     return InkWell(
-      onTap: onTap,
+      onTap: () {
+        Haptics.light();
+        onTap();
+      },
       borderRadius: BorderRadius.circular(16),
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6), // 48dp min touch target
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, size: 14, color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.5)),
-            const SizedBox(width: 3),
-            Text(label, style: TextStyle(fontSize: 11, color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.5))),
+            Icon(icon, size: 15, color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.5)),
+            const SizedBox(width: 4),
+            Text(label, style: TextStyle(fontSize: 12, color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.5))),
           ],
         ),
       ),
@@ -497,6 +632,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
             content: currentContent.isEmpty && currentThinking.isNotEmpty ? '...' : currentContent,
             thinkingContent: currentThinking.isNotEmpty ? currentThinking : null,
             isStreaming: true,
+            timestamp: DateTime.now(),
           ));
         }
         // Add tool results that aren't already shown
@@ -512,6 +648,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
               toolName: tr.toolName,
               toolSuccess: tr.result.success,
               toolCallId: tr.toolCallId,
+              timestamp: DateTime.now(),
             ));
             // Persist tool result
             AppDatabase.instance.addMessage(chatId, MessageEntry(
@@ -532,6 +669,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
             role: 'assistant',
             content: wasCancelled ? '$content\n\n⏹ Stopped' : content,
             thinkingContent: thinkingContent.isNotEmpty ? thinkingContent : null,
+            timestamp: DateTime.now(),
           ));
           // Persist assistant message
           AppDatabase.instance.addMessage(chatId, MessageEntry(
@@ -554,6 +692,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
               toolName: tr.toolName,
               toolSuccess: tr.result.success,
               toolCallId: tr.toolCallId,
+              timestamp: DateTime.now(),
             ));
             AppDatabase.instance.addMessage(chatId, MessageEntry(
               id: _uuid.v4(),
@@ -568,9 +707,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         }
         // Update chat metadata
         _updateChatMeta(chatId, messages.length);
+        Haptics.light(); // done haptic
       case AgentSessionError(:final message):
+        Haptics.heavy();
         _lastErrorMessage = message;
-        messages.add(ChatMessageUI(role: 'assistant', content: 'Error: $message'));
+        messages.add(ChatMessageUI(role: 'assistant', content: 'Error: $message', timestamp: DateTime.now()));
         AppDatabase.instance.addMessage(chatId, MessageEntry(
           id: _uuid.v4(),
           chatId: chatId,
@@ -625,6 +766,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       ),
       tooltip: 'Switch model',
       onSelected: (modelId) {
+        Haptics.selection();
         ref.read(providersProvider.notifier).setActiveModel(provider.id, modelId);
       },
       itemBuilder: (ctx) => models.map((m) => PopupMenuItem(
@@ -648,18 +790,30 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     final activeId = ref.watch(activeChatIdProvider);
     final cs = Theme.of(context).colorScheme;
 
+    // Filter chats by search
+    final filteredChats = _searchQuery.isEmpty
+        ? chats
+        : chats.where((c) => c.title.toLowerCase().contains(_searchQuery.toLowerCase())).toList();
+
     return Drawer(
       child: SafeArea(
         child: Column(
           children: [
+            // Header with brand gradient
             Container(
               padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(color: cs.surfaceContainerHighest),
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [cs.primary.withValues(alpha: 0.15), cs.primaryContainer.withValues(alpha: 0.1)],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                ),
+              ),
               child: Row(
                 children: [
-                  Icon(Icons.smart_toy, color: cs.primary),
-                  const SizedBox(width: 8),
-                  Text('Kolo AI Agent', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: cs.primary)),
+                  Icon(Icons.smart_toy, color: cs.primary, size: 28),
+                  const SizedBox(width: 10),
+                  Text('Kolo AI Agent', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: cs.primary)),
                 ],
               ),
             ),
@@ -677,14 +831,37 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                 ),
               ),
             ),
+            // Search bar
+            if (chats.length > 3) ...[
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                child: TextField(
+                  decoration: InputDecoration(
+                    hintText: 'Search chats...',
+                    prefixIcon: const Icon(Icons.search, size: 20),
+                    isDense: true,
+                    filled: true,
+                    fillColor: cs.surfaceContainerHighest.withValues(alpha: 0.5),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide.none,
+                    ),
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  ),
+                  style: const TextStyle(fontSize: 14),
+                  onChanged: (v) => setState(() => _searchQuery = v),
+                ),
+              ),
+              const SizedBox(height: 4),
+            ],
             const Divider(height: 1),
             Expanded(
-              child: chats.isEmpty
-                  ? Center(child: Text('No chats yet', style: TextStyle(color: cs.onSurface.withValues(alpha: 0.5))))
+              child: filteredChats.isEmpty
+                  ? Center(child: Text('No chats found', style: TextStyle(color: cs.onSurface.withValues(alpha: 0.5))))
                   : ListView.builder(
-                      itemCount: chats.length,
+                      itemCount: filteredChats.length,
                       itemBuilder: (ctx, i) {
-                        final chat = chats[i];
+                        final chat = filteredChats[i];
                         final isActive = chat.id == activeId;
                         return ListTile(
                           selected: isActive,
@@ -697,7 +874,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                             style: TextStyle(fontWeight: isActive ? FontWeight.w600 : FontWeight.normal),
                           ),
                           subtitle: Text(
-                            '${chat.messageCount} msgs • ${_timeAgo(chat.updatedAt)}',
+                            '${chat.messageCount} msgs · ${_timeAgo(chat.updatedAt)}',
                             style: TextStyle(fontSize: 11, color: cs.onSurface.withValues(alpha: 0.5)),
                           ),
                           trailing: IconButton(
@@ -705,6 +882,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                             onPressed: () => _deleteChat(chat.id),
                           ),
                           onTap: () {
+                            Haptics.selection();
                             Navigator.pop(context);
                             _loadChat(chat);
                           },
@@ -751,6 +929,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   }
 
   void _cycleTheme() {
+    Haptics.selection();
     ref.read(themeModeProvider.notifier).cycle();
   }
 
@@ -765,7 +944,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   }
 
   Future<void> _showCustomInstructionsDialog() async {
-    // Load from database first
     final saved = await AppDatabase.instance.getSetting('custom_instructions') ?? '';
     if (!mounted) return;
     final controller = TextEditingController(text: ref.read(customInstructionsProvider).isEmpty ? saved : ref.read(customInstructionsProvider));
@@ -799,7 +977,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     );
     if (result != null) {
       ref.read(customInstructionsProvider.notifier).state = result;
-      // Persist custom instructions
       await AppDatabase.instance.saveSetting('custom_instructions', result);
     }
   }
@@ -812,16 +989,39 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.smart_toy_outlined, size: 80, color: cs.primary.withValues(alpha: 0.5)),
+            // Animated robot icon
+            TweenAnimationBuilder<double>(
+              tween: Tween(begin: 0.95, end: 1.05),
+              duration: const Duration(seconds: 2),
+              curve: Curves.easeInOut,
+              builder: (context, scale, child) {
+                return Transform.scale(scale: scale, child: child);
+              },
+              child: Icon(Icons.smart_toy_outlined, size: 80, color: cs.primary.withValues(alpha: 0.5)),
+            ),
             const SizedBox(height: 16),
             Text('Kolo AI Agent', style: Theme.of(context).textTheme.headlineMedium?.copyWith(color: cs.primary)),
             const SizedBox(height: 8),
             Text(
-              'Your unlimited AI assistant\n${bootstrapTools().all.length} tools ready • Configure a provider to start',
+              'Your unlimited AI assistant\n${bootstrapTools().all.length} tools ready',
               textAlign: TextAlign.center,
               style: Theme.of(context).textTheme.bodyLarge?.copyWith(color: cs.onSurface.withValues(alpha: 0.6)),
             ),
             const SizedBox(height: 24),
+            // Quick action suggestion chips
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              alignment: WrapAlignment.center,
+              children: [
+                _suggestionChip(Icons.search, 'Search the web', 'Search the web for '),
+                _suggestionChip(Icons.phone_android, 'Open an app', 'Open '),
+                _suggestionChip(Icons.screenshot, 'Take a screenshot', 'Take a screenshot'),
+                _suggestionChip(Icons.calculate, 'Calculate', 'Calculate '),
+                _suggestionChip(Icons.location_on, 'Find nearby', 'What\'s near me?'),
+              ],
+            ),
+            const SizedBox(height: 16),
             FilledButton.icon(
               onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const SettingsScreen())),
               icon: const Icon(Icons.settings),
@@ -832,18 +1032,32 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       ),
     );
   }
+
+  Widget _suggestionChip(IconData icon, String label, String prefix) {
+    final cs = Theme.of(context).colorScheme;
+    return ActionChip(
+      avatar: Icon(icon, size: 16, color: cs.primary),
+      label: Text(label),
+      labelStyle: TextStyle(fontSize: 13, color: cs.onSurface),
+      onPressed: () {
+        Haptics.light();
+        _sendMessage(prefix);
+      },
+    );
+  }
 }
 
-/// UI model for a chat message
+/// UI model for a chat message — now includes timestamp
 class ChatMessageUI {
   final String role;
   final String content;
-  final String? thinkingContent; // reasoning tokens shown in collapsible section
+  final String? thinkingContent;
   final String? toolName;
   final bool? toolSuccess;
   final bool isStreaming;
   final String? toolCallId;
-  final List<String>? imagePaths; // local file paths for images
+  final List<String>? imagePaths;
+  final DateTime? timestamp;
   ChatMessageUI({
     required this.role,
     required this.content,
@@ -853,5 +1067,6 @@ class ChatMessageUI {
     this.isStreaming = false,
     this.toolCallId,
     this.imagePaths,
+    this.timestamp,
   });
 }

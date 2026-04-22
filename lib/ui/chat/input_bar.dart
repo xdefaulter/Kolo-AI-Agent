@@ -1,8 +1,10 @@
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:file_picker/file_picker.dart';
+import '../../core/haptics.dart';
 
 /// Attachment data (image or file)
 class ChatAttachment {
@@ -40,6 +42,8 @@ class _InputBarState extends State<InputBar> {
   final FocusNode _focusNode = FocusNode();
   final ImagePicker _picker = ImagePicker();
   List<ChatAttachment> _attachments = [];
+  bool _isSending = false; // For send button bounce animation
+  bool _isListening = false; // Mic button state (STT integration)
 
   @override
   void dispose() {
@@ -52,11 +56,27 @@ class _InputBarState extends State<InputBar> {
     final text = _controller.text.trim();
     if (text.isEmpty && _attachments.isEmpty) return;
     if (widget.isLoading) return;
+
+    // Send button bounce animation
+    setState(() => _isSending = true);
+    Haptics.light();
     _controller.clear();
     final attachments = List<ChatAttachment>.from(_attachments);
     _attachments = [];
     widget.onSend(text, attachments: attachments.isEmpty ? null : attachments);
+
+    // Reset bounce after animation
+    Future.delayed(const Duration(milliseconds: 200), () {
+      if (mounted) setState(() => _isSending = false);
+    });
     _focusNode.requestFocus();
+  }
+
+  void _toggleMic() {
+    Haptics.selection();
+    setState(() => _isListening = !_isListening);
+    // TODO: Wire up speech_to_text when STT is ready
+    // For now, just toggle the visual state
   }
 
   Future<void> _pickImage(ImageSource source) async {
@@ -81,7 +101,11 @@ class _InputBarState extends State<InputBar> {
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to pick image: $e'), duration: const Duration(seconds: 2)),
+          SnackBar(
+            content: Text('Failed to pick image: $e'),
+            duration: const Duration(seconds: 2),
+            behavior: SnackBarBehavior.floating,
+          ),
         );
       }
     }
@@ -112,7 +136,11 @@ class _InputBarState extends State<InputBar> {
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to pick file: $e'), duration: const Duration(seconds: 2)),
+          SnackBar(
+            content: Text('Failed to pick file: $e'),
+            duration: const Duration(seconds: 2),
+            behavior: SnackBarBehavior.floating,
+          ),
         );
       }
     }
@@ -158,19 +186,46 @@ class _InputBarState extends State<InputBar> {
             // Attachment previews
             if (_attachments.isNotEmpty)
               Container(
-                height: 72,
+                height: 76,
                 margin: const EdgeInsets.only(bottom: 8),
-                child: ListView.separated(
-                  scrollDirection: Axis.horizontal,
-                  itemCount: _attachments.length,
-                  separatorBuilder: (_, __) => const SizedBox(width: 8),
-                  itemBuilder: (context, index) {
-                    final att = _attachments[index];
-                    return _AttachmentChip(
-                      attachment: att,
-                      onRemove: () => setState(() => _attachments.removeAt(index)),
-                    );
-                  },
+                child: Stack(
+                  children: [
+                    ListView.separated(
+                      scrollDirection: Axis.horizontal,
+                      itemCount: _attachments.length,
+                      separatorBuilder: (_, __) => const SizedBox(width: 8),
+                      itemBuilder: (context, index) {
+                        final att = _attachments[index];
+                        return _AttachmentChip(
+                          attachment: att,
+                          onRemove: () {
+                            Haptics.light();
+                            setState(() => _attachments.removeAt(index));
+                          },
+                        );
+                      },
+                    ),
+                    // Count badge overlay
+                    if (_attachments.length > 3)
+                      Positioned(
+                        right: 0,
+                        top: 0,
+                        bottom: 0,
+                        child: Center(
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: cs.primary.withValues(alpha: 0.9),
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: Text(
+                              '+${_attachments.length - 3}',
+                              style: TextStyle(fontSize: 11, color: cs.onPrimary, fontWeight: FontWeight.w600),
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
                 ),
               ),
             Row(
@@ -181,7 +236,7 @@ class _InputBarState extends State<InputBar> {
                   icon: Icon(Icons.attach_file, color: widget.isLoading ? cs.onSurface.withValues(alpha: 0.3) : cs.primary),
                   tooltip: 'Attach',
                   padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
+                  constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
                 ),
                 Expanded(
                   child: TextField(
@@ -193,17 +248,19 @@ class _InputBarState extends State<InputBar> {
                     textInputAction: TextInputAction.newline,
                     decoration: InputDecoration(
                       hintText: widget.isLoading ? 'Thinking...' : 'Message Kolo...',
+                      filled: true,
+                      fillColor: cs.surfaceContainerLow.withValues(alpha: 0.7),
                       border: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(24),
-                        borderSide: BorderSide(color: cs.outline.withValues(alpha: 0.3)),
+                        borderSide: BorderSide(color: cs.outline.withValues(alpha: 0.2)),
                       ),
                       enabledBorder: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(24),
-                        borderSide: BorderSide(color: cs.outline.withValues(alpha: 0.3)),
+                        borderSide: BorderSide(color: cs.outline.withValues(alpha: 0.2)),
                       ),
                       focusedBorder: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(24),
-                        borderSide: BorderSide(color: cs.primary),
+                        borderSide: BorderSide(color: cs.primary, width: 1.5),
                       ),
                       contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
                     ),
@@ -211,6 +268,27 @@ class _InputBarState extends State<InputBar> {
                   ),
                 ),
                 const SizedBox(width: 8),
+                // Mic button (STT)
+                if (!widget.isLoading)
+                  AnimatedContainer(
+                    duration: const Duration(milliseconds: 200),
+                    decoration: BoxDecoration(
+                      color: _isListening ? Colors.red.shade700 : cs.surfaceContainerHighest,
+                      shape: BoxShape.circle,
+                    ),
+                    child: IconButton(
+                      onPressed: _toggleMic,
+                      icon: Icon(
+                        _isListening ? Icons.mic : Icons.mic_none,
+                        color: _isListening ? Colors.white : cs.onSurface.withValues(alpha: 0.6),
+                        size: 20,
+                      ),
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
+                      tooltip: _isListening ? 'Stop listening' : 'Voice input',
+                    ),
+                  ),
+                // Send / Cancel button
                 if (widget.isLoading && widget.onCancel != null)
                   Container(
                     decoration: BoxDecoration(
@@ -218,32 +296,33 @@ class _InputBarState extends State<InputBar> {
                       shape: BoxShape.circle,
                     ),
                     child: IconButton(
-                      onPressed: widget.onCancel,
+                      onPressed: () {
+                        Haptics.medium();
+                        widget.onCancel!();
+                      },
                       icon: const Icon(Icons.stop, color: Colors.white),
                       tooltip: 'Stop',
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
                     ),
                   )
-                else
-                  Container(
-                    decoration: BoxDecoration(
-                      color: widget.isLoading
-                          ? cs.surfaceContainerHighest
-                          : cs.primary,
-                      shape: BoxShape.circle,
-                    ),
-                    child: IconButton(
-                      onPressed: widget.isLoading ? null : _handleSend,
-                      icon: widget.isLoading
-                          ? SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: cs.onSurface.withValues(alpha: 0.5),
-                              ),
-                            )
-                          : Icon(Icons.send, color: cs.onPrimary),
-                      color: cs.onPrimary,
+                else if (!widget.isLoading)
+                  AnimatedScale(
+                    scale: _isSending ? 0.85 : 1.0,
+                    duration: const Duration(milliseconds: 150),
+                    curve: Curves.easeOutBack,
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: cs.primary,
+                        shape: BoxShape.circle,
+                      ),
+                      child: IconButton(
+                        onPressed: _handleSend,
+                        icon: Icon(Icons.send, color: cs.onPrimary, size: 20),
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
+                        tooltip: 'Send',
+                      ),
                     ),
                   ),
               ],
@@ -255,29 +334,84 @@ class _InputBarState extends State<InputBar> {
   }
 
   void _showAttachMenu() {
+    Haptics.light();
     showModalBottomSheet(
       context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
       builder: (ctx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: const Icon(Icons.camera_alt),
-              title: const Text('Camera'),
-              onTap: () { Navigator.pop(ctx); _pickImage(ImageSource.camera); },
-            ),
-            ListTile(
-              leading: const Icon(Icons.photo_library),
-              title: const Text('Photo Gallery'),
-              onTap: () { Navigator.pop(ctx); _pickImage(ImageSource.gallery); },
-            ),
-            ListTile(
-              leading: const Icon(Icons.insert_drive_file),
-              title: const Text('File (text, PDF, code)'),
-              onTap: () { Navigator.pop(ctx); _pickFile(); },
-            ),
-          ],
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 40,
+                height: 4,
+                margin: const EdgeInsets.only(bottom: 16),
+                decoration: BoxDecoration(
+                  color: Theme.of(ctx).colorScheme.onSurface.withValues(alpha: 0.2),
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  _attachOption(
+                    context: ctx,
+                    icon: Icons.camera_alt,
+                    label: 'Camera',
+                    color: Colors.blue,
+                    onTap: () { Navigator.pop(ctx); _pickImage(ImageSource.camera); },
+                  ),
+                  _attachOption(
+                    context: ctx,
+                    icon: Icons.photo_library,
+                    label: 'Gallery',
+                    color: Colors.green,
+                    onTap: () { Navigator.pop(ctx); _pickImage(ImageSource.gallery); },
+                  ),
+                  _attachOption(
+                    context: ctx,
+                    icon: Icons.insert_drive_file,
+                    label: 'File',
+                    color: Colors.orange,
+                    onTap: () { Navigator.pop(ctx); _pickFile(); },
+                  ),
+                ],
+              ),
+            ],
+          ),
         ),
+      ),
+    );
+  }
+
+  Widget _attachOption({
+    required BuildContext context,
+    required IconData icon,
+    required String label,
+    required Color color,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 56,
+            height: 56,
+            decoration: BoxDecoration(
+              color: color.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Icon(icon, color: color, size: 28),
+          ),
+          const SizedBox(height: 8),
+          Text(label, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
+        ],
       ),
     );
   }
@@ -338,18 +472,19 @@ class _AttachmentChip extends StatelessWidget {
             ),
           ),
         ),
-        // Remove button
+        // Remove button — larger for better tap target
         Positioned(
           top: -6,
           right: -6,
           child: GestureDetector(
             onTap: onRemove,
             child: Container(
+              padding: const EdgeInsets.all(2),
               decoration: BoxDecoration(
                 color: cs.error,
                 shape: BoxShape.circle,
               ),
-              child: Icon(Icons.close, size: 16, color: cs.onError),
+              child: Icon(Icons.close, size: 14, color: cs.onError),
             ),
           ),
         ),
@@ -365,4 +500,3 @@ class _AttachmentChip extends StatelessWidget {
     );
   }
 }
-

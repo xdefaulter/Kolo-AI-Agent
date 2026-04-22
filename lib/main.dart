@@ -34,16 +34,8 @@ class KoloApp extends ConsumerWidget {
     return MaterialApp(
       title: 'Kolo AI Agent',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorSchemeSeed: const Color(0xFF6744A4),
-        useMaterial3: true,
-        brightness: Brightness.light,
-      ),
-      darkTheme: ThemeData(
-        colorSchemeSeed: const Color(0xFF6744A4),
-        useMaterial3: true,
-        brightness: Brightness.dark,
-      ),
+      theme: buildLightTheme(),
+      darkTheme: buildDarkTheme(),
       themeMode: themeMode,
       home: const ChatScreen(),
     );

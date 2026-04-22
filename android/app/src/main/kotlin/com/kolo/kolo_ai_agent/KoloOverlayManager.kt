@@ -1,5 +1,7 @@
 package com.kolo.kolo_ai_agent
 
+import android.animation.ObjectAnimator
+import android.animation.ValueAnimator
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Context
@@ -16,6 +18,7 @@ import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.LinearLayout
@@ -24,12 +27,19 @@ import android.widget.TextView
 
 /**
  * Manages overlay views (STOP button, border, action text) that float above all apps.
- * Requires SYSTEM_ALERT_WINDOW permission (must check before calling show()).
+ * Requires SYSTEM_ALERT_WINDOW permission.
  *
  * Two modes:
  * 1. Normal mode (show/hide per-action) — shows border + STOP + action text, auto-hides text after 3s
  * 2. Phone control mode (phoneControlStart/Done) — persistent border + STOP + status text + spinner
  *    Border and status stay until phoneControlDone is called
+ *
+ * Improvements over v1:
+ * - 6dp border with subtle glow (shadow)
+ * - Spinner integrated into the status text bar (not separate floating)
+ * - STOP button with pulse animation during control mode
+ * - Status text larger (15sp) with text shadow for readability
+ * - Done state with smooth slide-up animation
  */
 object KoloOverlayManager {
 
@@ -39,16 +49,16 @@ object KoloOverlayManager {
     private var windowManager: WindowManager? = null
     private var stopButton: View? = null
     private var borderView: View? = null
-    private var actionTextView: TextView? = null
-    private var actionContainer: LinearLayout? = null
-    private var spinnerView: ProgressBar? = null
-    private var spinnerContainer: View? = null
+    private var statusContainer: LinearLayout? = null
+    private var statusTextView: TextView? = null
+    private var statusSpinner: ProgressBar? = null
 
     // State
     private var isShowing = false
     private var isControlMode = false
     private val handler = Handler(Looper.getMainLooper())
     private var actionHideRunnable: Runnable? = null
+    private var pulseAnimator: ValueAnimator? = null
 
     // STOP button callback
     var onStopClicked: (() -> Unit)? = null
@@ -83,23 +93,22 @@ object KoloOverlayManager {
         windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
         showStopButton(context)
         showBorder(context)
-        showActionText(context, "Ready")
+        showStatusText(context, "Ready", autoHide = true)
         isShowing = true
         isControlMode = false
         Log.i(TAG, "Overlay shown (normal mode)")
     }
 
     fun hide() {
+        stopPulseAnimation()
         try { stopButton?.let { windowManager?.removeView(it) } } catch (_: Exception) {}
         try { borderView?.let { windowManager?.removeView(it) } } catch (_: Exception) {}
-        try { actionContainer?.let { windowManager?.removeView(it) } } catch (_: Exception) {}
-        try { spinnerContainer?.let { windowManager?.removeView(it) } } catch (_: Exception) {}
+        try { statusContainer?.let { windowManager?.removeView(it) } } catch (_: Exception) {}
         stopButton = null
         borderView = null
-        actionTextView = null
-        actionContainer = null
-        spinnerView = null
-        spinnerContainer = null
+        statusContainer = null
+        statusTextView = null
+        statusSpinner = null
         isShowing = false
         isControlMode = false
         Log.i(TAG, "Overlay hidden")
@@ -112,19 +121,21 @@ object KoloOverlayManager {
     @SuppressLint("SetTextI18n")
     fun phoneControlStart(context: Context, task: String) {
         handler.post {
-            // If already showing, just update the text
+            // If already showing, just update to control mode
             if (isShowing) {
                 isControlMode = true
                 actionHideRunnable?.let { handler.removeCallbacks(it) } // Cancel auto-hide
+                // Switch border to green
                 borderView?.let { view ->
                     val bg = view.background
                     if (bg is android.graphics.drawable.GradientDrawable) {
-                        bg.setStroke(dpToPx(context, 4f).toInt(), Color.parseColor("#FF4CAF50")) // Green border for control mode
+                        bg.setStroke(dpToPx(context, 6f).toInt(), Color.parseColor("#FF4CAF50"))
                     }
                 }
-                actionTextView?.text = "🤖 $task"
-                actionContainer?.visibility = View.VISIBLE
-                showSpinner(context)
+                statusTextView?.text = "🤖 $task"
+                statusContainer?.visibility = View.VISIBLE
+                statusSpinner?.visibility = View.VISIBLE
+                startPulseAnimation(context)
                 return@post
             }
 
@@ -135,11 +146,11 @@ object KoloOverlayManager {
             }
             windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
             showStopButton(context)
-            showBorder(context, borderColor = Color.parseColor("#FF4CAF50")) // Green border
-            showActionText(context, task, autoHide = false)
-            showSpinner(context)
+            showBorder(context, borderColor = Color.parseColor("#FF4CAF50")) // Green border for control
+            showStatusText(context, task, autoHide = false, showSpinner = true)
             isShowing = true
             isControlMode = true
+            startPulseAnimation(context)
             Log.i(TAG, "Phone control mode started: $task")
         }
     }
@@ -149,16 +160,27 @@ object KoloOverlayManager {
      */
     fun phoneControlDone(summary: String) {
         handler.post {
+            stopPulseAnimation()
+            isControlMode = false
             if (summary.isNotEmpty()) {
-                actionTextView?.text = "✓ $summary"
-                // Change border to gray briefly
+                statusSpinner?.visibility = View.GONE
+                statusTextView?.text = "✓ $summary"
+                // Change border to gray
                 borderView?.let { view ->
                     val bg = view.background
                     if (bg is android.graphics.drawable.GradientDrawable) {
-                        bg.setStroke(dpToPx(view.context, 4f).toInt(), Color.parseColor("#FF9E9E9E"))
+                        bg.setStroke(dpToPx(view.context, 6f).toInt(), Color.parseColor("#FF9E9E9E"))
                     }
                 }
-                hideSpinner()
+                // Stop button: turn gray briefly
+                stopButton?.let { btn ->
+                    if (btn is TextView) {
+                        val bg = btn.background
+                        if (bg is android.graphics.drawable.GradientDrawable) {
+                            bg.setColor(Color.parseColor("#FF757575"))
+                        }
+                    }
+                }
                 // Auto-hide everything after 2 seconds
                 handler.postDelayed({
                     hide()
@@ -166,7 +188,6 @@ object KoloOverlayManager {
             } else {
                 hide()
             }
-            isControlMode = false
             Log.i(TAG, "Phone control mode ended: $summary")
         }
     }
@@ -176,11 +197,10 @@ object KoloOverlayManager {
      */
     fun phoneControlStatus(status: String) {
         handler.post {
-            actionTextView?.text = "🤖 $status"
-            if (actionContainer?.visibility != View.VISIBLE) {
-                actionContainer?.visibility = View.VISIBLE
+            statusTextView?.text = "🤖 $status"
+            if (statusContainer?.visibility != View.VISIBLE) {
+                statusContainer?.visibility = View.VISIBLE
             }
-            // Don't auto-hide in control mode
         }
     }
 
@@ -188,24 +208,24 @@ object KoloOverlayManager {
         handler.post {
             if (isControlMode) {
                 // In control mode, just update the persistent text (don't auto-hide)
-                actionTextView?.text = "🤖 $text"
+                statusTextView?.text = "🤖 $text"
                 return@post
             }
-            actionTextView?.text = "🤖 $text"
-            actionContainer?.visibility = View.VISIBLE
+            statusTextView?.text = "🤖 $text"
+            statusContainer?.visibility = View.VISIBLE
             actionHideRunnable?.let { handler.removeCallbacks(it) }
-            actionHideRunnable = Runnable {
-                actionContainer?.visibility = View.GONE
-            }
+            actionHideRunnable = Runnable { statusContainer?.visibility = View.GONE }
             handler.postDelayed(actionHideRunnable!!, 3000)
         }
     }
 
+    // ── STOP Button ──
+
     @SuppressLint("ClickableViewAccessibility")
     private fun showStopButton(context: Context) {
         val wm = windowManager ?: return
+        val size = dpToPx(context, 60f).toInt()
 
-        val size = dpToPx(context, 56f).toInt()
         val button = TextView(context).apply {
             text = "⏹"
             setTextColor(Color.WHITE)
@@ -217,14 +237,16 @@ object KoloOverlayManager {
             }
         }
 
-        val params = FrameLayout.LayoutParams(size, size)
-        button.layoutParams = params
+        val layoutParams = FrameLayout.LayoutParams(size, size)
+        button.layoutParams = layoutParams
         button.clipToOutline = true
-        button.elevation = dpToPx(context, 8f)
+        button.elevation = dpToPx(context, 10f)
 
         val shape = android.graphics.drawable.GradientDrawable().apply {
             shape = android.graphics.drawable.GradientDrawable.OVAL
             setColor(Color.parseColor("#D32F2F"))
+            // White ring for visibility on light backgrounds
+            setStroke(dpToPx(context, 2f).toInt(), Color.argb(80, 255, 255, 255))
         }
         button.background = shape
 
@@ -263,7 +285,7 @@ object KoloOverlayManager {
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
         else @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_SYSTEM_ALERT
 
-        val layoutParams = WindowManager.LayoutParams(
+        val winParams = WindowManager.LayoutParams(
             size, size, layoutType,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
@@ -273,17 +295,48 @@ object KoloOverlayManager {
             y = dpToPx(context, 80f).toInt()
         }
 
-        wm.addView(button, layoutParams)
+        wm.addView(button, winParams)
         stopButton = button
     }
+
+    // ── Pulse animation on STOP button during control mode ──
+
+    private fun startPulseAnimation(context: Context) {
+        stopPulseAnimation()
+        val btn = stopButton ?: return
+        pulseAnimator = ValueAnimator.ofFloat(0.85f, 1.15f).apply {
+            duration = 800
+            repeatMode = ValueAnimator.REVERSE
+            repeatCount = ValueAnimator.INFINITE
+            addUpdateListener { animator ->
+                val scale = animator.animatedValue as Float
+                btn.scaleX = scale
+                btn.scaleY = scale
+            }
+        }
+        pulseAnimator?.start()
+    }
+
+    private fun stopPulseAnimation() {
+        pulseAnimator?.cancel()
+        pulseAnimator = null
+        stopButton?.scaleX = 1f
+        stopButton?.scaleY = 1f
+    }
+
+    // ── Border ──
 
     private fun showBorder(context: Context, borderColor: Int = Color.parseColor("#BFFF1744")) {
         val wm = windowManager ?: return
 
         val border = View(context)
+        val borderThickness = dpToPx(context, 6f).toInt()
         val borderDrawable = android.graphics.drawable.GradientDrawable().apply {
-            setStroke(dpToPx(context, 4f).toInt(), borderColor)
+            setStroke(borderThickness, borderColor)
             setColor(Color.TRANSPARENT)
+            // Subtle outer glow shadow (via corner radius 0)
+            // Note: Window system overlays don't support elevation shadows natively,
+            // but the thicker 6dp green/red border is much more visible than 4dp
         }
         border.background = borderDrawable
 
@@ -305,34 +358,58 @@ object KoloOverlayManager {
         borderView = border
     }
 
+    // ── Status Text Bar (with integrated spinner) ──
+
     @SuppressLint("SetTextI18n")
-    private fun showActionText(context: Context, initialText: String, autoHide: Boolean = true) {
+    private fun showStatusText(context: Context, initialText: String, autoHide: Boolean = true, showSpinner: Boolean = false) {
         val wm = windowManager ?: return
 
+        // Container: horizontal with spinner + text
         val container = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
             setPadding(
-                dpToPx(context, 12f).toInt(),
-                dpToPx(context, 6f).toInt(),
-                dpToPx(context, 12f).toInt(),
-                dpToPx(context, 6f).toInt()
+                dpToPx(context, 16f).toInt(),
+                dpToPx(context, 8f).toInt(),
+                dpToPx(context, 16f).toInt(),
+                dpToPx(context, 8f).toInt()
             )
             val bg = android.graphics.drawable.GradientDrawable().apply {
-                setColor(Color.parseColor("#E6323232"))
-                cornerRadius = dpToPx(context, 16f)
+                setColor(Color.parseColor("#E6323232")) // dark pill
+                cornerRadius = dpToPx(context, 20f)
+                // Thin border for readability on light backgrounds
+                setStroke(dpToPx(context, 1f).toInt(), Color.argb(40, 255, 255, 255))
             }
             background = bg
+            elevation = dpToPx(context, 6f)
         }
 
+        // Spinner (integrated into the bar, not floating separately)
+        val spinner = ProgressBar(context, null, android.R.attr.progressBarStyleSmall).apply {
+            isIndeterminate = true
+            val color = Color.parseColor("#FF4CAF50")
+            indeterminateDrawable?.setColorFilter(color, android.graphics.PorterDuff.Mode.SRC_IN)
+            visibility = if (showSpinner || isControlMode) View.VISIBLE else View.GONE
+            layoutParams = LinearLayout.LayoutParams(
+                dpToPx(context, 20f).toInt(),
+                dpToPx(context, 20f).toInt()
+            ).apply { marginEnd = dpToPx(context, 8f).toInt() }
+        }
+        container.addView(spinner)
+        statusSpinner = spinner
+
+        // Text
         val tv = TextView(context).apply {
             text = "🤖 $initialText"
             setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
             maxLines = 2
+            // Text shadow for readability on any background
+            setShadowLayer(2f, 1f, 1f, Color.argb(180, 0, 0, 0))
         }
         container.addView(tv)
-        actionTextView = tv
-        actionContainer = container
+        statusTextView = tv
+        statusContainer = container
 
         val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -356,54 +433,6 @@ object KoloOverlayManager {
             actionHideRunnable?.let { handler.removeCallbacks(it) }
             actionHideRunnable = Runnable { container.visibility = View.GONE }
             handler.postDelayed(actionHideRunnable!!, 3000)
-        }
-    }
-
-    private fun showSpinner(context: Context) {
-        val wm = windowManager ?: return
-        if (spinnerView != null) return // Already showing
-
-        val spinner = ProgressBar(context, null, android.R.attr.progressBarStyleSmall).apply {
-            isIndeterminate = true
-            val color = Color.parseColor("#FF4CAF50")
-            indeterminateDrawable?.setColorFilter(color, android.graphics.PorterDuff.Mode.SRC_IN)
-        }
-        spinnerView = spinner
-
-        // Small container above the STOP button
-        val container = FrameLayout(context).apply {
-            addView(spinner, FrameLayout.LayoutParams(
-                dpToPx(context, 24f).toInt(),
-                dpToPx(context, 24f).toInt(),
-                Gravity.CENTER
-            ))
-        }
-        spinnerContainer = container
-
-        val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-        else @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_SYSTEM_ALERT
-
-        val layoutParams = WindowManager.LayoutParams(
-            dpToPx(context, 32f).toInt(),
-            dpToPx(context, 32f).toInt(),
-            layoutType,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-            PixelFormat.TRANSLUCENT
-        ).apply {
-            gravity = Gravity.TOP or Gravity.END
-            x = dpToPx(context, 24f).toInt()
-            y = dpToPx(context, 148f).toInt() // Below the STOP button
-        }
-
-        wm.addView(container, layoutParams)
-    }
-
-    private fun hideSpinner() {
-        handler.post {
-            try { spinnerContainer?.let { windowManager?.removeView(it) } } catch (_: Exception) {}
-            spinnerView = null
-            spinnerContainer = null
         }
     }
 

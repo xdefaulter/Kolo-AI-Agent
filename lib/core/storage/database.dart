@@ -50,6 +50,16 @@ class AppDatabase {
     if (await file.exists()) await file.delete();
   }
 
+  Future<void> deleteAllChats() async {
+    final chats = await getAllChats();
+    final path = await _path;
+    for (final chat in chats) {
+      final file = File('$path/messages_${chat.id}.json');
+      if (await file.exists()) await file.delete();
+    }
+    await _writeChats([]);
+  }
+
   Future<void> _writeChats(List<ChatEntry> chats) async {
     final path = await _path;
     final file = File('$path/chats.json');
