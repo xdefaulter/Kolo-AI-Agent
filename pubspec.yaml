@@ -1,0 +1,77 @@
+name: kolo_ai_agent
+description: Thin chat client + autonomous AI agent with unlimited tools
+publish_to: 'none'
+version: 0.1.0
+
+environment:
+  sdk: ^3.11.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # State management
+  flutter_riverpod: ^2.5.0
+
+  # Networking
+  dio: ^5.4.0
+
+  # Storage
+  shared_preferences: ^2.2.0
+  flutter_secure_storage: ^9.0.0
+  path_provider: ^2.1.0
+  path: ^1.9.0
+
+  # UI
+  flutter_markdown: ^0.7.0
+  google_fonts: ^6.1.0
+
+  # Platform
+  permission_handler: ^11.0.0
+  url_launcher: ^6.2.0
+  share_plus: ^12.0.2
+
+  # Utility
+  uuid: ^4.3.0
+  qr_flutter: ^4.1.0
+
+  # Local server
+  shelf: ^1.4.0
+  shelf_router: ^1.1.0
+  crypto: ^3.0.7
+
+  # Platform capabilities
+  geolocator: ^13.0.0
+  connectivity_plus: ^6.0.0
+  battery_plus: ^4.0.0
+  flutter_tts: ^4.2.0
+  speech_to_text: ^7.0.0
+  flutter_vibrate: ^1.1.0
+  exif: ^3.3.0
+
+  # Crash reporting
+  firebase_core: ^3.0.0
+  firebase_crashlytics: ^4.0.0
+  image_picker: ^1.2.1
+  file_picker: ^8.0.7
+  mime: ^1.0.6
+  geocoding: ^4.0.0
+  flutter_contacts: ^2.0.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+  flutter_launcher_icons: ^0.14.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/icon/app_icon.png"
+  adaptive_icon_background: "#6750A4"
+  adaptive_icon_foreground: "assets/icon/app_icon_foreground.png"

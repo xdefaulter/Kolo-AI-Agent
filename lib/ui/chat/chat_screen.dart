@@ -1,0 +1,857 @@
+import 'dart:convert';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:uuid/uuid.dart';
+import 'package:share_plus/share_plus.dart';
+import 'message_bubble.dart';
+import 'input_bar.dart';
+import 'tool_result_card.dart';
+import '../../core/agent/agent_session.dart';
+import '../../core/agent/conversation_manager.dart';
+import '../../core/storage/database.dart';
+import '../../core/tools/tool_bootstrap.dart';
+import '../../core/tools/tool_registry.dart';
+import '../../core/tools/tool_base.dart';
+import '../../core/theme_provider.dart';
+import '../../core/providers.dart';
+import '../../core/providers_state.dart';
+import '../settings/settings_screen.dart';
+import '../settings/tools_permission_screen.dart';
+
+const _uuid = Uuid();
+
+// Tool registry — initialized once
+final toolRegistryProvider = Provider<ToolRegistry>((ref) => bootstrapTools());
+
+// Chat messages UI state
+final chatMessagesProvider = StateProvider<List<ChatMessageUI>>((ref) => []);
+
+// Chat list state
+final chatListProvider = StateProvider<List<ChatEntry>>((ref) => []);
+
+class ChatScreen extends ConsumerStatefulWidget {
+  const ChatScreen({super.key});
+
+  @override
+  ConsumerState<ChatScreen> createState() => _ChatScreenState();
+}
+
+class _ChatScreenState extends ConsumerState<ChatScreen> {
+  final ScrollController _scrollController = ScrollController();
+  bool _sessionInitialized = false;
+  String? _lastErrorMessage;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _initSession();
+      _loadChats();
+    });
+  }
+
+  void _initSession() {
+    if (_sessionInitialized) return;
+    final registry = ref.read(toolRegistryProvider);
+    final notifier = ref.read(agentSessionProvider.notifier);
+    notifier.init(registry);
+    // Load persisted permission settings
+    notifier.session?.permissionManager.loadPersistedSettings();
+    _sessionInitialized = true;
+  }
+
+  Future<void> _loadChats() async {
+    final chats = await AppDatabase.instance.getAllChats();
+    ref.read(chatListProvider.notifier).state = chats;
+    if (chats.isNotEmpty) {
+      await _loadChat(chats.first);
+    }
+  }
+
+  Future<void> _loadChat(ChatEntry chat) async {
+    ref.read(activeChatIdProvider.notifier).state = chat.id;
+    final messages = await AppDatabase.instance.getMessages(chat.id);
+    final uiMessages = messages.map((m) => ChatMessageUI(
+      role: m.role,
+      content: m.content,
+      toolName: m.toolName,
+      toolSuccess: m.toolSuccess,
+    )).toList();
+    ref.read(chatMessagesProvider.notifier).state = uiMessages;
+
+    // Replay messages into the conversation manager so context is preserved
+    final chatMessages = messages.map((m) => ChatMessage(
+      role: m.role,
+      content: m.content,
+      toolCallId: m.toolCallId,
+      toolCalls: m.toolCalls != null
+          ? (m.toolCalls is List ? m.toolCalls as List<Map<String, dynamic>> : null)
+          : null,
+    )).toList();
+    ref.read(agentSessionProvider.notifier).loadMessages(chatMessages);
+
+    _scrollToBottom();
+  }
+
+  Future<void> _startNewChat() async {
+    final chatId = _uuid.v4();
+    final chat = ChatEntry(id: chatId);
+    await AppDatabase.instance.saveChat(chat);
+    ref.read(activeChatIdProvider.notifier).state = chatId;
+    ref.read(chatMessagesProvider.notifier).state = [];
+    ref.read(agentSessionProvider.notifier).clearConversation();
+    final chats = await AppDatabase.instance.getAllChats();
+    ref.read(chatListProvider.notifier).state = chats;
+  }
+
+  Future<void> _deleteChat(String chatId) async {
+    await AppDatabase.instance.deleteChat(chatId);
+    final chats = await AppDatabase.instance.getAllChats();
+    ref.read(chatListProvider.notifier).state = chats;
+    if (chatId == ref.read(activeChatIdProvider)) {
+      if (chats.isNotEmpty) {
+        await _loadChat(chats.first);
+      } else {
+        await _startNewChat();
+      }
+    }
+  }
+
+  Future<void> _sendMessage(String text, {List<ChatAttachment>? attachments}) async {
+    if (text.trim().isEmpty && (attachments == null || attachments.isEmpty)) return;
+
+    _lastErrorMessage = null;
+
+    // Build display text (include attachment names)
+    final displayText = text.isEmpty && attachments != null && attachments.isNotEmpty
+        ? '[${attachments.map((a) => a.name).join(', ')}]'
+        : text;
+
+    // Compose full content for LLM (include text + file contents)
+    String fullContent = text;
+    if (attachments != null && attachments.isNotEmpty) {
+      for (final att in attachments) {
+        if (att.mimeType.startsWith('image/')) {
+          // Images are handled separately via vision content
+          continue;
+        }
+        // For text files, include content inline
+        if (att.mimeType.startsWith('text/') || att.mimeType == 'application/json') {
+          try {
+            final decoded = String.fromCharCodes(base64Decode(att.base64Data));
+            fullContent += '\n\n--- File: ${att.name} ---\n$decoded\n--- End of ${att.name} ---';
+          } catch (_) {}
+        } else if (att.mimeType == 'application/pdf') {
+          fullContent += '\n\n[Attached PDF: ${att.name} (${(att.base64Data.length * 0.75 / 1024).round()}KB)]';
+        } else {
+          fullContent += '\n\n[Attached file: ${att.name} (${att.mimeType})]';
+        }
+      }
+    }
+
+    // Add user message to UI immediately
+    final messages = List<ChatMessageUI>.from(ref.read(chatMessagesProvider));
+    messages.add(ChatMessageUI(
+      role: 'user',
+      content: displayText,
+      imagePaths: attachments?.where((a) => a.mimeType.startsWith('image/')).map((a) => a.filePath).whereType<String>().toList(),
+    ));
+    ref.read(chatMessagesProvider.notifier).state = messages;
+
+    // Persist user message
+    final chatId = ref.read(activeChatIdProvider);
+    await AppDatabase.instance.addMessage(chatId, MessageEntry(
+      id: _uuid.v4(),
+      chatId: chatId,
+      role: 'user',
+      content: displayText,
+    ));
+
+    _scrollToBottom();
+
+    // Set permission callbacks fresh (avoids stale context)
+    final notifier = ref.read(agentSessionProvider.notifier);
+    notifier.setPermissionCallbacks(
+      promptUser: (toolName, params, permission) => _showPermissionDialog(
+        toolName: toolName,
+        params: params,
+        permission: permission,
+      ),
+      biometricPrompt: (toolName, params, permission) => _showPermissionDialog(
+        toolName: toolName,
+        params: params,
+        permission: permission,
+        isDangerous: true,
+      ),
+    );
+
+    // Build vision attachments for the LLM
+    List<ChatAttachment>? imageAttachments;
+    if (attachments != null) {
+      imageAttachments = attachments.where((a) => a.mimeType.startsWith('image/')).toList();
+      // If there are text files that were inlined, fullContent already has them
+    }
+
+    // Run agent loop with attachments
+    notifier.sendMessage(fullContent, imageAttachments: imageAttachments);
+
+    // Auto-title: update chat title from first user message
+    final chatList = ref.read(chatListProvider);
+    final currentChat = chatList.where((c) => c.id == chatId).firstOrNull;
+    if (currentChat != null && currentChat.title == 'New Chat') {
+      currentChat.title = text.length > 50 ? '${text.substring(0, 50)}...' : text;
+      await AppDatabase.instance.saveChat(currentChat);
+      final chats = await AppDatabase.instance.getAllChats();
+      ref.read(chatListProvider.notifier).state = chats;
+    }
+  }
+
+  /// Retry the last user message (re-send after error)
+  void _retryLastMessage() {
+    final messages = ref.read(chatMessagesProvider);
+    // Find the last user message
+    final lastUserMsg = messages.lastWhere(
+      (m) => m.role == 'user',
+      orElse: () => ChatMessageUI(role: 'user', content: ''),
+    );
+    if (lastUserMsg.content.isNotEmpty) {
+      // Remove the error message
+      final updated = List<ChatMessageUI>.from(messages);
+      if (updated.isNotEmpty && updated.last.role == 'assistant' && _lastErrorMessage != null) {
+        updated.removeLast();
+        ref.read(chatMessagesProvider.notifier).state = updated;
+      }
+      _sendMessage(lastUserMsg.content);
+    }
+  }
+
+  /// Edit the last user message — populate input bar with the text
+  void _editLastMessage() {
+    final messages = ref.read(chatMessagesProvider);
+    final lastUserIdx = messages.lastIndexWhere((m) => m.role == 'user');
+    if (lastUserIdx >= 0) {
+      // Remove everything from that user message onward
+      final updated = messages.sublist(0, lastUserIdx);
+      ref.read(chatMessagesProvider.notifier).state = updated;
+      // The user can type in the input bar and send
+    }
+  }
+
+  void _cancelRun() {
+    ref.read(agentSessionProvider.notifier).cancel();
+  }
+
+  /// Share a message's content
+  void _shareMessage(String content) {
+    Share.share(content);
+  }
+
+  /// Copy a message's content to clipboard
+  void _copyMessage(String content) {
+    Clipboard.setData(ClipboardData(text: content));
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Copied to clipboard'), duration: Duration(seconds: 1)),
+    );
+  }
+
+  Future<bool> _showPermissionDialog({
+    required String toolName,
+    required Map<String, dynamic> params,
+    required ToolPermission permission,
+    bool isDangerous = false,
+  }) async {
+    if (!mounted) return false;
+    bool alwaysAllow = false;
+    final result = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          icon: Icon(
+            isDangerous ? Icons.warning_amber_rounded : Icons.shield_outlined,
+            color: isDangerous ? Colors.orange : Colors.blue,
+          ),
+          title: Text(isDangerous ? 'Dangerous Action' : 'Permission Required'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Tool "$toolName" wants to execute:'),
+              const SizedBox(height: 8),
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: Theme.of(ctx).colorScheme.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                constraints: const BoxConstraints(maxHeight: 120),
+                child: SingleChildScrollView(
+                  child: Text(
+                    params.entries.map((e) => '${e.key}: ${e.value}').join('\n'),
+                    style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+                  ),
+                ),
+              ),
+              if (isDangerous) ...[
+                const SizedBox(height: 12),
+                Text(
+                  'This is a dangerous operation. Are you sure?',
+                  style: TextStyle(color: Colors.orange.shade300, fontWeight: FontWeight.w600),
+                ),
+              ],
+              const SizedBox(height: 12),
+              CheckboxListTile(
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+                value: alwaysAllow,
+                onChanged: (v) => setDialogState(() => alwaysAllow = v ?? false),
+                title: const Text('Always allow this tool'),
+                subtitle: const Text('Don\'t ask again for this session'),
+                controlAffinity: ListTileControlAffinity.leading,
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Deny'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              style: isDangerous
+                  ? FilledButton.styleFrom(backgroundColor: Colors.orange.shade800)
+                  : null,
+              child: Text(isDangerous ? 'Allow (Dangerous)' : 'Allow'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (result == true && alwaysAllow) {
+      // Mark this tool as always-allowed in the session
+      final session = ref.read(agentSessionProvider.notifier).session;
+      session?.permissionManager.alwaysAllow(toolName);
+    }
+    return result ?? false;
+  }
+
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollController.hasClients) {
+        _scrollController.animateTo(
+          _scrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOut,
+        );
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final messages = ref.watch(chatMessagesProvider);
+    final sessionState = ref.watch(agentSessionProvider);
+
+    // Listen to session state changes for real-time UI updates
+    ref.listen<AgentSessionState>(agentSessionProvider, (prev, next) {
+      _onSessionStateChanged(prev, next);
+    });
+
+    return Scaffold(
+      appBar: AppBar(
+        leading: Builder(
+          builder: (ctx) => IconButton(
+            icon: const Icon(Icons.menu),
+            onPressed: () => Scaffold.of(ctx).openDrawer(),
+          ),
+        ),
+        title: _buildAppBarTitle(),
+        centerTitle: true,
+        actions: [
+          if (sessionState.isRunning)
+            IconButton(
+              icon: const Icon(Icons.stop_circle_outlined, color: Colors.red),
+              tooltip: 'Stop',
+              onPressed: _cancelRun,
+            ),
+          _buildModelSwitcher(),
+          IconButton(
+            icon: const Icon(Icons.settings),
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const SettingsScreen()),
+            ),
+          ),
+        ],
+      ),
+      drawer: _buildChatDrawer(),
+      body: Column(
+        children: [
+          Expanded(
+            child: messages.isEmpty
+                ? _buildEmptyState(context)
+                : ListView.builder(
+                    controller: _scrollController,
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                    itemCount: messages.length,
+                    itemBuilder: (context, index) {
+                      final msg = messages[index];
+                      if (msg.role == 'tool') {
+                        return ToolResultCard(
+                          toolName: msg.toolName ?? 'unknown',
+                          result: msg.content,
+                          success: msg.toolSuccess,
+                        );
+                      }
+                      // Check if this is the last assistant message and it's an error
+                      final isError = msg.role == 'assistant' && 
+                          msg.content.startsWith('Error:') && 
+                          index == messages.length - 1;
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          MessageBubble(
+                            role: msg.role,
+                            content: msg.content,
+                            thinkingContent: msg.thinkingContent,
+                            isStreaming: msg.isStreaming,
+                            imagePaths: msg.imagePaths,
+                          ),
+                          // Action buttons for messages
+                          if (msg.role == 'assistant' && !msg.isStreaming) ...[
+                            Padding(
+                              padding: const EdgeInsets.only(left: 48, bottom: 8),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  _actionChip(Icons.share_outlined, 'Share', () => _shareMessage(msg.content)),
+                                  if (isError) ...[
+                                    const SizedBox(width: 6),
+                                    _actionChip(Icons.refresh, 'Retry', _retryLastMessage),
+                                    const SizedBox(width: 6),
+                                    _actionChip(Icons.edit_outlined, 'Edit', _editLastMessage),
+                                  ],
+                                ],
+                              ),
+                            ),
+                          ],
+                          if (msg.role == 'user' && !msg.isStreaming) ...[
+                            Padding(
+                              padding: const EdgeInsets.only(left: 8, bottom: 8),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  _actionChip(Icons.copy, 'Copy', () => _copyMessage(msg.content)),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ],
+                      );
+                    },
+                  ),
+          ),
+          InputBar(
+            onSend: _sendMessage,
+            isLoading: sessionState.isRunning,
+            onCancel: sessionState.isRunning ? _cancelRun : null,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _actionChip(IconData icon, String label, VoidCallback onTap) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(16),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 14, color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.5)),
+            const SizedBox(width: 3),
+            Text(label, style: TextStyle(fontSize: 11, color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.5))),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// React to agent session state for real-time streaming UI
+  void _onSessionStateChanged(AgentSessionState? prev, AgentSessionState next) {
+    final chatId = ref.read(activeChatIdProvider);
+    final messages = List<ChatMessageUI>.from(ref.read(chatMessagesProvider));
+
+    // Remove previous streaming assistant message if any
+    messages.removeWhere((m) => m.isStreaming);
+
+    switch (next) {
+      case AgentSessionRunning(:final currentContent, :final currentThinking, :final toolResults):
+        // Update streaming assistant content
+        if (currentContent.isNotEmpty || currentThinking.isNotEmpty) {
+          messages.add(ChatMessageUI(
+            role: 'assistant',
+            content: currentContent.isEmpty && currentThinking.isNotEmpty ? '...' : currentContent,
+            thinkingContent: currentThinking.isNotEmpty ? currentThinking : null,
+            isStreaming: true,
+          ));
+        }
+        // Add tool results that aren't already shown
+        final existingToolIds = messages
+            .where((m) => m.role == 'tool' && m.toolCallId != null)
+            .map((m) => m.toolCallId)
+            .toSet();
+        for (final tr in toolResults) {
+          if (!existingToolIds.contains(tr.toolCallId)) {
+            messages.add(ChatMessageUI(
+              role: 'tool',
+              content: tr.result.toDisplayString(),
+              toolName: tr.toolName,
+              toolSuccess: tr.result.success,
+              toolCallId: tr.toolCallId,
+            ));
+            // Persist tool result
+            AppDatabase.instance.addMessage(chatId, MessageEntry(
+              id: _uuid.v4(),
+              chatId: chatId,
+              role: 'tool',
+              content: tr.result.toDisplayString(),
+              toolName: tr.toolName,
+              toolSuccess: tr.result.success,
+              toolCallId: tr.toolCallId,
+            ));
+          }
+        }
+      case AgentSessionCompleted(:final content, :final thinkingContent, :final toolResults, :final wasCancelled):
+        // Finalize assistant message
+        if (content.isNotEmpty) {
+          messages.add(ChatMessageUI(
+            role: 'assistant',
+            content: wasCancelled ? '$content\n\n⏹ Stopped' : content,
+            thinkingContent: thinkingContent.isNotEmpty ? thinkingContent : null,
+          ));
+          // Persist assistant message
+          AppDatabase.instance.addMessage(chatId, MessageEntry(
+            id: _uuid.v4(),
+            chatId: chatId,
+            role: 'assistant',
+            content: content,
+          ));
+        }
+        // Add any remaining tool results not yet shown
+        final existingToolIds = messages
+            .where((m) => m.role == 'tool' && m.toolCallId != null)
+            .map((m) => m.toolCallId)
+            .toSet();
+        for (final tr in toolResults) {
+          if (!existingToolIds.contains(tr.toolCallId)) {
+            messages.add(ChatMessageUI(
+              role: 'tool',
+              content: tr.result.toDisplayString(),
+              toolName: tr.toolName,
+              toolSuccess: tr.result.success,
+              toolCallId: tr.toolCallId,
+            ));
+            AppDatabase.instance.addMessage(chatId, MessageEntry(
+              id: _uuid.v4(),
+              chatId: chatId,
+              role: 'tool',
+              content: tr.result.toDisplayString(),
+              toolName: tr.toolName,
+              toolSuccess: tr.result.success,
+              toolCallId: tr.toolCallId,
+            ));
+          }
+        }
+        // Update chat metadata
+        _updateChatMeta(chatId, messages.length);
+      case AgentSessionError(:final message):
+        _lastErrorMessage = message;
+        messages.add(ChatMessageUI(role: 'assistant', content: 'Error: $message'));
+        AppDatabase.instance.addMessage(chatId, MessageEntry(
+          id: _uuid.v4(),
+          chatId: chatId,
+          role: 'assistant',
+          content: 'Error: $message',
+        ));
+      case AgentSessionIdle():
+        break;
+    }
+
+    ref.read(chatMessagesProvider.notifier).state = messages;
+    _scrollToBottom();
+  }
+
+  Future<void> _updateChatMeta(String chatId, int msgCount) async {
+    final chats = ref.read(chatListProvider);
+    final chat = chats.where((c) => c.id == chatId).firstOrNull;
+    if (chat != null) {
+      chat.messageCount = msgCount;
+      chat.updatedAt = DateTime.now();
+      await AppDatabase.instance.saveChat(chat);
+      ref.read(chatListProvider.notifier).state = List.from(chats);
+    }
+  }
+
+  Widget _buildAppBarTitle() {
+    final chatId = ref.watch(activeChatIdProvider);
+    final chats = ref.watch(chatListProvider);
+    final currentChat = chats.where((c) => c.id == chatId).firstOrNull;
+    return Text(
+      currentChat?.title ?? 'Kolo AI Agent',
+      style: const TextStyle(fontSize: 16),
+      overflow: TextOverflow.ellipsis,
+    );
+  }
+
+  Widget _buildModelSwitcher() {
+    final providers = ref.watch(providersProvider);
+    if (providers.isEmpty) return const SizedBox.shrink();
+    final provider = providers.firstWhere((p) => p.isActive, orElse: () => providers.first);
+    final models = provider.models;
+    final activeModel = provider.activeModel;
+    if (models.length <= 1) return const SizedBox.shrink();
+    return PopupMenuButton<String>(
+      icon: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.smart_toy, size: 18, color: Theme.of(context).colorScheme.primary),
+          const SizedBox(width: 2),
+          Icon(Icons.arrow_drop_down, size: 18, color: Theme.of(context).colorScheme.onSurface),
+        ],
+      ),
+      tooltip: 'Switch model',
+      onSelected: (modelId) {
+        ref.read(providersProvider.notifier).setActiveModel(provider.id, modelId);
+      },
+      itemBuilder: (ctx) => models.map((m) => PopupMenuItem(
+            value: m.modelId,
+            child: Row(
+              children: [
+                if (m.modelId == activeModel?.modelId)
+                  Icon(Icons.check, size: 16, color: Theme.of(ctx).colorScheme.primary)
+                else
+                  const SizedBox(width: 16),
+                const SizedBox(width: 8),
+                Expanded(child: Text(m.displayName ?? m.modelId, overflow: TextOverflow.ellipsis)),
+              ],
+            ),
+          )).toList(),
+        );
+  }
+
+  Widget _buildChatDrawer() {
+    final chats = ref.watch(chatListProvider);
+    final activeId = ref.watch(activeChatIdProvider);
+    final cs = Theme.of(context).colorScheme;
+
+    return Drawer(
+      child: SafeArea(
+        child: Column(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(color: cs.surfaceContainerHighest),
+              child: Row(
+                children: [
+                  Icon(Icons.smart_toy, color: cs.primary),
+                  const SizedBox(width: 8),
+                  Text('Kolo AI Agent', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: cs.primary)),
+                ],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.all(8),
+              child: SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  onPressed: () {
+                    Navigator.pop(context);
+                    _startNewChat();
+                  },
+                  icon: const Icon(Icons.add),
+                  label: const Text('New Chat'),
+                ),
+              ),
+            ),
+            const Divider(height: 1),
+            Expanded(
+              child: chats.isEmpty
+                  ? Center(child: Text('No chats yet', style: TextStyle(color: cs.onSurface.withValues(alpha: 0.5))))
+                  : ListView.builder(
+                      itemCount: chats.length,
+                      itemBuilder: (ctx, i) {
+                        final chat = chats[i];
+                        final isActive = chat.id == activeId;
+                        return ListTile(
+                          selected: isActive,
+                          selectedTileColor: cs.primary.withValues(alpha: 0.1),
+                          leading: const Icon(Icons.chat_bubble_outline, size: 20),
+                          title: Text(
+                            chat.title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(fontWeight: isActive ? FontWeight.w600 : FontWeight.normal),
+                          ),
+                          subtitle: Text(
+                            '${chat.messageCount} msgs • ${_timeAgo(chat.updatedAt)}',
+                            style: TextStyle(fontSize: 11, color: cs.onSurface.withValues(alpha: 0.5)),
+                          ),
+                          trailing: IconButton(
+                            icon: const Icon(Icons.delete_outline, size: 18),
+                            onPressed: () => _deleteChat(chat.id),
+                          ),
+                          onTap: () {
+                            Navigator.pop(context);
+                            _loadChat(chat);
+                          },
+                        );
+                      },
+                    ),
+            ),
+            const Divider(height: 1),
+            ListTile(
+              leading: const Icon(Icons.tune),
+              title: const Text('Custom Instructions'),
+              onTap: () {
+                Navigator.pop(context);
+                _showCustomInstructionsDialog();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.build_outlined),
+              title: const Text('Tools & Permissions'),
+              subtitle: Text('${bootstrapTools().all.length} tools', style: TextStyle(fontSize: 12, color: cs.onSurface.withValues(alpha: 0.5))),
+              onTap: () {
+                Navigator.pop(context);
+                Navigator.push(context, MaterialPageRoute(builder: (_) => const ToolsPermissionScreen()));
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.dark_mode_outlined),
+              title: const Text('Theme'),
+              trailing: _buildThemeToggle(),
+              onTap: () => _cycleTheme(),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  String _timeAgo(DateTime dt) {
+    final diff = DateTime.now().difference(dt);
+    if (diff.inMinutes < 1) return 'just now';
+    if (diff.inHours < 1) return '${diff.inMinutes}m ago';
+    if (diff.inDays < 1) return '${diff.inHours}h ago';
+    return '${diff.inDays}d ago';
+  }
+
+  void _cycleTheme() {
+    ref.read(themeModeProvider.notifier).cycle();
+  }
+
+  Widget _buildThemeToggle() {
+    final mode = ref.watch(themeModeProvider);
+    final icon = switch (mode) {
+      ThemeMode.system => Icons.brightness_auto,
+      ThemeMode.light => Icons.light_mode,
+      ThemeMode.dark => Icons.dark_mode,
+    };
+    return Icon(icon, size: 20);
+  }
+
+  Future<void> _showCustomInstructionsDialog() async {
+    // Load from database first
+    final saved = await AppDatabase.instance.getSetting('custom_instructions') ?? '';
+    if (!mounted) return;
+    final controller = TextEditingController(text: ref.read(customInstructionsProvider).isEmpty ? saved : ref.read(customInstructionsProvider));
+    final result = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Custom Instructions'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              'Add instructions that modify the AI\'s behavior across all chats.',
+              style: TextStyle(color: Theme.of(ctx).colorScheme.onSurface.withValues(alpha: 0.6), fontSize: 13),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: controller,
+              maxLines: 6,
+              decoration: const InputDecoration(
+                hintText: 'e.g. Always respond in French. Prefer concise answers.',
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, controller.text), child: const Text('Save')),
+        ],
+      ),
+    );
+    if (result != null) {
+      ref.read(customInstructionsProvider.notifier).state = result;
+      // Persist custom instructions
+      await AppDatabase.instance.saveSetting('custom_instructions', result);
+    }
+  }
+
+  Widget _buildEmptyState(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.smart_toy_outlined, size: 80, color: cs.primary.withValues(alpha: 0.5)),
+            const SizedBox(height: 16),
+            Text('Kolo AI Agent', style: Theme.of(context).textTheme.headlineMedium?.copyWith(color: cs.primary)),
+            const SizedBox(height: 8),
+            Text(
+              'Your unlimited AI assistant\n${bootstrapTools().all.length} tools ready • Configure a provider to start',
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.bodyLarge?.copyWith(color: cs.onSurface.withValues(alpha: 0.6)),
+            ),
+            const SizedBox(height: 24),
+            FilledButton.icon(
+              onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const SettingsScreen())),
+              icon: const Icon(Icons.settings),
+              label: const Text('Configure Provider'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// UI model for a chat message
+class ChatMessageUI {
+  final String role;
+  final String content;
+  final String? thinkingContent; // reasoning tokens shown in collapsible section
+  final String? toolName;
+  final bool? toolSuccess;
+  final bool isStreaming;
+  final String? toolCallId;
+  final List<String>? imagePaths; // local file paths for images
+  ChatMessageUI({
+    required this.role,
+    required this.content,
+    this.thinkingContent,
+    this.toolName,
+    this.toolSuccess,
+    this.isStreaming = false,
+    this.toolCallId,
+    this.imagePaths,
+  });
+}

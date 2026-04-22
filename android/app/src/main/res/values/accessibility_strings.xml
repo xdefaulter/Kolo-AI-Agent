@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="accessibility_service_description">Kolo AI Agent needs accessibility access to read screen content and perform actions like tapping, swiping, and typing on your behalf. This enables the AI agent to control your phone autonomously.</string>
+</resources>
