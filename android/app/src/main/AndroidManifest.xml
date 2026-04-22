@@ -11,6 +11,8 @@
         android:maxSdkVersion="28"/>
     <!-- Camera for image attachment -->
     <uses-permission android:name="android.permission.CAMERA"/>
+    <!-- Microphone for voice input (STT) -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
     <!-- Read media for image picker (Android 13+) -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>
     <!-- Foreground service for phone controller -->

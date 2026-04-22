@@ -6,6 +6,7 @@ import 'ui/chat/chat_screen.dart';
 import 'core/theme_provider.dart';
 import 'core/agent/agent_session.dart';
 import 'core/agent/agent_settings.dart';
+import 'core/stt_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -17,6 +18,9 @@ void main() async {
   } catch (_) {
     // Firebase not configured yet — app works fine without it
   }
+
+  // Pre-initialize STT (checks availability, requests permissions on first use)
+  SttService.instance.init();
 
   runApp(const ProviderScope(child: KoloApp()));
 }

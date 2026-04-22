@@ -80,5 +80,11 @@
 			</dict>
 		</dict>
 	</dict>
+	<!-- Microphone access for voice input (STT) -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Kolo AI Agent needs microphone access for voice-to-text input.</string>
+	<!-- Speech recognition for voice input -->
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Kolo AI Agent uses on-device speech recognition to transcribe your voice input.</string>
 </dict>
 </plist>

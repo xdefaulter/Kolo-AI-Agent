@@ -1,8 +1,9 @@
 import 'dart:async';
 import '../tool_base.dart';
+import '../../stt_service.dart';
 
 /// Speech-to-text: transcribe voice input from the microphone.
-/// Note: This requires platform-specific setup (microphone permission + speech recognition).
+/// Uses the native on-device SpeechRecognizer (Android) / Speech framework (iOS).
 class SpeechToTextTool extends KoloTool {
   @override
   String get name => 'speech_to_text';
@@ -22,23 +23,38 @@ class SpeechToTextTool extends KoloTool {
 
   @override
   Future<ToolResult> execute(Map<String, dynamic> params, ToolContext context) async {
-    // timeout_seconds and language will be used when SpeechToText is fully wired to the platform layer
-    // ignore: unused_local_variable
-    final _ = params['timeout_seconds'] as int? ?? 30;
-    // ignore: unused_local_variable
-    final __ = params['language'] as String?;
+    final timeout = params['timeout_seconds'] as int? ?? 30;
+    final language = params['language'] as String?;
 
-    try {
-      // SpeechToText must be initialized on the main thread with a Flutter context.
-      // We delegate to the platform layer via method channel.
-      // For now, return an error guiding the user — actual STT needs UI integration.
-      return ToolResult.err(
-        'Speech-to-text requires microphone access and UI integration. '
-        'This tool is available but needs platform-specific initialization. '
-        'Please use the voice input button in the chat input bar instead.',
-      );
-    } catch (e) {
-      return ToolResult.err('Speech recognition failed: $e');
+    final stt = SttService.instance;
+    final available = await stt.init();
+    if (!available) {
+      return ToolResult.err('Speech recognition is not available on this device.');
     }
+
+    final completer = Completer<ToolResult>();
+    String? finalText;
+
+    final sub = stt.finalResults.listen((text) {
+      finalText = text;
+      if (!completer.isCompleted) {
+        completer.complete(ToolResult.ok(text.isEmpty ? '(no speech detected)' : text));
+      }
+    });
+
+    // Auto-cancel after timeout
+    final timer = Timer(Duration(seconds: timeout), () {
+      if (!completer.isCompleted) {
+        stt.stopListening();
+        completer.complete(ToolResult.ok(finalText ?? '(timeout — no speech detected)'));
+      }
+    });
+
+    await stt.startListening(localeId: language);
+
+    final result = await completer.future;
+    timer.cancel();
+    sub.cancel();
+    return result;
   }
 }

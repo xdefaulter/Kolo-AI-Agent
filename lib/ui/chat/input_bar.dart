@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:file_picker/file_picker.dart';
 import '../../core/haptics.dart';
+import '../../core/stt_service.dart';
 
 /// Attachment data (image or file)
 class ChatAttachment {
@@ -47,12 +48,61 @@ class InputBarState extends State<InputBar> {
   List<ChatAttachment> _attachments = [];
   bool _isSending = false; // For send button bounce animation
   bool _isListening = false; // Mic button state (STT integration)
+  bool _sttAvailable = false; // Whether STT is available on this device
+  String _sttBuffer = ''; // Accumulated STT text for this session
+  StreamSubscription? _sttPartialSub;
+  StreamSubscription? _sttFinalSub;
   Timer? _draftTimer;
 
   @override
   void initState() {
     super.initState();
     _controller.addListener(_onTextChanged);
+    _initStt();
+  }
+
+  Future<void> _initStt() async {
+    final available = await SttService.instance.init();
+    if (mounted) {
+      setState(() => _sttAvailable = available);
+    }
+  }
+
+  void _sttOnPartial(String text) {
+    if (!mounted) return;
+    // Show live transcription in the text field as user speaks
+    final current = _controller.text;
+    // Replace the STT portion at the end of current text
+    final base = current.length > _sttBuffer.length
+        ? current.substring(0, current.length - _sttBuffer.length)
+        : '';
+    setState(() {
+      _sttBuffer = text;
+      _controller.text = base + text;
+      _controller.selection = TextSelection.fromPosition(
+        TextPosition(offset: _controller.text.length),
+      );
+    });
+  }
+
+  void _sttOnFinal(String text) {
+    if (!mounted) return;
+    _sttBuffer = text;
+    // Final result replaces the partial text
+    final current = _controller.text;
+    // Find where the partial STT text was and replace with final
+    final base = current.length > _sttBuffer.length
+        ? current.substring(0, current.length - text.length)
+        : '';
+    _controller.text = base + text;
+    _controller.selection = TextSelection.fromPosition(
+      TextPosition(offset: _controller.text.length),
+    );
+    setState(() {
+      _isListening = false;
+      _sttBuffer = '';
+    });
+    _focusNode.requestFocus();
   }
 
   void _onTextChanged() {
@@ -66,6 +116,8 @@ class InputBarState extends State<InputBar> {
   @override
   void dispose() {
     _draftTimer?.cancel();
+    _sttPartialSub?.cancel();
+    _sttFinalSub?.cancel();
     _controller.dispose();
     _focusNode.dispose();
     super.dispose();
@@ -102,9 +154,32 @@ class InputBarState extends State<InputBar> {
 
   void _toggleMic() {
     Haptics.selection();
-    setState(() => _isListening = !_isListening);
-    // TODO: Wire up speech_to_text when STT is ready
-    // For now, just toggle the visual state
+    if (_isListening) {
+      // Stop listening
+      _sttPartialSub?.cancel();
+      _sttFinalSub?.cancel();
+      SttService.instance.stopListening();
+      setState(() {
+        _isListening = false;
+        _sttBuffer = '';
+      });
+      _focusNode.requestFocus();
+    } else {
+      // Start listening
+      _sttBuffer = '';
+      _sttPartialSub = SttService.instance.partialResults.listen(_sttOnPartial);
+      _sttFinalSub = SttService.instance.finalResults.listen(_sttOnFinal);
+      SttService.instance.startListening().then((_) {
+        if (!mounted) return;
+        // If STT failed to start (e.g. permission denied)
+        if (!SttService.instance.isListening) {
+          _sttPartialSub?.cancel();
+          _sttFinalSub?.cancel();
+          setState(() => _isListening = false);
+        }
+      });
+      setState(() => _isListening = true);
+    }
   }
 
   Future<void> _pickImage(ImageSource source) async {
@@ -296,8 +371,8 @@ class InputBarState extends State<InputBar> {
                   ),
                 ),
                 const SizedBox(width: 8),
-                // Mic button (STT)
-                if (!widget.isLoading)
+                // Mic button (STT) — only show if speech recognition is available
+                if (!widget.isLoading && _sttAvailable)
                   AnimatedContainer(
                     duration: const Duration(milliseconds: 200),
                     decoration: BoxDecoration(
