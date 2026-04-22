@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
@@ -25,32 +26,59 @@ class InputBar extends StatefulWidget {
   final Function(String, {List<ChatAttachment>? attachments}) onSend;
   final bool isLoading;
   final VoidCallback? onCancel;
+  final bool enterToSend;
 
   const InputBar({
     super.key,
     required this.onSend,
     this.isLoading = false,
     this.onCancel,
+    this.enterToSend = false,
   });
 
   @override
-  State<InputBar> createState() => _InputBarState();
+  State<InputBar> createState() => InputBarState();
 }
 
-class _InputBarState extends State<InputBar> {
+class InputBarState extends State<InputBar> {
   final TextEditingController _controller = TextEditingController();
   final FocusNode _focusNode = FocusNode();
   final ImagePicker _picker = ImagePicker();
   List<ChatAttachment> _attachments = [];
   bool _isSending = false; // For send button bounce animation
   bool _isListening = false; // Mic button state (STT integration)
+  Timer? _draftTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller.addListener(_onTextChanged);
+  }
+
+  void _onTextChanged() {
+    // Debounced draft save
+    _draftTimer?.cancel();
+    _draftTimer = Timer(const Duration(seconds: 2), () {
+      // Parent ChatScreen will handle this via callback
+    });
+  }
 
   @override
   void dispose() {
+    _draftTimer?.cancel();
     _controller.dispose();
     _focusNode.dispose();
     super.dispose();
   }
+
+  /// Public method to set the controller text (for draft restoration)
+  void setText(String text) {
+    _controller.text = text;
+    _controller.selection = TextSelection.fromPosition(TextPosition(offset: text.length));
+  }
+
+  /// Public method to get current text (for draft saving)
+  String get currentText => _controller.text;
 
   void _handleSend() {
     final text = _controller.text.trim();
@@ -245,7 +273,7 @@ class _InputBarState extends State<InputBar> {
                     enabled: !widget.isLoading,
                     maxLines: 5,
                     minLines: 1,
-                    textInputAction: TextInputAction.newline,
+                    textInputAction: widget.enterToSend ? TextInputAction.send : TextInputAction.newline,
                     decoration: InputDecoration(
                       hintText: widget.isLoading ? 'Thinking...' : 'Message Kolo...',
                       filled: true,

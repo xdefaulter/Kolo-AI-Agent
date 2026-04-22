@@ -1,11 +1,17 @@
+import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:google_fonts/google_fonts.dart';
+import 'package:share_plus/share_plus.dart';
 import '../../core/api/provider.dart';
 import '../../core/providers_state.dart';
 import '../../core/tools/tool_bootstrap.dart';
 import '../../core/tools/android/vlm_analyzer.dart';
 import '../../core/agent/agent_settings.dart';
 import '../../core/storage/database.dart';
+import '../../core/haptics.dart';
+import '../shared/page_transitions.dart';
 import 'tools_permission_screen.dart';
 
 // ---- Settings Screen ----
@@ -36,7 +42,7 @@ class SettingsScreen extends ConsumerWidget {
           Row(
             children: [
               FilledButton.icon(
-                onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AddProviderScreen())),
+                onPressed: () => pushSlideRight(context, const AddProviderScreen()),
                 icon: const Icon(Icons.add),
                 label: const Text('Add Provider'),
               ),
@@ -57,7 +63,7 @@ class SettingsScreen extends ConsumerWidget {
           Text('Configure which tools require confirmation.', style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: cs.onSurface.withValues(alpha: 0.6))),
           const SizedBox(height: 8),
           FilledButton.tonalIcon(
-            onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const ToolsPermissionScreen())),
+            onPressed: () => pushSlideRight(context, const ToolsPermissionScreen()),
             icon: const Icon(Icons.build_outlined),
             label: Text('Manage ${bootstrapTools().all.length} Tools'),
           ),
@@ -98,6 +104,13 @@ class SettingsScreen extends ConsumerWidget {
                 ),
                 const Divider(height: 1),
                 ListTile(
+                  leading: const Icon(Icons.file_download_outlined),
+                  title: const Text('Export Chat History'),
+                  subtitle: const Text('Share all chats as JSON'),
+                  onTap: () => _exportChats(context),
+                ),
+                const Divider(height: 1),
+                ListTile(
                   leading: const Icon(Icons.info_outline),
                   title: const Text('About'),
                   subtitle: Text('v0.1.0 · ${bootstrapTools().all.length} tools', style: TextStyle(fontSize: 12, color: cs.onSurface.withValues(alpha: 0.5))),
@@ -106,6 +119,15 @@ class SettingsScreen extends ConsumerWidget {
               ],
             ),
           ),
+
+          const SizedBox(height: 24),
+
+          // ---- Input Settings ----
+          Text('Input', style: Theme.of(context).textTheme.titleLarge),
+          const SizedBox(height: 4),
+          Text('Customize how you interact with the assistant.', style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: cs.onSurface.withValues(alpha: 0.6))),
+          const SizedBox(height: 8),
+          const _EnterSendToggle(),
         ],
       ),
     );
@@ -128,10 +150,36 @@ class SettingsScreen extends ConsumerWidget {
       ),
     );
     if (confirmed == true) {
+      Haptics.medium();
       await AppDatabase.instance.deleteAllChats();
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('All chats deleted'), behavior: SnackBarBehavior.floating),
+        );
+      }
+    }
+  }
+
+  Future<void> _exportChats(BuildContext context) async {
+    Haptics.light();
+    try {
+      final chats = await AppDatabase.instance.getAllChats();
+      final allMessages = <Map<String, dynamic>>[];
+      for (final chat in chats) {
+        final msgs = await AppDatabase.instance.getMessages(chat.id);
+        allMessages.add({
+          'chat': chat.toMap(),
+          'messages': msgs.map((m) => m.toMap()).toList(),
+        });
+      }
+      final json = const JsonEncoder.withIndent('  ').convert(allMessages);
+      if (context.mounted) {
+        await Share.share(json, subject: 'Kolo AI Agent - Chat Export');
+      }
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Export failed: $e'), behavior: SnackBarBehavior.floating),
         );
       }
     }
@@ -182,6 +230,63 @@ class SettingsScreen extends ConsumerWidget {
   }
 }
 
+// ── Test Connection Chip ──
+class _TestConnectionChip extends StatefulWidget {
+  final ProviderConfig provider;
+  const _TestConnectionChip({required this.provider});
+  @override State<_TestConnectionChip> createState() => _TestConnectionChipState();
+}
+
+class _TestConnectionChipState extends State<_TestConnectionChip> {
+  bool _testing = false;
+  String? _result;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    if (_testing) {
+      return const ActionChip(
+        label: SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2)),
+        onPressed: null,
+      );
+    }
+    if (_result != null) {
+      final isSuccess = _result == 'ok';
+      return ActionChip(
+        label: Text(isSuccess ? '✓ Connected' : '✗ Failed'),
+        avatar: Icon(isSuccess ? Icons.check_circle : Icons.error_outline, size: 16,
+            color: isSuccess ? Colors.green : cs.error),
+        onPressed: () => setState(() => _result = null),
+      );
+    }
+    return ActionChip(
+      label: const Text('Test'),
+      avatar: const Icon(Icons.wifi_find, size: 14),
+      onPressed: _test,
+    );
+  }
+
+  Future<void> _test() async {
+    setState(() { _testing = true; _result = null; });
+    try {
+      final uri = Uri.parse('${widget.provider.baseUrl}/models');
+      final request = await HttpClient().getUrl(uri);
+      if (widget.provider.apiKey.isNotEmpty) {
+        request.headers.set('Authorization', 'Bearer ${widget.provider.apiKey}');
+      }
+      final response = await request.close().timeout(const Duration(seconds: 10));
+      if (response.statusCode == 200 || response.statusCode == 401) {
+        // 401 = server is reachable, auth issue (which means connection works)
+        if (mounted) setState(() { _testing = false; _result = 'ok'; });
+      } else {
+        if (mounted) setState(() { _testing = false; _result = 'fail'; });
+      }
+    } catch (e) {
+      if (mounted) setState(() { _testing = false; _result = 'fail'; });
+    }
+  }
+}
+
 class _ProviderCard extends ConsumerWidget {
   final ProviderConfig provider;
   const _ProviderCard({required this.provider});
@@ -194,7 +299,7 @@ class _ProviderCard extends ConsumerWidget {
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
       child: InkWell(
-        onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => ProviderDetailScreen(provider: provider))),
+        onTap: () => pushSlideRight(context, ProviderDetailScreen(provider: provider)),
         borderRadius: BorderRadius.circular(12),
         child: Padding(
           padding: const EdgeInsets.all(16),
@@ -249,6 +354,8 @@ class _ProviderCard extends ConsumerWidget {
                       label: const Text('Set Active'),
                       onPressed: () => ref.read(providersProvider.notifier).setActiveProvider(provider.id),
                     ),
+                  const SizedBox(width: 8),
+                  _TestConnectionChip(provider: provider),
                 ],
               ),
             ],
@@ -791,6 +898,56 @@ class _MaxIterationsTileState extends ConsumerState<_MaxIterationsTile> {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+// ── Enter = Send Toggle ──
+class _EnterSendToggle extends ConsumerStatefulWidget {
+  const _EnterSendToggle();
+  @override
+  ConsumerState<_EnterSendToggle> createState() => _EnterSendToggleState();
+}
+
+class _EnterSendToggleState extends ConsumerState<_EnterSendToggle> {
+  bool _enterToSend = false;
+  bool _loaded = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final val = await AppDatabase.instance.getSetting('enter_to_send');
+    if (mounted) {
+      setState(() {
+        _enterToSend = val == 'true';
+        _loaded = true;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    if (!_loaded) return const SizedBox.shrink();
+    return Card(
+      child: SwitchListTile(
+        secondary: Icon(Icons.keyboard_return, color: cs.primary),
+        title: const Text('Enter = Send'),
+        subtitle: Text(
+          _enterToSend ? 'Enter sends the message' : 'Enter creates a new line',
+          style: TextStyle(fontSize: 12, color: cs.onSurface.withValues(alpha: 0.6)),
+        ),
+        value: _enterToSend,
+        onChanged: (val) {
+          Haptics.selection();
+          setState(() => _enterToSend = val);
+          AppDatabase.instance.saveSetting('enter_to_send', val.toString());
+        },
       ),
     );
   }

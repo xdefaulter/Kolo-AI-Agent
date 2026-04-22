@@ -9,6 +9,7 @@ import 'input_bar.dart';
 import 'tool_result_card.dart';
 import 'date_separator.dart';
 import 'scroll_to_bottom_fab.dart';
+import 'slide_in_message.dart';
 import '../../core/agent/agent_session.dart';
 import '../../core/agent/conversation_manager.dart';
 import '../../core/storage/database.dart';
@@ -19,8 +20,10 @@ import '../../core/theme_provider.dart';
 import '../../core/providers.dart';
 import '../../core/providers_state.dart';
 import '../../core/haptics.dart';
+import '../../core/connectivity_service.dart';
 import '../settings/settings_screen.dart';
 import '../settings/tools_permission_screen.dart';
+import '../shared/page_transitions.dart';
 
 const _uuid = Uuid();
 
@@ -42,10 +45,12 @@ class ChatScreen extends ConsumerStatefulWidget {
 
 class _ChatScreenState extends ConsumerState<ChatScreen> {
   final ScrollController _scrollController = ScrollController();
+  final GlobalKey<InputBarState> _inputBarKey = GlobalKey();
   bool _sessionInitialized = false;
   String? _lastErrorMessage;
   bool _showScrollFab = false;
   String _searchQuery = '';
+  bool _enterToSend = false;
 
   @override
   void initState() {
@@ -54,6 +59,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _initSession();
       _loadChats();
+      _loadSettings();
     });
   }
 
@@ -92,7 +98,55 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     }
   }
 
+  Future<void> _loadSettings() async {
+    final val = await AppDatabase.instance.getSetting('enter_to_send');
+    if (mounted) {
+      setState(() => _enterToSend = val == 'true');
+    }
+  }
+
+  Future<void> _togglePin(ChatEntry chat) async {
+    Haptics.selection();
+    chat.isPinned = !chat.isPinned;
+    await AppDatabase.instance.saveChat(chat);
+    // Refresh list — pinned sort first
+    final chats = await AppDatabase.instance.getAllChats();
+    chats.sort((a, b) {
+      if (a.isPinned != b.isPinned) return a.isPinned ? -1 : 1;
+      return b.updatedAt.compareTo(a.updatedAt);
+    });
+    ref.read(chatListProvider.notifier).state = chats;
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(chat.isPinned ? 'Chat pinned' : 'Chat unpinned'),
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 1),
+      ));
+    }
+  }
+
+  Future<void> _markRead(String chatId) async {
+    final chats = ref.read(chatListProvider);
+    final idx = chats.indexWhere((c) => c.id == chatId);
+    if (idx >= 0 && chats[idx].unreadCount > 0) {
+      chats[idx].unreadCount = 0;
+      ref.read(chatListProvider.notifier).state = List.from(chats);
+      await AppDatabase.instance.saveChat(chats[idx]);
+    }
+  }
+
   Future<void> _loadChat(ChatEntry chat) async {
+    // Save draft of current chat before switching
+    final oldChatId = ref.read(activeChatIdProvider);
+    if (oldChatId != chat.id) {
+      final currentText = _inputBarKey.currentState?.currentText ?? '';
+      if (currentText.isNotEmpty) {
+        await AppDatabase.instance.saveDraft(oldChatId, currentText);
+      } else {
+        await AppDatabase.instance.saveDraft(oldChatId, '');
+      }
+    }
+
     ref.read(activeChatIdProvider.notifier).state = chat.id;
     final messages = await AppDatabase.instance.getMessages(chat.id);
     final uiMessages = messages.map((m) => ChatMessageUI(
@@ -115,6 +169,14 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     )).toList();
     ref.read(agentSessionProvider.notifier).loadMessages(chatMessages);
 
+    // Restore draft
+    final draft = await AppDatabase.instance.getDraft(chat.id);
+    if (draft != null && draft.isNotEmpty) {
+      _inputBarKey.currentState?.setText(draft);
+    } else {
+      _inputBarKey.currentState?.setText('');
+    }
+
     _scrollToBottom();
   }
 
@@ -130,35 +192,54 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   }
 
   Future<void> _deleteChat(String chatId) async {
-    // Confirm before deleting
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Delete Chat?'),
-        content: const Text('This chat and all its messages will be permanently deleted.'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            style: FilledButton.styleFrom(backgroundColor: Theme.of(ctx).colorScheme.error),
-            child: const Text('Delete'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true) return;
+    final chats = ref.read(chatListProvider);
+    final chatToDelete = chats.where((c) => c.id == chatId).firstOrNull;
+    if (chatToDelete == null) return;
 
     Haptics.medium();
-    await AppDatabase.instance.deleteChat(chatId);
-    final chats = await AppDatabase.instance.getAllChats();
-    ref.read(chatListProvider.notifier).state = chats;
+
+    // Immediately remove from UI
+    final remainingChats = chats.where((c) => c.id != chatId).toList();
+    ref.read(chatListProvider.notifier).state = remainingChats;
+
+    // If deleting active chat, switch to another
     if (chatId == ref.read(activeChatIdProvider)) {
-      if (chats.isNotEmpty) {
-        await _loadChat(chats.first);
+      if (remainingChats.isNotEmpty) {
+        await _loadChat(remainingChats.first);
       } else {
         await _startNewChat();
       }
     }
+
+    // Show undo snackbar
+    ScaffoldMessenger.of(context).clearSnackBars();
+    final snackbar = ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Deleted "${chatToDelete.title}"'),
+        duration: const Duration(seconds: 5),
+        behavior: SnackBarBehavior.floating,
+        action: SnackBarAction(
+          label: 'Undo',
+          onPressed: () async {
+            // Restore the chat
+            final restored = List<ChatEntry>.from(ref.read(chatListProvider));
+            restored.insert(0, chatToDelete);
+            ref.read(chatListProvider.notifier).state = restored;
+          },
+        ),
+      ),
+    );
+
+    // Wait for snackbar to finish, then actually delete from DB
+    snackbar.closed.then((reason) async {
+      if (reason == SnackBarClosedReason.action) {
+        // User undid — re-save the chat
+        await AppDatabase.instance.saveChat(chatToDelete);
+      } else {
+        // User didn't undo — delete from DB permanently
+        await AppDatabase.instance.deleteChat(chatId);
+      }
+    });
   }
 
   Future<void> _sendMessage(String text, {List<ChatAttachment>? attachments}) async {
@@ -198,6 +279,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       content: displayText,
       imagePaths: attachments?.where((a) => a.mimeType.startsWith('image/')).map((a) => a.filePath).whereType<String>().toList(),
       timestamp: now,
+      isNew: true,
     ));
     ref.read(chatMessagesProvider.notifier).state = messages;
 
@@ -447,9 +529,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           _buildModelSwitcher(),
           IconButton(
             icon: const Icon(Icons.settings),
-            onPressed: () => Navigator.push(
+            onPressed: () => pushSlideRight(
               context,
-              MaterialPageRoute(builder: (_) => const SettingsScreen()),
+              const SettingsScreen(),
             ),
           ),
         ],
@@ -458,7 +540,19 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       body: Column(
         children: [
           // Offline banner
-          // (placeholder: when connectivity_plus is wired, show banner here)
+          Consumer(builder: (context, ref, _) {
+            final isOnline = ref.watch(isOnlineProvider);
+            if (isOnline) return const SizedBox.shrink();
+            return MaterialBanner(
+              backgroundColor: Theme.of(context).colorScheme.errorContainer,
+              content: Text(
+                'You are offline. Messages will be sent when connection is restored.',
+                style: TextStyle(color: Theme.of(context).colorScheme.onErrorContainer),
+              ),
+              actions: [const SizedBox.shrink()],
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+            );
+          }),
           Expanded(
             child: Stack(
               children: [
@@ -489,6 +583,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
             onSend: _sendMessage,
             isLoading: sessionState.isRunning,
             onCancel: sessionState.isRunning ? _cancelRun : null,
+            enterToSend: _enterToSend,
           ),
         ],
       ),
@@ -543,7 +638,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
             msg.content.startsWith('Error:') &&
             msgIndex == messages.length - 1;
 
-        return Column(
+        return SlideInMessage(
+          isActive: msg.isNew,
+          child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             MessageBubble(
@@ -586,6 +683,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
               ),
             ],
           ],
+        ),
         );
       }
       virtualIndex++;
@@ -633,6 +731,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
             thinkingContent: currentThinking.isNotEmpty ? currentThinking : null,
             isStreaming: true,
             timestamp: DateTime.now(),
+            isNew: true,
           ));
         }
         // Add tool results that aren't already shown
@@ -649,6 +748,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
               toolSuccess: tr.result.success,
               toolCallId: tr.toolCallId,
               timestamp: DateTime.now(),
+              isNew: true,
             ));
             // Persist tool result
             AppDatabase.instance.addMessage(chatId, MessageEntry(
@@ -670,6 +770,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
             content: wasCancelled ? '$content\n\n⏹ Stopped' : content,
             thinkingContent: thinkingContent.isNotEmpty ? thinkingContent : null,
             timestamp: DateTime.now(),
+            isNew: true,
           ));
           // Persist assistant message
           AppDatabase.instance.addMessage(chatId, MessageEntry(
@@ -693,6 +794,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
               toolSuccess: tr.result.success,
               toolCallId: tr.toolCallId,
               timestamp: DateTime.now(),
+              isNew: true,
             ));
             AppDatabase.instance.addMessage(chatId, MessageEntry(
               id: _uuid.v4(),
@@ -711,7 +813,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       case AgentSessionError(:final message):
         Haptics.heavy();
         _lastErrorMessage = message;
-        messages.add(ChatMessageUI(role: 'assistant', content: 'Error: $message', timestamp: DateTime.now()));
+        messages.add(ChatMessageUI(role: 'assistant', content: 'Error: $message', timestamp: DateTime.now(), isNew: true));
         AppDatabase.instance.addMessage(chatId, MessageEntry(
           id: _uuid.v4(),
           chatId: chatId,
@@ -794,6 +896,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     final filteredChats = _searchQuery.isEmpty
         ? chats
         : chats.where((c) => c.title.toLowerCase().contains(_searchQuery.toLowerCase())).toList();
+    // Sort: pinned first, then by updatedAt
+    filteredChats.sort((a, b) {
+      if (a.isPinned != b.isPinned) return a.isPinned ? -1 : 1;
+      return b.updatedAt.compareTo(a.updatedAt);
+    });
 
     return Drawer(
       child: SafeArea(
@@ -866,12 +973,35 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                         return ListTile(
                           selected: isActive,
                           selectedTileColor: cs.primary.withValues(alpha: 0.1),
-                          leading: const Icon(Icons.chat_bubble_outline, size: 20),
+                          leading: Stack(
+                            clipBehavior: Clip.none,
+                            children: [
+                              Icon(chat.isPinned ? Icons.push_pin : Icons.chat_bubble_outline, size: 20,
+                                  color: chat.isPinned ? cs.primary : null),
+                              if (chat.unreadCount > 0)
+                                Positioned(
+                                  right: -4, top: -4,
+                                  child: Container(
+                                    padding: const EdgeInsets.all(2),
+                                    decoration: BoxDecoration(color: cs.error, shape: BoxShape.circle),
+                                    constraints: const BoxConstraints(minWidth: 12, minHeight: 12),
+                                    child: Text(
+                                      chat.unreadCount > 99 ? '99+' : '${chat.unreadCount}',
+                                      style: const TextStyle(color: Colors.white, fontSize: 8, fontWeight: FontWeight.bold),
+                                      textAlign: TextAlign.center,
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          ),
                           title: Text(
                             chat.title,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: TextStyle(fontWeight: isActive ? FontWeight.w600 : FontWeight.normal),
+                            style: TextStyle(
+                              fontWeight: isActive ? FontWeight.w600 : FontWeight.normal,
+                              color: chat.unreadCount > 0 ? cs.onSurface : cs.onSurface.withValues(alpha: 0.7),
+                            ),
                           ),
                           subtitle: Text(
                             '${chat.messageCount} msgs · ${_timeAgo(chat.updatedAt)}',
@@ -881,10 +1011,12 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                             icon: const Icon(Icons.delete_outline, size: 18),
                             onPressed: () => _deleteChat(chat.id),
                           ),
+                          onLongPress: () => _togglePin(chat),
                           onTap: () {
                             Haptics.selection();
                             Navigator.pop(context);
                             _loadChat(chat);
+                            _markRead(chat.id);
                           },
                         );
                       },
@@ -905,7 +1037,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
               subtitle: Text('${bootstrapTools().all.length} tools', style: TextStyle(fontSize: 12, color: cs.onSurface.withValues(alpha: 0.5))),
               onTap: () {
                 Navigator.pop(context);
-                Navigator.push(context, MaterialPageRoute(builder: (_) => const ToolsPermissionScreen()));
+                pushSlideRight(context, const ToolsPermissionScreen());
               },
             ),
             ListTile(
@@ -1023,7 +1155,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
             ),
             const SizedBox(height: 16),
             FilledButton.icon(
-              onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const SettingsScreen())),
+              onPressed: () => pushSlideRight(context, const SettingsScreen()),
               icon: const Icon(Icons.settings),
               label: const Text('Configure Provider'),
             ),
@@ -1058,6 +1190,7 @@ class ChatMessageUI {
   final String? toolCallId;
   final List<String>? imagePaths;
   final DateTime? timestamp;
+  final bool isNew; // true for real-time messages, false for loaded history
   ChatMessageUI({
     required this.role,
     required this.content,
@@ -1068,5 +1201,6 @@ class ChatMessageUI {
     this.toolCallId,
     this.imagePaths,
     this.timestamp,
+    this.isNew = false,
   });
 }

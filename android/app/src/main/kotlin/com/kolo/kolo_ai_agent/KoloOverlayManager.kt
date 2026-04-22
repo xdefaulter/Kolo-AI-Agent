@@ -56,9 +56,15 @@ object KoloOverlayManager {
     // State
     private var isShowing = false
     private var isControlMode = false
+    private var isMinimized = false
     private val handler = Handler(Looper.getMainLooper())
     private var actionHideRunnable: Runnable? = null
     private var pulseAnimator: ValueAnimator? = null
+
+    // Elapsed time tracking
+    private var phoneControlStartTime: Long = 0L
+    private var elapsedTimer: Runnable? = null
+    private var elapsedIntervalMs = 1000L
 
     // STOP button callback
     var onStopClicked: (() -> Unit)? = null
@@ -101,6 +107,7 @@ object KoloOverlayManager {
 
     fun hide() {
         stopPulseAnimation()
+        stopElapsedTimer()
         try { stopButton?.let { windowManager?.removeView(it) } } catch (_: Exception) {}
         try { borderView?.let { windowManager?.removeView(it) } } catch (_: Exception) {}
         try { statusContainer?.let { windowManager?.removeView(it) } } catch (_: Exception) {}
@@ -111,6 +118,7 @@ object KoloOverlayManager {
         statusSpinner = null
         isShowing = false
         isControlMode = false
+        isMinimized = false
         Log.i(TAG, "Overlay hidden")
     }
 
@@ -136,6 +144,7 @@ object KoloOverlayManager {
                 statusContainer?.visibility = View.VISIBLE
                 statusSpinner?.visibility = View.VISIBLE
                 startPulseAnimation(context)
+                startElapsedTimer(context)
                 return@post
             }
 
@@ -151,6 +160,7 @@ object KoloOverlayManager {
             isShowing = true
             isControlMode = true
             startPulseAnimation(context)
+            startElapsedTimer(context)
             Log.i(TAG, "Phone control mode started: $task")
         }
     }
@@ -253,6 +263,7 @@ object KoloOverlayManager {
         var initialX = 0; var initialY = 0
         var initialTouchX = 0f; var initialTouchY = 0f
         var isDragging = false
+        var lastClickTime = 0L
 
         button.setOnTouchListener { v, event ->
             when (event.action) {
@@ -274,7 +285,23 @@ object KoloOverlayManager {
                     true
                 }
                 MotionEvent.ACTION_UP -> {
-                    if (!isDragging) v.performClick()
+                    if (!isDragging) {
+                        // Double-tap to minimize/restore
+                        val now = System.currentTimeMillis()
+                        if (now - lastClickTime < 350 && isControlMode) {
+                            if (isMinimized) {
+                                Log.i(TAG, "Double-tap: restoring overlay")
+                                restore(button.context)
+                            } else {
+                                Log.i(TAG, "Double-tap: minimizing overlay")
+                                minimize(button.context)
+                            }
+                            lastClickTime = 0L
+                        } else {
+                            v.performClick()
+                            lastClickTime = now
+                        }
+                    }
                     true
                 }
                 else -> false
@@ -299,7 +326,109 @@ object KoloOverlayManager {
         stopButton = button
     }
 
-    // ── Pulse animation on STOP button during control mode ──
+    // ── Minimize to floating dot ──
+
+    /** Minimize overlay: hide border + status, shrink STOP button to small dot */
+    @SuppressLint("ClickableViewAccessibility")
+    fun minimize(context: Context) {
+        if (isMinimized) return
+        isMinimized = true
+        handler.post {
+            borderView?.visibility = View.GONE
+            statusContainer?.visibility = View.GONE
+            // Shrink STOP button to a small green dot
+            stopButton?.let { btn ->
+                if (btn is TextView) {
+                    btn.text = ""
+                    val size = dpToPx(context, 32f).toInt()
+                    val lp = btn.layoutParams as? WindowManager.LayoutParams
+                    if (lp != null) {
+                        lp.width = size
+                        lp.height = size
+                        windowManager?.updateViewLayout(btn, lp)
+                    }
+                    val bg = btn.background
+                    if (bg is android.graphics.drawable.GradientDrawable) {
+                        bg.setColor(Color.parseColor("#FF4CAF50"))
+                    } else {
+                        // Recreate background
+                        btn.background = android.graphics.drawable.GradientDrawable().apply {
+                            shape = android.graphics.drawable.GradientDrawable.OVAL
+                            setColor(Color.parseColor("#FF4CAF50"))
+                        }
+                    }
+                }
+            }
+            Log.i(TAG, "Overlay minimized to dot")
+        }
+    }
+
+    /** Restore overlay from minimized state */
+    fun restore(context: Context) {
+        if (!isMinimized) return
+        isMinimized = false
+        handler.post {
+            borderView?.visibility = View.VISIBLE
+            statusContainer?.visibility = View.VISIBLE
+            // Restore STOP button to full size
+            stopButton?.let { btn ->
+                if (btn is TextView) {
+                    btn.text = "⏹"
+                    val size = dpToPx(context, 60f).toInt()
+                    val lp = btn.layoutParams as? WindowManager.LayoutParams
+                    if (lp != null) {
+                        lp.width = size
+                        lp.height = size
+                        windowManager?.updateViewLayout(btn, lp)
+                    }
+                    btn.background = android.graphics.drawable.GradientDrawable().apply {
+                        shape = android.graphics.drawable.GradientDrawable.OVAL
+                        setColor(Color.parseColor("#D32F2F"))
+                        setStroke(dpToPx(context, 2f).toInt(), Color.argb(80, 255, 255, 255))
+                    }
+                }
+            }
+            Log.i(TAG, "Overlay restored from dot")
+        }
+    }
+
+    // ── Elapsed Timer ──
+
+    private fun startElapsedTimer(context: Context) {
+        stopElapsedTimer()
+        phoneControlStartTime = System.currentTimeMillis()
+        updateElapsedText()
+        elapsedTimer = Runnable {
+            updateElapsedText()
+            handler.postDelayed(elapsedTimer!!, elapsedIntervalMs)
+        }
+        handler.postDelayed(elapsedTimer!!, elapsedIntervalMs)
+    }
+
+    private fun stopElapsedTimer() {
+        elapsedTimer?.let { handler.removeCallbacks(it) }
+        elapsedTimer = null
+        phoneControlStartTime = 0L
+    }
+
+    @SuppressLint("SetTextI18n")
+    private fun updateElapsedText() {
+        if (phoneControlStartTime == 0L) return
+        val elapsed = System.currentTimeMillis() - phoneControlStartTime
+        val seconds = (elapsed / 1000) % 60
+        val minutes = (elapsed / 60000) % 60
+        val hours = elapsed / 3600000
+        val timeStr = if (hours > 0) {
+            String.format("%d:%02d:%02d", hours, minutes, seconds)
+        } else {
+            String.format("%d:%02d", minutes, seconds)
+        }
+        // Prepend elapsed time to status text
+        val currentText = statusTextView?.text?.toString()?.removePrefix("🤖 ") ?: ""
+        statusTextView?.text = "🤖 $timeStr | $currentText"
+    }
+
+    // ── Drag-to-minimize on STOP button ──
 
     private fun startPulseAnimation(context: Context) {
         stopPulseAnimation()

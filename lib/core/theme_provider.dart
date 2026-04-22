@@ -1,5 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'storage/database.dart';
 
 // Brand colors
@@ -64,9 +65,24 @@ ThemeData buildDarkTheme() {
   return _applyBrandOverrides(base, Brightness.dark);
 }
 
+TextTheme _buildTextTheme(Brightness brightness) {
+  final base = GoogleFonts.plusJakartaSansTextTheme();
+  return base.copyWith(
+    headlineLarge: base.headlineLarge?.copyWith(fontWeight: FontWeight.w700),
+    headlineMedium: base.headlineMedium?.copyWith(fontWeight: FontWeight.w700),
+    titleLarge: base.titleLarge?.copyWith(fontWeight: FontWeight.w600),
+    titleMedium: base.titleMedium?.copyWith(fontWeight: FontWeight.w600),
+    bodyLarge: base.bodyLarge?.copyWith(fontSize: 15),
+    bodyMedium: base.bodyMedium?.copyWith(fontSize: 14),
+    labelLarge: base.labelLarge?.copyWith(fontWeight: FontWeight.w600),
+  );
+}
+
 ThemeData _applyBrandOverrides(ThemeData base, Brightness brightness) {
   final cs = base.colorScheme;
   return base.copyWith(
+    // Google Fonts typography
+    textTheme: _buildTextTheme(brightness),
     // Richer accent color for CTAs
     colorScheme: cs.copyWith(
       secondary: _kAccentColor,

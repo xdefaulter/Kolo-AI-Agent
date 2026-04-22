@@ -2,6 +2,8 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:highlight/highlight.dart' as hl;
+import 'package:highlight/languages/all.dart' as hl_languages;
 import 'typing_indicator.dart';
 import '../../core/haptics.dart';
 
@@ -120,9 +122,8 @@ class MessageBubble extends StatelessWidget {
                       borderRadius: BorderRadius.circular(8),
                     ),
                   ),
-                  // Add copy button for code blocks via custom builder
                   builders: {
-                    'code': _CodeBlockBuilder(),
+                    'pre': _CodeBlockBuilder(),
                   },
                 ),
               // Streaming indicator at end of content
@@ -199,30 +200,68 @@ class _StatusDotState extends State<_StatusDot> with SingleTickerProviderStateMi
   }
 }
 
-/// Image grid — 2 columns for multiple images
+/// Image grid — 2 columns for multiple images, tap to fullscreen
 class _ImageGrid extends StatelessWidget {
   final List<String> imagePaths;
   const _ImageGrid({required this.imagePaths});
+
+  void _openFullscreen(BuildContext context, String path) {
+    Haptics.selection();
+    showDialog(
+      context: context,
+      builder: (_) => Dialog(
+        backgroundColor: Colors.transparent,
+        insetPadding: EdgeInsets.zero,
+        child: Stack(
+          children: [
+            GestureDetector(
+              onTap: () => Navigator.pop(context),
+              child: InteractiveViewer(
+                child: Center(
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(4),
+                    child: Image.file(File(path), fit: BoxFit.contain, errorBuilder: (_, __, ___) =>
+                      const Icon(Icons.broken_image, size: 48, color: Colors.white54)),
+                  ),
+                ),
+              ),
+            ),
+            Positioned(
+              top: 40, right: 16,
+              child: IconButton(
+                icon: const Icon(Icons.close, color: Colors.white),
+                onPressed: () => Navigator.pop(context),
+                style: IconButton.styleFrom(backgroundColor: Colors.black54),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     if (imagePaths.length == 1) {
-      return ClipRRect(
-        borderRadius: BorderRadius.circular(10),
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxHeight: 200, maxWidth: 240),
-          child: Image.file(
-            File(imagePaths.first),
-            fit: BoxFit.cover,
-            errorBuilder: (_, __, ___) => Container(
-              width: 160,
-              height: 120,
-              decoration: BoxDecoration(
-                color: cs.surfaceContainerHighest,
-                borderRadius: BorderRadius.circular(8),
+      return GestureDetector(
+        onTap: () => _openFullscreen(context, imagePaths.first),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(10),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 200, maxWidth: 240),
+            child: Image.file(
+              File(imagePaths.first),
+              fit: BoxFit.cover,
+              errorBuilder: (_, __, ___) => Container(
+                width: 160,
+                height: 120,
+                decoration: BoxDecoration(
+                  color: cs.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Icon(Icons.broken_image, color: cs.onSurface.withValues(alpha: 0.3)),
               ),
-              child: Icon(Icons.broken_image, color: cs.onSurface.withValues(alpha: 0.3)),
             ),
           ),
         ),
@@ -232,21 +271,24 @@ class _ImageGrid extends StatelessWidget {
     return Wrap(
       spacing: 4,
       runSpacing: 4,
-      children: imagePaths.map((path) => ClipRRect(
-        borderRadius: BorderRadius.circular(8),
-        child: Image.file(
-          File(path),
-          width: (MediaQuery.of(context).size.width * 0.35).clamp(100, 180),
-          height: 120,
-          fit: BoxFit.cover,
-          errorBuilder: (_, __, ___) => Container(
+      children: imagePaths.map((path) => GestureDetector(
+        onTap: () => _openFullscreen(context, path),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(8),
+          child: Image.file(
+            File(path),
             width: (MediaQuery.of(context).size.width * 0.35).clamp(100, 180),
             height: 120,
-            decoration: BoxDecoration(
-              color: cs.surfaceContainerHighest,
-              borderRadius: BorderRadius.circular(8),
+            fit: BoxFit.cover,
+            errorBuilder: (_, __, ___) => Container(
+              width: (MediaQuery.of(context).size.width * 0.35).clamp(100, 180),
+              height: 120,
+              decoration: BoxDecoration(
+                color: cs.surfaceContainerHighest,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Icon(Icons.broken_image, color: cs.onSurface.withValues(alpha: 0.3)),
             ),
-            child: Icon(Icons.broken_image, color: cs.onSurface.withValues(alpha: 0.3)),
           ),
         ),
       )).toList(),
@@ -349,19 +391,25 @@ class _ThinkingSectionState extends State<_ThinkingSection> {
   }
 }
 
-/// Markdown code block builder that adds a copy button
+/// Markdown code block builder that adds syntax highlighting
 class _CodeBlockBuilder extends MarkdownElementBuilder {
   @override
   Widget visitText(context, node) {
-    // Inline code — just style it
     return const SizedBox.shrink();
   }
 }
 
-/// Code block with copy button — standalone widget for code blocks
+/// Code block with syntax highlighting and copy button
 class CodeBlockWithCopy extends StatelessWidget {
   final String code;
-  const CodeBlockWithCopy({super.key, required this.code});
+  final String? language;
+  const CodeBlockWithCopy({super.key, required this.code, this.language});
+
+  /// Map of common language aliases to highlight.js mode names
+  static const _langMap = {
+    'js': 'javascript', 'ts': 'typescript', 'py': 'python',
+    'rb': 'ruby', 'sh': 'bash', 'yml': 'yaml', 'md': 'markdown',
+  };
 
   @override
   Widget build(BuildContext context) {
@@ -378,16 +426,26 @@ class CodeBlockWithCopy extends StatelessWidget {
           ),
           constraints: const BoxConstraints(maxHeight: 300),
           child: SingleChildScrollView(
-            child: SelectableText(
-              code,
-              style: TextStyle(
-                fontSize: 13,
-                fontFamily: 'monospace',
-                color: cs.onSurface,
+            child: _SyntaxHighlight(code: code, language: language),
+          ),
+        ),
+        // Language label
+        if (language != null && language!.isNotEmpty)
+          Positioned(
+            top: 4,
+            left: 8,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(
+                color: cs.primaryContainer,
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: Text(
+                language!,
+                style: TextStyle(fontSize: 10, color: cs.onPrimaryContainer, fontWeight: FontWeight.w600),
               ),
             ),
           ),
-        ),
         Positioned(
           top: 8,
           right: 8,
@@ -420,5 +478,77 @@ class CodeBlockWithCopy extends StatelessWidget {
         ),
       ],
     );
+  }
+}
+
+/// Syntax-highlighted code widget using the highlight package
+class _SyntaxHighlight extends StatelessWidget {
+  final String code;
+  final String? language;
+  const _SyntaxHighlight({required this.code, this.language});
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final lang = _resolveLanguage(language);
+
+    List<hl.Node> nodes;
+    try {
+      nodes = hl.highlight.parse(code, language: lang).nodes ?? [];
+    } catch (_) {
+      nodes = [hl.Node(value: code)];
+    }
+
+    return RichText(
+      text: _buildSpans(nodes, cs),
+      softWrap: true,
+    );
+  }
+
+  String _resolveLanguage(String? lang) {
+    if (lang == null || lang.isEmpty) return 'plaintext';
+    final lower = lang.toLowerCase();
+    return CodeBlockWithCopy._langMap[lower] ?? lower;
+  }
+
+  TextSpan _buildSpans(List<hl.Node> nodes, ColorScheme cs) {
+    final children = nodes.map((node) {
+      // Leaf text node: has value but no children
+      if (node.children == null && node.value != null) {
+        final style = node.className != null
+            ? _styleForClass(node.className, cs)
+            : TextStyle(fontSize: 13, fontFamily: 'monospace', color: cs.onSurface);
+        return TextSpan(text: node.value, style: style);
+      }
+      // Element node: has children and possibly a className
+      if (node.children != null) {
+        final style = _styleForClass(node.className, cs);
+        final childSpans = _buildSpans(node.children!, cs).children ?? [];
+        return TextSpan(children: childSpans, style: style);
+      }
+      // Fallback: node with value and no children (plain text)
+      if (node.value != null) {
+        return TextSpan(text: node.value, style: TextStyle(fontSize: 13, fontFamily: 'monospace', color: cs.onSurface));
+      }
+      return const TextSpan();
+    }).toList();
+    return TextSpan(children: children);
+  }
+
+  TextStyle _styleForClass(String? className, ColorScheme cs) {
+    switch (className) {
+      case 'keyword':      return TextStyle(color: const Color(0xFFC678DD), fontWeight: FontWeight.bold, fontSize: 13, fontFamily: 'monospace');
+      case 'string':        return TextStyle(color: const Color(0xFF98C379), fontSize: 13, fontFamily: 'monospace');
+      case 'number':        return TextStyle(color: const Color(0xFFD19A66), fontSize: 13, fontFamily: 'monospace');
+      case 'comment':       return TextStyle(color: const Color(0xFF5C6370), fontStyle: FontStyle.italic, fontSize: 13, fontFamily: 'monospace');
+      case 'function':      return TextStyle(color: const Color(0xFF61AFEF), fontSize: 13, fontFamily: 'monospace');
+      case 'title':         return TextStyle(color: const Color(0xFF61AFEF), fontWeight: FontWeight.bold, fontSize: 13, fontFamily: 'monospace');
+      case 'params':        return TextStyle(color: const Color(0xFFE06C75), fontSize: 13, fontFamily: 'monospace');
+      case 'built_in':      return TextStyle(color: const Color(0xFFE5C07B), fontSize: 13, fontFamily: 'monospace');
+      case 'attr':          return TextStyle(color: const Color(0xFFD19A66), fontSize: 13, fontFamily: 'monospace');
+      case 'literal':       return TextStyle(color: const Color(0xFFD19A66), fontSize: 13, fontFamily: 'monospace');
+      case 'type':          return TextStyle(color: const Color(0xFFE5C07B), fontSize: 13, fontFamily: 'monospace');
+      default:              return TextStyle(color: cs.onSurface, fontSize: 13, fontFamily: 'monospace');
+    }
   }
 }

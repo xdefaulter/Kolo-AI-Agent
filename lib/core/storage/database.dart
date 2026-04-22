@@ -206,6 +206,22 @@ class AppDatabase {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('kolo_setting_$key', value);
   }
+
+  // ---- Drafts ----
+
+  Future<String?> getDraft(String chatId) async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString('kolo_draft_$chatId');
+  }
+
+  Future<void> saveDraft(String chatId, String text) async {
+    final prefs = await SharedPreferences.getInstance();
+    if (text.isEmpty) {
+      await prefs.remove('kolo_draft_$chatId');
+    } else {
+      await prefs.setString('kolo_draft_$chatId', text);
+    }
+  }
 }
 
 class ChatEntry {
@@ -216,6 +232,8 @@ class ChatEntry {
   DateTime createdAt;
   DateTime updatedAt;
   int messageCount;
+  bool isPinned;
+  int unreadCount;
 
   ChatEntry({
     required this.id,
@@ -225,6 +243,8 @@ class ChatEntry {
     DateTime? createdAt,
     DateTime? updatedAt,
     this.messageCount = 0,
+    this.isPinned = false,
+    this.unreadCount = 0,
   })  : createdAt = createdAt ?? DateTime.now(),
         updatedAt = updatedAt ?? DateTime.now();
 
@@ -236,6 +256,8 @@ class ChatEntry {
         'createdAt': createdAt.toIso8601String(),
         'updatedAt': updatedAt.toIso8601String(),
         'messageCount': messageCount,
+        'isPinned': isPinned,
+        'unreadCount': unreadCount,
       };
 
   factory ChatEntry.fromMap(Map<String, dynamic> m) => ChatEntry(
@@ -246,6 +268,8 @@ class ChatEntry {
         createdAt: DateTime.parse(m['createdAt'] as String),
         updatedAt: DateTime.parse(m['updatedAt'] as String),
         messageCount: m['messageCount'] as int? ?? 0,
+        isPinned: m['isPinned'] as bool? ?? false,
+        unreadCount: m['unreadCount'] as int? ?? 0,
       );
 }
 
