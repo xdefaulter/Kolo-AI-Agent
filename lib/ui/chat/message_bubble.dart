@@ -3,7 +3,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:highlight/highlight.dart' as hl;
-import 'package:highlight/languages/all.dart' as hl_languages;
 import 'typing_indicator.dart';
 import '../../core/haptics.dart';
 

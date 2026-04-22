@@ -411,6 +411,40 @@ class MainActivity : FlutterActivity() {
                     }
                 }
 
+                // ── Terminal: execute shell command ──
+                "exec" -> {
+                    val command = call.argument<String>("command") ?: ""
+                    val workDir = call.argument<String>("workingDir") ?: "/sdcard/KoloProjects"
+                    if (command.isEmpty()) {
+                        result.error("INVALID", "command is required", null)
+                    } else {
+                        Thread {
+                            try {
+                                val process = Runtime.getRuntime().exec(
+                                    arrayOf("/system/bin/sh", "-c", command),
+                                    arrayOf("TERM=xterm-256color", "HOME=/sdcard"),
+                                    java.io.File(workDir)
+                                )
+                                val stdout = process.inputStream.bufferedReader().readText()
+                                val stderr = process.errorStream.bufferedReader().readText()
+                                process.waitFor(30, java.util.concurrent.TimeUnit.SECONDS)
+                                val exitCode = process.exitValue()
+                                runOnUiThread {
+                                    result.success(mapOf(
+                                        "stdout" to stdout,
+                                        "stderr" to stderr,
+                                        "exitCode" to exitCode
+                                    ))
+                                }
+                            } catch (e: Exception) {
+                                runOnUiThread {
+                                    result.error("EXEC_FAILED", e.message, null)
+                                }
+                            }
+                        }.start()
+                    }
+                }
+
                 else -> result.notImplemented()
             }
         }

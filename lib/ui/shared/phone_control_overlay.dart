@@ -117,7 +117,6 @@ class _PhoneControlOverlayState extends State<PhoneControlOverlay>
     }
 
     // Full overlay
-    final cs = Theme.of(context).colorScheme;
     final statusText = widget.status ?? widget.taskName ?? 'Controlling phone';
     final elapsedText = _formatElapsed(_elapsed);
 

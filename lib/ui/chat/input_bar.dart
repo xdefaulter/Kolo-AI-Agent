@@ -28,6 +28,7 @@ class InputBar extends StatefulWidget {
   final bool isLoading;
   final VoidCallback? onCancel;
   final bool enterToSend;
+  final ValueChanged<String>? onDraftChanged;
 
   const InputBar({
     super.key,
@@ -35,6 +36,7 @@ class InputBar extends StatefulWidget {
     this.isLoading = false,
     this.onCancel,
     this.enterToSend = false,
+    this.onDraftChanged,
   });
 
   @override
@@ -87,12 +89,10 @@ class InputBarState extends State<InputBar> {
 
   void _sttOnFinal(String text) {
     if (!mounted) return;
-    _sttBuffer = text;
-    // Final result replaces the partial text
     final current = _controller.text;
-    // Find where the partial STT text was and replace with final
+    // Strip the old partial STT text from the field, then append final result
     final base = current.length > _sttBuffer.length
-        ? current.substring(0, current.length - text.length)
+        ? current.substring(0, current.length - _sttBuffer.length)
         : '';
     _controller.text = base + text;
     _controller.selection = TextSelection.fromPosition(
@@ -109,7 +109,7 @@ class InputBarState extends State<InputBar> {
     // Debounced draft save
     _draftTimer?.cancel();
     _draftTimer = Timer(const Duration(seconds: 2), () {
-      // Parent ChatScreen will handle this via callback
+      widget.onDraftChanged?.call(_controller.text);
     });
   }
 

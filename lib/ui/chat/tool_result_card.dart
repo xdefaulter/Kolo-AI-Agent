@@ -68,8 +68,6 @@ class ToolResultCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    final isSuccess = success ?? true;
-    final icon = isSuccess ? Icons.check_circle : Icons.error;
     final iconColor = _statusColor(context);
 
     return Container(

@@ -558,15 +558,21 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
               children: [
                 messages.isEmpty
                     ? _buildEmptyState(context)
-                    : ListView.builder(
-                        controller: _scrollController,
-                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                        itemCount: messages.length + _dateSeparatorCount(messages),
-                        itemBuilder: (context, index) {
-                          // Interleave date separators
-                          return _buildMessageOrSeparator(messages, index);
-                        },
-                      ),
+                    : Builder(builder: (context) {
+                        final items = _buildInterleavedItems(messages);
+                        return ListView.builder(
+                          controller: _scrollController,
+                          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                          itemCount: items.length,
+                          itemBuilder: (context, index) {
+                            final item = items[index];
+                            if (item is _DateSep) {
+                              return DateSeparator(label: item.label);
+                            }
+                            return _buildMessageBubble(item as ChatMessageUI, messages);
+                          },
+                        );
+                      }),
                 // Scroll-to-bottom FAB
                 Positioned(
                   right: 16,
@@ -584,112 +590,96 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
             isLoading: sessionState.isRunning,
             onCancel: sessionState.isRunning ? _cancelRun : null,
             enterToSend: _enterToSend,
+            onDraftChanged: (text) {
+              final chatId = ref.read(activeChatIdProvider);
+              AppDatabase.instance.saveDraft(chatId, text);
+            },
           ),
         ],
       ),
     );
   }
 
-  /// Calculate how many date separators to add
-  int _dateSeparatorCount(List<ChatMessageUI> messages) {
-    int count = 0;
+  /// Pre-compute the interleaved list of date separators and messages
+  List<dynamic> _buildInterleavedItems(List<ChatMessageUI> messages) {
+    final items = <dynamic>[];
     DateTime? lastDate;
-    for (final m in messages) {
-      if (m.timestamp != null) {
-        if (lastDate == null || !_sameDay(lastDate, m.timestamp!)) {
-          count++;
-          lastDate = m.timestamp;
-        }
-      }
-    }
-    return count;
-  }
-
-  /// Build either a date separator or a message bubble
-  Widget _buildMessageOrSeparator(List<ChatMessageUI> messages, int index) {
-    // We need to interleave date separators as virtual items
-    int msgIndex = 0;
-    int virtualIndex = 0;
-    DateTime? lastDate;
-
     for (final m in messages) {
       if (m.timestamp != null && (lastDate == null || !_sameDay(lastDate, m.timestamp!))) {
-        if (virtualIndex == index) {
-          return DateSeparator(label: _dateLabel(m.timestamp!));
-        }
-        virtualIndex++;
+        items.add(_DateSep(label: _dateLabel(m.timestamp!)));
         lastDate = m.timestamp;
       }
-      if (virtualIndex == index) {
-        final msg = messages[msgIndex];
-        // Determine if next message is same role for grouping
-        final isLastInGroup = msgIndex == messages.length - 1 ||
-            messages[msgIndex + 1].role != msg.role;
-
-        if (msg.role == 'tool') {
-          return ToolResultCard(
-            toolName: msg.toolName ?? 'unknown',
-            result: msg.content,
-            success: msg.toolSuccess,
-          );
-        }
-
-        final isError = msg.role == 'assistant' &&
-            msg.content.startsWith('Error:') &&
-            msgIndex == messages.length - 1;
-
-        return SlideInMessage(
-          isActive: msg.isNew,
-          child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            MessageBubble(
-              role: msg.role,
-              content: msg.content,
-              thinkingContent: msg.thinkingContent,
-              isStreaming: msg.isStreaming,
-              imagePaths: msg.imagePaths,
-              timestamp: msg.timestamp != null ? _formatTime(msg.timestamp!) : null,
-            ),
-            // Action buttons for messages
-            if (msg.role == 'assistant' && !msg.isStreaming) ...[
-              Padding(
-                padding: EdgeInsets.only(left: 48, bottom: isLastInGroup ? 8.0 : 2.0),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    _actionChip(Icons.share_outlined, 'Share', () => _shareMessage(msg.content)),
-                    const SizedBox(width: 6),
-                    _actionChip(Icons.copy, 'Copy', () => _copyMessage(msg.content)),
-                    if (isError) ...[
-                      const SizedBox(width: 6),
-                      _actionChip(Icons.refresh, 'Retry', _retryLastMessage),
-                      const SizedBox(width: 6),
-                      _actionChip(Icons.edit_outlined, 'Edit', _editLastMessage),
-                    ],
-                  ],
-                ),
-              ),
-            ],
-            if (msg.role == 'user' && !msg.isStreaming && isLastInGroup) ...[
-              Padding(
-                padding: const EdgeInsets.only(left: 8, bottom: 8),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    _actionChip(Icons.copy, 'Copy', () => _copyMessage(msg.content)),
-                  ],
-                ),
-              ),
-            ],
-          ],
-        ),
-        );
-      }
-      virtualIndex++;
-      msgIndex++;
+      items.add(m);
     }
-    return const SizedBox.shrink();
+    return items;
+  }
+
+  /// Build a single message bubble (date separators handled in ListView)
+  Widget _buildMessageBubble(ChatMessageUI msg, List<ChatMessageUI> messages) {
+    final msgIndex = messages.indexOf(msg);
+    // Determine if next message is same role for grouping
+    final isLastInGroup = msgIndex == messages.length - 1 ||
+        messages[msgIndex + 1].role != msg.role;
+
+    if (msg.role == 'tool') {
+      return ToolResultCard(
+        toolName: msg.toolName ?? 'unknown',
+        result: msg.content,
+        success: msg.toolSuccess,
+      );
+    }
+
+    final isError = msg.role == 'assistant' &&
+        msg.content.startsWith('Error:') &&
+        msgIndex == messages.length - 1;
+
+    return SlideInMessage(
+      isActive: msg.isNew,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          MessageBubble(
+            role: msg.role,
+            content: msg.content,
+            thinkingContent: msg.thinkingContent,
+            isStreaming: msg.isStreaming,
+            imagePaths: msg.imagePaths,
+            timestamp: msg.timestamp != null ? _formatTime(msg.timestamp!) : null,
+          ),
+          // Action buttons for messages
+          if (msg.role == 'assistant' && !msg.isStreaming) ...[
+            Padding(
+              padding: EdgeInsets.only(left: 48, bottom: isLastInGroup ? 8.0 : 2.0),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _actionChip(Icons.share_outlined, 'Share', () => _shareMessage(msg.content)),
+                  const SizedBox(width: 6),
+                  _actionChip(Icons.copy, 'Copy', () => _copyMessage(msg.content)),
+                  if (isError) ...[
+                    const SizedBox(width: 6),
+                    _actionChip(Icons.refresh, 'Retry', _retryLastMessage),
+                    const SizedBox(width: 6),
+                    _actionChip(Icons.edit_outlined, 'Edit', _editLastMessage),
+                  ],
+                ],
+              ),
+            ),
+          ],
+          if (msg.role == 'user' && !msg.isStreaming && isLastInGroup) ...[
+            Padding(
+              padding: const EdgeInsets.only(left: 8, bottom: 8),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _actionChip(Icons.copy, 'Copy', () => _copyMessage(msg.content)),
+                ],
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
   }
 
   Widget _actionChip(IconData icon, String label, VoidCallback onTap) {
@@ -892,11 +882,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     final activeId = ref.watch(activeChatIdProvider);
     final cs = Theme.of(context).colorScheme;
 
-    // Filter chats by search
-    final filteredChats = _searchQuery.isEmpty
+    // Filter + sort chats: pinned first, then by updatedAt
+    final filteredChats = (_searchQuery.isEmpty
         ? chats
-        : chats.where((c) => c.title.toLowerCase().contains(_searchQuery.toLowerCase())).toList();
-    // Sort: pinned first, then by updatedAt
+        : chats.where((c) => c.title.toLowerCase().contains(_searchQuery.toLowerCase()))).toList();
     filteredChats.sort((a, b) {
       if (a.isPinned != b.isPinned) return a.isPinned ? -1 : 1;
       return b.updatedAt.compareTo(a.updatedAt);
@@ -1034,7 +1023,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
             ListTile(
               leading: const Icon(Icons.build_outlined),
               title: const Text('Tools & Permissions'),
-              subtitle: Text('${bootstrapTools().all.length} tools', style: TextStyle(fontSize: 12, color: cs.onSurface.withValues(alpha: 0.5))),
+              subtitle: Text('${ref.read(toolRegistryProvider).all.length} tools', style: TextStyle(fontSize: 12, color: cs.onSurface.withValues(alpha: 0.5))),
               onTap: () {
                 Navigator.pop(context);
                 pushSlideRight(context, const ToolsPermissionScreen());
@@ -1135,7 +1124,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
             Text('Kolo AI Agent', style: Theme.of(context).textTheme.headlineMedium?.copyWith(color: cs.primary)),
             const SizedBox(height: 8),
             Text(
-              'Your unlimited AI assistant\n${bootstrapTools().all.length} tools ready',
+              'Your unlimited AI assistant\n${ref.watch(toolRegistryProvider).all.length} tools ready',
               textAlign: TextAlign.center,
               style: Theme.of(context).textTheme.bodyLarge?.copyWith(color: cs.onSurface.withValues(alpha: 0.6)),
             ),
@@ -1177,6 +1166,12 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       },
     );
   }
+}
+
+/// Simple data class for date separators in the interleaved list
+class _DateSep {
+  final String label;
+  const _DateSep({required this.label});
 }
 
 /// UI model for a chat message — now includes timestamp

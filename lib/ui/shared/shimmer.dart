@@ -63,7 +63,6 @@ class ChatSkeletonLoader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
     return ShimmerEffect(
       child: Column(
         children: [

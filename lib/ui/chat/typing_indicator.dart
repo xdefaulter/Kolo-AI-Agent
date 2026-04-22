@@ -35,7 +35,7 @@ class _TypingIndicatorState extends State<TypingIndicator>
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: List.generate(3, (i) {
-        return AnimatedBuilder(
+        return _TypingDot(
           animation: _controller,
           index: i,
           color: color,
@@ -46,13 +46,13 @@ class _TypingIndicatorState extends State<TypingIndicator>
   }
 }
 
-class AnimatedBuilder extends StatelessWidget {
+class _TypingDot extends StatelessWidget {
   final Animation<double> animation;
   final int index;
   final Color color;
   final double dotSize;
 
-  const AnimatedBuilder({
+  _TypingDot({
     super.key,
     required this.animation,
     required this.index,

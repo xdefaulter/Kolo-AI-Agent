@@ -90,6 +90,10 @@ import Speech
            "startController", "stopController":
         result(true) // Acknowledge but actual UI is handled by Flutter overlay widget
 
+      // ── Terminal: iOS sandbox blocks shell exec ──
+      case "exec":
+        result(FlutterError(code: "UNSUPPORTED", message: "Terminal commands are not available on iOS due to sandbox restrictions. Use Dev mode on Android.", details: nil))
+
       default:
         result(FlutterMethodNotImplemented)
       }
