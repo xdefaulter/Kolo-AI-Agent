@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/agent/agent_session.dart';
+import '../../core/agent/agent_loop.dart';
+import '../../core/tools/tool_base.dart';
 import '../../core/tools/tool_bootstrap.dart';
 import '../../core/tools/tool_registry.dart';
 import '../chat/input_bar.dart';
@@ -13,19 +15,23 @@ const kWorkspaceRoot = '/sdcard/KoloProjects';
 
 // ── Unified message model ──
 // Tracks both AI messages and terminal output in a single interleaved stream.
-enum _DevEntryType { userMessage, assistantMessage, terminalInput, terminalOutput, terminalError }
+enum _DevEntryType { userMessage, assistantMessage, toolCall, toolResult, terminalInput, terminalOutput, terminalError }
 
 class _DevEntry {
   final String id;
   final _DevEntryType type;
   final String content;
   final DateTime timestamp;
+  final String? toolName;    // for toolCall / toolResult
+  final bool? toolSuccess;   // for toolResult
 
   _DevEntry({
     required this.id,
     required this.type,
     required this.content,
     required this.timestamp,
+    this.toolName,
+    this.toolSuccess,
   });
 }
 
@@ -162,22 +168,88 @@ class _DevScreenState extends ConsumerState<DevScreen> {
 
   void _onSessionStateChanged(AgentSessionState? prev, AgentSessionState next) {
     final current = List<_DevEntry>.from(ref.read(devEntriesProvider));
+    final existingToolIds = current
+        .where((e) => e.type == _DevEntryType.toolResult || e.type == _DevEntryType.toolCall)
+        .map((e) => e.id)
+        .toSet();
+
     switch (next) {
-      case AgentSessionRunning(:final currentContent):
+      case AgentSessionRunning(:final currentContent, :final currentThinking, :final toolCalls, :final toolResults):
+        // Update streaming assistant message
         current.removeWhere((e) => e.id == 'streaming');
-        if (currentContent.isNotEmpty) {
+        if (currentContent.isNotEmpty || currentThinking.isNotEmpty) {
           current.add(_DevEntry(
             id: 'streaming',
             type: _DevEntryType.assistantMessage,
-            content: currentContent,
+            content: currentContent.isEmpty && currentThinking.isNotEmpty ? '...' : currentContent,
             timestamp: DateTime.now(),
           ));
+        }
+        // Add tool call indicators
+        for (final tc in toolCalls) {
+          for (final call in tc.calls) {
+            final callId = 'toolcall_${call.id}';
+            if (!existingToolIds.contains(callId)) {
+              current.add(_DevEntry(
+                id: callId,
+                type: _DevEntryType.toolCall,
+                content: call.name,
+                timestamp: DateTime.now(),
+                toolName: call.name,
+              ));
+              existingToolIds.add(callId);
+            }
+          }
+        }
+        // Add tool results
+        for (final tr in toolResults) {
+          if (!existingToolIds.contains(tr.toolCallId)) {
+            current.add(_DevEntry(
+              id: tr.toolCallId,
+              type: _DevEntryType.toolResult,
+              content: tr.result.toDisplayString(),
+              timestamp: DateTime.now(),
+              toolName: tr.toolName,
+              toolSuccess: tr.result.success,
+            ));
+            existingToolIds.add(tr.toolCallId);
+          }
         }
         ref.read(devEntriesProvider.notifier).state = current;
         ref.read(devIsTypingProvider.notifier).state = true;
         _scrollToBottom();
-      case AgentSessionCompleted(:final content, :final wasCancelled):
+      case AgentSessionCompleted(:final content, :final wasCancelled, :final toolCalls, :final toolResults):
         current.removeWhere((e) => e.id == 'streaming');
+        // Add tool calls
+        for (final tc in toolCalls) {
+          for (final call in tc.calls) {
+            final callId = 'toolcall_${call.id}';
+            if (!existingToolIds.contains(callId)) {
+              current.add(_DevEntry(
+                id: callId,
+                type: _DevEntryType.toolCall,
+                content: call.name,
+                timestamp: DateTime.now(),
+                toolName: call.name,
+              ));
+              existingToolIds.add(callId);
+            }
+          }
+        }
+        // Add tool results
+        for (final tr in toolResults) {
+          if (!existingToolIds.contains(tr.toolCallId)) {
+            current.add(_DevEntry(
+              id: tr.toolCallId,
+              type: _DevEntryType.toolResult,
+              content: tr.result.toDisplayString(),
+              timestamp: DateTime.now(),
+              toolName: tr.toolName,
+              toolSuccess: tr.result.success,
+            ));
+            existingToolIds.add(tr.toolCallId);
+          }
+        }
         if (content.isNotEmpty) {
           current.add(_DevEntry(
             id: DateTime.now().millisecondsSinceEpoch.toString(),
@@ -537,11 +609,7 @@ class _DevScreenState extends ConsumerState<DevScreen> {
           ],
         ),
       ),
-      floatingActionButton: FloatingActionButton.small(
-        onPressed: _showCreateProjectDialog,
-        tooltip: 'New Project',
-        child: const Icon(Icons.create_new_folder),
-      ),
+      floatingActionButton: null,
     );
   }
 
@@ -596,6 +664,13 @@ class _DevScreenState extends ConsumerState<DevScreen> {
               ref.read(devEntriesProvider.notifier).state = [];
             },
             tooltip: 'Clear',
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+          ),
+          IconButton(
+            icon: const Icon(Icons.create_new_folder, size: 18, color: Color(0xFF4EC9B0)),
+            onPressed: _showCreateProjectDialog,
+            tooltip: 'New Project',
             padding: EdgeInsets.zero,
             constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
           ),
@@ -708,6 +783,81 @@ class _DevScreenState extends ConsumerState<DevScreen> {
           child: SelectableText(
             entry.content,
             style: const TextStyle(color: Color(0xFFD4D4D4), fontFamily: 'monospace', fontSize: 13, height: 1.5),
+          ),
+        );
+      case _DevEntryType.toolCall:
+        return Container(
+          margin: const EdgeInsets.symmetric(vertical: 2),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          decoration: BoxDecoration(
+            color: const Color(0xFF1A3A5C),
+            borderRadius: BorderRadius.circular(4),
+            border: Border.all(color: const Color(0xFF264F78), width: 0.5),
+          ),
+          child: Row(
+            children: [
+              const Icon(Icons.build_outlined, size: 14, color: Color(0xFF569CD6)),
+              const SizedBox(width: 6),
+              Text(
+                entry.toolName ?? entry.content,
+                style: const TextStyle(
+                  color: Color(0xFF569CD6),
+                  fontFamily: 'monospace',
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+        );
+      case _DevEntryType.toolResult:
+        final isSuccess = entry.toolSuccess ?? true;
+        return Container(
+          margin: const EdgeInsets.symmetric(vertical: 2),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          decoration: BoxDecoration(
+            color: isSuccess ? const Color(0xFF1E3A1E) : const Color(0xFF3A1E1E),
+            borderRadius: BorderRadius.circular(4),
+            border: Border.all(
+              color: isSuccess ? const Color(0xFF2D5A2D) : const Color(0xFF5A2D2D),
+              width: 0.5,
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(
+                    isSuccess ? Icons.check_circle_outline : Icons.error_outline,
+                    size: 13,
+                    color: isSuccess ? const Color(0xFF6A9955) : const Color(0xFFF44747),
+                  ),
+                  const SizedBox(width: 4),
+                  Text(
+                    entry.toolName ?? 'tool',
+                    style: TextStyle(
+                      color: isSuccess ? const Color(0xFF6A9955) : const Color(0xFFF44747),
+                      fontFamily: 'monospace',
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+              if (entry.content.isNotEmpty) ...[
+                const SizedBox(height: 4),
+                SelectableText(
+                  entry.content.length > 500 ? '${entry.content.substring(0, 500)}...' : entry.content,
+                  style: TextStyle(
+                    color: isSuccess ? const Color(0xFFD4D4D4) : const Color(0xFFF44747),
+                    fontFamily: 'monospace',
+                    fontSize: 12,
+                    height: 1.4,
+                  ),
+                ),
+              ],
+            ],
           ),
         );
       case _DevEntryType.terminalInput:
