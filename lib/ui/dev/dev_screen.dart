@@ -3,15 +3,33 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:path_provider/path_provider.dart';
 import '../../core/agent/agent_session.dart';
 import '../../core/agent/agent_loop.dart';
 import '../../core/tools/tool_base.dart';
 import '../../core/tools/tool_bootstrap.dart';
 import '../../core/tools/tool_registry.dart';
+import '../../core/tools/android/phone_control_mode.dart';
 import '../chat/input_bar.dart';
+import '../chat/chat_screen.dart' show toolRegistryProvider;
 
-/// Workspace root for dev projects
-const kWorkspaceRoot = '/sdcard/KoloProjects';
+/// Workspace root for dev projects — resolved lazily to use app-specific
+/// storage on Android (no MANAGE_EXTERNAL_STORAGE needed).
+String? _workspaceRootCache;
+Future<String> getWorkspaceRoot() async {
+  if (_workspaceRootCache != null) return _workspaceRootCache!;
+  if (Platform.isAndroid) {
+    // getExternalStorageDirectory → /storage/emulated/0/Android/data/<pkg>/files
+    // This dir is writable without any special permissions.
+    final dir = await getExternalStorageDirectory();
+    _workspaceRootCache = '${dir!.path}/KoloProjects';
+  } else {
+    // macOS / iOS / desktop — use documents dir
+    final dir = await getApplicationDocumentsDirectory();
+    _workspaceRootCache = '${dir.path}/KoloProjects';
+  }
+  return _workspaceRootCache!;
+}
 
 // ── Unified message model ──
 // Tracks both AI messages and terminal output in a single interleaved stream.
@@ -35,8 +53,9 @@ class _DevEntry {
   });
 }
 
-// ── Dev-specific providers (completely isolated from main chat) ──
-final devToolRegistryProvider = Provider<ToolRegistry>((ref) => bootstrapTools());
+// 3.4: Share tool registry with chat screen to avoid duplicate bootstrap.
+// The agent session is kept separate for isolation.
+final devToolRegistryProvider = toolRegistryProvider;
 
 final devAgentSessionProvider =
     StateNotifierProvider<AgentSessionNotifier, AgentSessionState>((ref) {
@@ -62,7 +81,7 @@ class _DevScreenState extends ConsumerState<DevScreen> {
   bool _sessionInitialized = false;
 
   // Terminal state
-  String _currentDir = kWorkspaceRoot;
+  String _currentDir = '';  // resolved in initState via getWorkspaceRoot()
   static const _termChannel = MethodChannel('com.kolo.ai/terminal');
 
   // File tree state
@@ -75,8 +94,26 @@ class _DevScreenState extends ConsumerState<DevScreen> {
     super.initState();
     _scrollController.addListener(_onScroll);
     _initSession();
-    _ensureWorkspace();
+    _initWorkspace();
+  }
+
+  /// Initialize workspace root and current directory.
+  Future<void> _initWorkspace() async {
+    final root = await getWorkspaceRoot();
+    if (!mounted) return;
+    setState(() {
+      if (_currentDir.isEmpty) _currentDir = root;
+    });
+    await _ensureWorkspace();
     _loadFileTree();
+  }
+
+  Future<void> _ensureWorkspace() async {
+    final root = await getWorkspaceRoot();
+    final dir = Directory(root);
+    if (!await dir.exists()) {
+      await dir.create(recursive: true);
+    }
   }
 
   @override
@@ -101,13 +138,6 @@ class _DevScreenState extends ConsumerState<DevScreen> {
     final notifier = ref.read(devAgentSessionProvider.notifier);
     notifier.init(registry);
     notifier.session?.permissionManager.loadPersistedSettings();
-  }
-
-  Future<void> _ensureWorkspace() async {
-    final dir = Directory(kWorkspaceRoot);
-    if (!await dir.exists()) {
-      await dir.create(recursive: true);
-    }
   }
 
   // ── Unified input handler ──
@@ -145,10 +175,10 @@ class _DevScreenState extends ConsumerState<DevScreen> {
     try {
       final notifier = ref.read(devAgentSessionProvider.notifier);
       final workspaceContext = '\n[DEV MODE] You are in a local development environment. '
-          'Workspace: $kWorkspaceRoot\n'
+          'Workspace: $_currentDir\n'
           'Current directory: $_currentDir\n'
           'Use read_file, write_file, list_directory, shell_exec, and other tools to code, test, and iterate. '
-          'Always use absolute paths starting with $kWorkspaceRoot.';
+          'Always use absolute paths starting with $_currentDir.';
 
       await notifier.sendMessage(text + workspaceContext);
     } catch (e) {
@@ -417,7 +447,8 @@ class _DevScreenState extends ConsumerState<DevScreen> {
   Future<void> _loadFileTree() async {
     setState(() => _fileTreeLoading = true);
     try {
-      _fileTree = await _loadDirectory(kWorkspaceRoot);
+      final root = await getWorkspaceRoot();
+      _fileTree = await _loadDirectory(root);
     } catch (_) {}
     setState(() => _fileTreeLoading = false);
   }
@@ -531,7 +562,8 @@ class _DevScreenState extends ConsumerState<DevScreen> {
   }
 
   Future<void> _createProject(String name, String type) async {
-    final projectPath = '$kWorkspaceRoot/$name';
+    final root = await getWorkspaceRoot();
+    final projectPath = '$root/$name';
     final dir = Directory(projectPath);
 
     if (await dir.exists()) {
@@ -652,7 +684,7 @@ class _DevScreenState extends ConsumerState<DevScreen> {
             ),
             constraints: const BoxConstraints(maxWidth: 200),
             child: Text(
-              _currentDir.replaceFirst(kWorkspaceRoot, '~/Projects'),
+              _currentDir.isEmpty ? '...' : _currentDir.replaceFirst(RegExp(r'^/storage/emulated/0/Android/data/[^/]+/files'), '~/app'),
               style: const TextStyle(fontSize: 11, color: Color(0xFF9D9D9D), fontFamily: 'monospace'),
               overflow: TextOverflow.ellipsis,
             ),
@@ -699,11 +731,11 @@ class _DevScreenState extends ConsumerState<DevScreen> {
             const SizedBox(height: 16),
             _QuickAction(
               text: 'Create a Flutter project',
-              onTap: () => _sendToAI('Create a new Flutter project in $kWorkspaceRoot/my_app'),
+              onTap: () => _sendToAI('Create a new Flutter project in ${_currentDir.isEmpty ? "/KoloProjects" : _currentDir}/my_app'),
             ),
             _QuickAction(
               text: 'Build a REST API',
-              onTap: () => _sendToAI('Create a Python Flask REST API in $kWorkspaceRoot/api'),
+              onTap: () => _sendToAI('Create a Python Flask REST API in ${_currentDir.isEmpty ? "/KoloProjects" : _currentDir}/api'),
             ),
             _QuickAction(
               text: '\$ ls -la',

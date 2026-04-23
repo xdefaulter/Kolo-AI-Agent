@@ -3,14 +3,17 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../api/provider.dart';
 import '../tools/tool_base.dart';
 import '../tools/tool_registry.dart';
+import '../tools/android/scan_phone_apps.dart';
 import '../permissions/permission_manager.dart';
 import '../../core/providers_state.dart';
 import '../../core/storage/database.dart';
+import '../api/openai_client.dart';
 import 'agent_loop.dart';
 import 'conversation_manager.dart';
 import 'system_prompt.dart';
 import 'tool_router.dart';
 import '../providers.dart';
+import '../connectivity_service.dart';
 import 'agent_settings.dart';
 import '../../ui/chat/input_bar.dart' show ChatAttachment;
 
@@ -24,6 +27,19 @@ class AgentSession {
 
   /// Cancel token for the current run
   Completer<void>? _cancelToken;
+
+  /// Cached OpenAI client — reused across messages for same provider
+  OpenAIClient? _cachedClient;
+  String? _cachedProviderId;
+
+  /// 2.10: Cached tool router — reused across messages
+  late final ToolRouter _toolRouter = ToolRouter(
+    registry: registry,
+    permissionManager: permissionManager,
+  );
+
+  /// Cached app intents summary for system prompt injection
+  String? _appIntentsSummary;
 
   AgentSession._({
     required this.registry,
@@ -52,6 +68,17 @@ class AgentSession {
     if (_cancelToken != null && !_cancelToken!.isCompleted) {
       _cancelToken!.complete();
     }
+    _cachedClient?.cancel();
+  }
+
+  /// Get or create a cached OpenAIClient for the active provider
+  OpenAIClient _getClient(ApiProvider provider) {
+    if (_cachedClient != null && _cachedProviderId == provider.id) {
+      return _cachedClient!;
+    }
+    _cachedClient = OpenAIClient(provider);
+    _cachedProviderId = provider.id;
+    return _cachedClient!;
   }
 
   /// Get the active API provider from settings (reads from same provider UI uses)
@@ -90,6 +117,7 @@ class AgentSession {
       conversationManager.getMessagesForApi(
         systemPrompt: SystemPromptBuilder.build(
           customInstructions: _ref.read(customInstructionsProvider),
+          appIntentsSummary: _appIntentsSummary,
         ),
       );
 
@@ -106,8 +134,18 @@ class AgentSession {
       return;
     }
 
+    // Check connectivity before making API call
+    final isOnline = _ref.read(isOnlineProvider);
+    if (!isOnline) {
+      yield AgentError(error: 'No internet connection. Check your network and try again.');
+      return;
+    }
+
     // Create a fresh cancel token for this run
     _cancelToken = Completer<void>();
+
+    // Load app intents summary if available (for AI context)
+    _appIntentsSummary ??= await loadAppIntentsSummary();
 
     // Add user message to conversation — support vision (images)
     if (imageAttachments != null && imageAttachments.isNotEmpty) {
@@ -133,11 +171,8 @@ class AgentSession {
     final maxIter = _ref.read(maxIterationsProvider);
 
     final agentLoop = AgentLoop(
-      toolRouter: ToolRouter(
-        registry: registry,
-        permissionManager: permissionManager,
-      ),
-      provider: provider,
+      toolRouter: _toolRouter,
+      client: _getClient(provider),
       cancelToken: _cancelToken,
       maxIterations: maxIter,
     );

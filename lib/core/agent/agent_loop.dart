@@ -1,6 +1,5 @@
 import 'dart:async';
 import '../api/openai_client.dart';
-import '../api/provider.dart';
 import '../api/streaming_parser.dart';
 import '../tools/tool_base.dart';
 import 'tool_router.dart';
@@ -8,11 +7,11 @@ import 'tool_router.dart';
 /// The core agent think-act-observe loop
 class AgentLoop {
   final ToolRouter toolRouter;
-  final ApiProvider provider;
+  final OpenAIClient client;
   final Completer<void>? cancelToken;
   final int maxIterations;
 
-  AgentLoop({required this.toolRouter, required this.provider, this.cancelToken, this.maxIterations = 20});
+  AgentLoop({required this.toolRouter, required this.client, this.cancelToken, this.maxIterations = 20});
 
   bool get _cancelled => cancelToken?.isCompleted ?? false;
 
@@ -22,7 +21,6 @@ class AgentLoop {
     required String chatId,
     required List<Map<String, dynamic>> toolDefinitions,
   }) async* {
-    final client = OpenAIClient(provider);
 
     List<Map<String, dynamic>> currentMessages = List.from(messages);
     int iterations = 0;

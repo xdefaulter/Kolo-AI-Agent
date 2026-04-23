@@ -29,6 +29,8 @@ class MessageBubble extends StatelessWidget {
     final isUser = role == 'user';
     final cs = Theme.of(context).colorScheme;
 
+    // 2.7: Use LayoutBuilder instead of MediaQuery.of to avoid rebuilds on keyboard/rotation
+    return LayoutBuilder(builder: (context, constraints) {
     return Semantics(
       label: '${isUser ? "Your message" : "Kolo's message"}: ${content.isEmpty ? "thinking" : content}',
       child: Align(
@@ -37,7 +39,7 @@ class MessageBubble extends StatelessWidget {
           margin: EdgeInsets.zero,
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
           constraints: BoxConstraints(
-            maxWidth: MediaQuery.of(context).size.width * 0.8,
+            maxWidth: constraints.maxWidth * 0.8,
           ),
           decoration: BoxDecoration(
             color: isUser
@@ -156,6 +158,7 @@ class MessageBubble extends StatelessWidget {
         ),
       ),
     );
+    }); // LayoutBuilder
   }
 }
 
@@ -291,11 +294,11 @@ class _ImageGrid extends StatelessWidget {
           borderRadius: BorderRadius.circular(8),
           child: Image.file(
             File(path),
-            width: (MediaQuery.of(context).size.width * 0.35).clamp(100, 180),
+            width: 140.0,
             height: 120,
             fit: BoxFit.cover,
             errorBuilder: (_, __, ___) => Container(
-              width: (MediaQuery.of(context).size.width * 0.35).clamp(100, 180),
+              width: 140.0,
               height: 120,
               decoration: BoxDecoration(
                 color: cs.surfaceContainerHighest,

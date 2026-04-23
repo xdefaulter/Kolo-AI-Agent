@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 import 'package:dio/dio.dart';
 import 'provider.dart';
 
@@ -7,6 +8,12 @@ import 'provider.dart';
 class OpenAIClient {
   final Dio _dio;
   final ApiProvider provider;
+
+  /// Maximum number of retries for transient errors (429, 500, 502, 503)
+  static const _maxRetries = 3;
+
+  /// Cancellation token for the current stream
+  CancelToken? _cancelToken;
 
   OpenAIClient(this.provider)
       : _dio = Dio(BaseOptions(
@@ -18,9 +25,10 @@ class OpenAIClient {
           },
           connectTimeout: const Duration(seconds: 30),
           receiveTimeout: const Duration(seconds: 120),
+          sendTimeout: const Duration(seconds: 30),
           followRedirects: true,
           maxRedirects: 5,
-          validateStatus: (status) => true, // handle all status codes ourselves
+          validateStatus: (status) => status != null && status < 500,
         )) {
     // Re-attach auth headers on redirects (Dio strips Authorization on cross-origin redirects)
     _dio.interceptors.add(InterceptorsWrapper(
@@ -29,6 +37,12 @@ class OpenAIClient {
         handler.next(options);
       },
     ));
+  }
+
+  /// Cancel any active stream
+  void cancel() {
+    _cancelToken?.cancel('User cancelled');
+    _cancelToken = null;
   }
 
   /// Send a streaming chat completion request
@@ -44,142 +58,187 @@ class OpenAIClient {
       'stream': true,
     };
     if (tools.isNotEmpty) {
-      // tools from getFunctionDefinitions() already have {"type":"function","function":{...}} structure
       requestBody['tools'] = tools;
     }
 
-    try {
-      print('[OpenAIClient] POST ${provider.baseUrl}/chat/completions model=${provider.model} key=${provider.apiKey.isEmpty ? "EMPTY" : "${provider.apiKey.substring(0, 4)}..."}');
-      final response = await _dio.post<ResponseBody>(
-        '/chat/completions',
-        data: requestBody,
-        options: Options(
-          responseType: ResponseType.stream,
-          headers: {'Accept': 'text/event-stream'},
-        ),
-      );
-      print('[OpenAIClient] Response received, status: ${response.statusCode}, has data: ${response.data != null}');
+    _cancelToken = CancelToken();
 
-      // Handle non-2xx status codes that slipped through validateStatus
-      if (response.statusCode != null && response.statusCode! >= 400) {
-        // Read the full error response body
-        String errorBody = '';
+    for (int attempt = 0; attempt <= _maxRetries; attempt++) {
+      try {
+        final response = await _dio.post<ResponseBody>(
+          '/chat/completions',
+          data: requestBody,
+          cancelToken: _cancelToken,
+          options: Options(
+            responseType: ResponseType.stream,
+            headers: {'Accept': 'text/event-stream'},
+            // Allow all status codes for streaming so we can read error bodies
+            validateStatus: (_) => true,
+          ),
+        );
+
+        // Handle auth errors — never retry these
+        if (response.statusCode == 401 || response.statusCode == 403) {
+          String errorBody = '';
+          await for (final chunk in response.data!.stream) {
+            errorBody += utf8.decode(chunk, allowMalformed: true);
+          }
+          String detail = _extractErrorDetail(errorBody);
+          yield ChatStreamChunk(
+            content: '',
+            finishReason: 'error',
+            error: 'Authentication failed (HTTP ${response.statusCode}): $detail',
+          );
+          return;
+        }
+
+        // Handle retryable server errors
+        if (response.statusCode != null && response.statusCode! >= 500) {
+          if (attempt < _maxRetries) {
+            await _backoff(attempt);
+            continue;
+          }
+          // Drain the error response stream
+          await for (final _ in response.data!.stream) {}
+          yield ChatStreamChunk(
+            content: '',
+            finishReason: 'error',
+            error: 'Server error (HTTP ${response.statusCode}) after ${_maxRetries + 1} attempts',
+          );
+          return;
+        }
+
+        // Handle rate limiting with retry
+        if (response.statusCode == 429) {
+          if (attempt < _maxRetries) {
+            // Try to read Retry-After header
+            final retryAfter = response.headers.value('retry-after');
+            if (retryAfter != null) {
+              final seconds = int.tryParse(retryAfter) ?? (1 << attempt);
+              await Future.delayed(Duration(seconds: seconds));
+            } else {
+              await _backoff(attempt);
+            }
+            continue;
+          }
+          yield ChatStreamChunk(
+            content: '',
+            finishReason: 'error',
+            error: 'Rate limited (HTTP 429) after ${_maxRetries + 1} attempts. Try again later.',
+          );
+          return;
+        }
+
+        // Handle other client errors (4xx) — don't retry
+        if (response.statusCode != null && response.statusCode! >= 400) {
+          String errorBody = '';
+          await for (final chunk in response.data!.stream) {
+            errorBody += utf8.decode(chunk, allowMalformed: true);
+          }
+          String detail = _extractErrorDetail(errorBody);
+          yield ChatStreamChunk(
+            content: '',
+            finishReason: 'error',
+            error: 'API Error (HTTP ${response.statusCode}): $detail',
+          );
+          return;
+        }
+
+        // Success — process the SSE stream
+        String buffer = '';
         await for (final chunk in response.data!.stream) {
-          errorBody += utf8.decode(chunk, allowMalformed: true);
-        }
-        // Try to extract error message from JSON
-        String detail = errorBody;
-        try {
-          final parsed = jsonDecode(errorBody);
-          if (parsed is Map && parsed['error'] is Map) {
-            detail = parsed['error']['message']?.toString() ?? errorBody.substring(0, errorBody.length > 300 ? 300 : errorBody.length);
-          }
-        } catch (_) {
-          detail = errorBody.length > 300 ? errorBody.substring(0, 300) : errorBody;
-        }
-        final keyHint = provider.apiKey.isEmpty ? ' (no API key!)' : ' (key: ${provider.apiKey.substring(0, provider.apiKey.length > 8 ? 4 : 0)}...)';
-        final errorMsg = 'HTTP ${response.statusCode} ${response.statusMessage ?? ''}: $detail | model: ${provider.model}$keyHint';
-        print('[OpenAIClient] Error response: $errorMsg');
-        yield ChatStreamChunk(content: '', finishReason: 'error', error: 'API Error: $errorMsg');
-        return;
-      }
+          final decoded = utf8.decode(chunk, allowMalformed: true);
+          buffer += decoded;
 
-      String buffer = '';
-      await for (final chunk in response.data!.stream) {
-        final decoded = utf8.decode(chunk, allowMalformed: true);
-        buffer += decoded;
-        print('[OpenAIClient] Chunk received: ${decoded.length} bytes, total buffer: ${buffer.length}');
+          while (buffer.contains('\n')) {
+            final idx = buffer.indexOf('\n');
+            final line = buffer.substring(0, idx).trim();
+            buffer = buffer.substring(idx + 1);
 
-        while (buffer.contains('\n')) {
-          final idx = buffer.indexOf('\n');
-          final line = buffer.substring(0, idx).trim();
-          buffer = buffer.substring(idx + 1);
+            if (line.isEmpty || line.startsWith(':')) continue;
+            if (!line.startsWith('data: ')) continue;
 
-          if (line.isEmpty || line.startsWith(':')) continue;
-          if (!line.startsWith('data: ')) continue;
-
-          final data = line.substring(6).trim();
-          if (data == '[DONE]') {
-            print('[OpenAIClient] Stream done');
-            return;
-          }
-
-          try {
-            final json = jsonDecode(data) as Map<String, dynamic>;
-            final choices = json['choices'] as List<dynamic>?;
-            if (choices == null || choices.isEmpty) continue;
-
-            final choice = choices[0] as Map<String, dynamic>;
-            final delta = choice['delta'] as Map<String, dynamic>? ?? {};
-            final content = delta['content'] as String? ?? '';
-            // Extract reasoning/thinking content (DeepSeek, Kimi, some OpenRouter models)
-            final reasoningContent = delta['reasoning_content'] as String? ??
-                delta['reasoning'] as String? ?? '';
-            final toolCalls = delta['tool_calls'] as List<dynamic>?;
-            final finishReason = choice['finish_reason'] as String?;
-            if (content.isNotEmpty || reasoningContent.isNotEmpty || (toolCalls != null && toolCalls.isNotEmpty)) {
-              print('[OpenAIClient] Yielding: content="${content.substring(0, content.length > 50 ? 50 : content.length)}" reasoning="${reasoningContent.substring(0, reasoningContent.length > 50 ? 50 : reasoningContent.length)}" finish=$finishReason');
+            final data = line.substring(6).trim();
+            if (data == '[DONE]') {
+              return;
             }
 
-            yield ChatStreamChunk(
-              content: content,
-              reasoningContent: reasoningContent.isNotEmpty ? reasoningContent : null,
-              toolCalls: toolCalls
-                  ?.map((tc) => ToolCallDelta.fromJson(tc as Map<String, dynamic>))
-                  .toList(),
-              finishReason: finishReason,
-            );
-          } catch (e) {
-            print('[OpenAIClient] Parse error: $e, line: ${data.substring(0, data.length > 100 ? 100 : data.length)}');
-            // Skip malformed chunks
+            try {
+              final json = jsonDecode(data) as Map<String, dynamic>;
+              final choices = json['choices'] as List<dynamic>?;
+              if (choices == null || choices.isEmpty) continue;
+
+              final choice = choices[0] as Map<String, dynamic>;
+              final delta = choice['delta'] as Map<String, dynamic>? ?? {};
+              final content = delta['content'] as String? ?? '';
+              final reasoningContent = delta['reasoning_content'] as String? ??
+                  delta['reasoning'] as String? ?? '';
+              final toolCalls = delta['tool_calls'] as List<dynamic>?;
+              final finishReason = choice['finish_reason'] as String?;
+
+              yield ChatStreamChunk(
+                content: content,
+                reasoningContent: reasoningContent.isNotEmpty ? reasoningContent : null,
+                toolCalls: toolCalls
+                    ?.map((tc) => ToolCallDelta.fromJson(tc as Map<String, dynamic>))
+                    .toList(),
+                finishReason: finishReason,
+              );
+            } catch (_) {
+              // Skip malformed chunks
+            }
           }
         }
-      }
-      print('[OpenAIClient] Stream ended naturally, remaining buffer: ${buffer.length} bytes');
-    } on DioException catch (e) {
-      final statusCode = e.response?.statusCode;
-      final statusMsg = e.response?.statusMessage ?? '';
-      final responseBody = e.response?.data;
-      String detail = '';
-      // Try to extract a useful error message from the response body
-      if (responseBody is Map) {
-        final errObj = responseBody['error'];
-        if (errObj is Map) {
-          detail = errObj['message']?.toString() ?? '';
-        } else if (responseBody['message'] != null) {
-          detail = responseBody['message'].toString();
+        // Stream ended naturally
+        return;
+
+      } on DioException catch (e) {
+        if (e.type == DioExceptionType.cancel) {
+          yield ChatStreamChunk(content: '', finishReason: 'cancelled');
+          return;
         }
-      } else if (responseBody is String && responseBody.isNotEmpty) {
-        // Try to parse as JSON, fallback to raw string
-        try {
-          final parsed = jsonDecode(responseBody);
-          if (parsed is Map && parsed['error'] is Map) {
-            detail = parsed['error']['message']?.toString() ?? responseBody.substring(0, responseBody.length > 300 ? 300 : responseBody.length);
+
+        // Retry on connection/timeout errors
+        if (attempt < _maxRetries &&
+            (e.type == DioExceptionType.connectionTimeout ||
+             e.type == DioExceptionType.receiveTimeout ||
+             e.type == DioExceptionType.connectionError)) {
+          await _backoff(attempt);
+          continue;
+        }
+
+        final statusCode = e.response?.statusCode;
+        final responseBody = e.response?.data;
+        String detail = '';
+        if (responseBody is Map) {
+          final errObj = responseBody['error'];
+          if (errObj is Map) {
+            detail = errObj['message']?.toString() ?? '';
           }
-        } catch (_) {
-          detail = responseBody.length > 300 ? responseBody.substring(0, 300) : responseBody;
+        } else if (responseBody is String && responseBody.isNotEmpty) {
+          detail = _extractErrorDetail(responseBody);
         }
+
+        String errorDetail;
+        if (statusCode != null) {
+          errorDetail = 'HTTP $statusCode${detail.isNotEmpty ? ': $detail' : ''} | ${provider.baseUrl} | model: ${provider.model}';
+        } else {
+          errorDetail = '${e.message ?? e.type.toString()} | ${provider.baseUrl}';
+        }
+        yield ChatStreamChunk(
+          content: '',
+          finishReason: 'error',
+          error: 'API Error: $errorDetail',
+        );
+        return;
+      } catch (e) {
+        yield ChatStreamChunk(
+          content: '',
+          finishReason: 'error',
+          error: 'Unexpected error: $e',
+        );
+        return;
       }
-      final keyHint = provider.apiKey.isEmpty ? ' (no API key!)' : ' (key: ${provider.apiKey.substring(0, provider.apiKey.length > 8 ? 4 : 0)}...)';
-      String errorDetail;
-      if (statusCode != null) {
-        errorDetail = 'HTTP $statusCode $statusMsg${detail.isNotEmpty ? ': $detail' : ''} | ${provider.baseUrl} | model: ${provider.model}$keyHint';
-      } else {
-        errorDetail = '${e.message ?? e.type.toString()} | ${provider.baseUrl}$keyHint';
-      }
-      print('[OpenAIClient] DioException: $errorDetail');
-      yield ChatStreamChunk(
-        content: '',
-        finishReason: 'error',
-        error: 'API Error: $errorDetail',
-      );
-    } catch (e) {
-      print('[OpenAIClient] Unexpected error: $e');
-      yield ChatStreamChunk(
-        content: '',
-        finishReason: 'error',
-        error: 'Unexpected error: $e',
-      );
     }
   }
 
@@ -195,7 +254,6 @@ class OpenAIClient {
       'temperature': provider.temperature,
     };
     if (tools.isNotEmpty) {
-      // tools from getFunctionDefinitions() already have {"type":"function","function":{...}} structure
       requestBody['tools'] = tools;
     }
 
@@ -213,11 +271,30 @@ class OpenAIClient {
     }
     return response.data!;
   }
+
+  /// Extract error detail from a response body string
+  String _extractErrorDetail(String body) {
+    try {
+      final parsed = jsonDecode(body);
+      if (parsed is Map && parsed['error'] is Map) {
+        return parsed['error']['message']?.toString() ??
+            body.substring(0, body.length > 300 ? 300 : body.length);
+      }
+    } catch (_) {}
+    return body.length > 300 ? body.substring(0, 300) : body;
+  }
+
+  /// Exponential backoff with jitter
+  Future<void> _backoff(int attempt) async {
+    final baseMs = 1000 * (1 << attempt); // 1s, 2s, 4s
+    final jitter = Random().nextInt(500);
+    await Future.delayed(Duration(milliseconds: baseMs + jitter));
+  }
 }
 
 class ChatStreamChunk {
   final String content;
-  final String? reasoningContent; // thinking/reasoning tokens from models like DeepSeek, Kimi, etc.
+  final String? reasoningContent;
   final List<ToolCallDelta>? toolCalls;
   final String? finishReason;
   final String? error;
@@ -242,8 +319,6 @@ class ToolCallDelta {
   factory ToolCallDelta.fromJson(Map<String, dynamic> json) {
     final function = json['function'] as Map<String, dynamic>? ?? {};
     final rawArgs = function['arguments'];
-    // Some providers (Kimi, Ollama, etc.) send arguments as a parsed JSON
-    // object instead of a JSON string. Normalize to string.
     final argsString = rawArgs is String
         ? rawArgs
         : rawArgs != null

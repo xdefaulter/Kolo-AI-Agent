@@ -69,8 +69,21 @@ class VisionModelConfigNotifier extends StateNotifier<VisionModelConfig> {
 /// VLM Screen Analyzer — sends screenshot to vision model and gets back actions
 class VlmScreenAnalyzer {
   final ApiProvider visionProvider;
+  late final Dio _dio;
 
-  VlmScreenAnalyzer(this.visionProvider);
+  VlmScreenAnalyzer(this.visionProvider) {
+    _dio = Dio(BaseOptions(
+      baseUrl: visionProvider.baseUrl,
+      headers: {
+        'Authorization': 'Bearer ${visionProvider.apiKey}',
+        'Content-Type': 'application/json',
+        ...visionProvider.customHeaders,
+      },
+      connectTimeout: const Duration(seconds: 30),
+      receiveTimeout: const Duration(seconds: 120),
+      validateStatus: (status) => status != null && status < 500,
+    ));
+  }
 
   /// Analyze a screenshot and return suggested actions.
   /// [screenshotBase64] — JPEG base64 of current screen
@@ -81,18 +94,6 @@ class VlmScreenAnalyzer {
     required String taskDescription,
     String? screenTree,
   }) async {
-    final dio = Dio(BaseOptions(
-      baseUrl: visionProvider.baseUrl,
-      headers: {
-        'Authorization': 'Bearer ${visionProvider.apiKey}',
-        'Content-Type': 'application/json',
-        ...visionProvider.customHeaders,
-      },
-      connectTimeout: const Duration(seconds: 30),
-      receiveTimeout: const Duration(seconds: 120),
-      validateStatus: (status) => true,
-    ));
-
     // Build the vision message
     final systemPrompt = '''You are a phone automation assistant. You analyze screenshots of an Android phone screen and decide what actions to take to accomplish the user's task.
 
@@ -135,7 +136,7 @@ If the task is already complete, respond: [{"action": "done"}]''';
     };
 
     try {
-      final response = await dio.post<Map<String, dynamic>>(
+      final response = await _dio.post<Map<String, dynamic>>(
         '/chat/completions',
         data: requestBody,
       );
@@ -186,12 +187,13 @@ If the task is already complete, respond: [{"action": "done"}]''';
       final activeProvider = await db.getActiveProvider();
       if (activeProvider == null) return null;
       final activeModel = activeProvider.activeModel;
+      if (activeModel == null) return null;
       return ApiProvider(
         id: activeProvider.id,
         name: activeProvider.name,
         baseUrl: activeProvider.baseUrl,
         apiKey: activeProvider.apiKey,
-        model: activeModel?.modelId ?? 'gpt-4o',
+        model: activeModel.modelId,
         customHeaders: activeProvider.customHeaders,
         maxTokens: 1024,
         temperature: 0.1,
@@ -207,7 +209,7 @@ If the task is already complete, respond: [{"action": "done"}]''';
         name: provider.name,
         baseUrl: provider.baseUrl,
         apiKey: provider.apiKey,
-        model: config.modelId ?? provider.activeModel?.modelId ?? 'gpt-4o',
+        model: config.modelId ?? provider.activeModel?.modelId ?? provider.models.firstOrNull?.modelId ?? '',
         customHeaders: provider.customHeaders,
         maxTokens: 1024,
         temperature: 0.1,

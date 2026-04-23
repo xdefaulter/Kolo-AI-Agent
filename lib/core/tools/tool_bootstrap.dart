@@ -22,13 +22,17 @@ import 'cross_platform/open_app.dart';
 import 'cross_platform/contacts.dart';
 // Android phone controller tools
 import 'android/phone_controller.dart';
+import 'android/adb_phone_controller.dart';
 import 'android/analyze_screen.dart';
 import 'android/app_launcher.dart';
 import 'android/phone_control_overlay.dart';
+import 'android/phone_control_mode.dart';
+import 'android/scan_phone_apps.dart';
 
 /// Bootstrap: Register all tools into the registry
 /// Called once at app startup
-ToolRegistry bootstrapTools() {
+/// [mode] determines whether phone control tools use Accessibility or ADB.
+ToolRegistry bootstrapTools({PhoneControlMode mode = PhoneControlMode.accessibility}) {
   final registry = ToolRegistry();
 
   // ── File & directory (7) ──
@@ -94,18 +98,31 @@ ToolRegistry bootstrapTools() {
   // ── Timers (1) ──
   registry.register(TimerTool());
 
-  // ── Android Phone Controller (11) ──
-  registry.register(StartControllerTool());
-  registry.register(StopControllerTool());
-  registry.register(ReadScreenTool());
-  registry.register(ScreenshotTool());
-  registry.register(TapTool());
-  registry.register(SwipeTool());
-  registry.register(TypeTextTool());
-  registry.register(PressKeyTool());
-  registry.register(ScrollTool());
-  registry.register(ClickByTextTool());
-  registry.register(LongPressTool());
+  // ── Android Phone Controller — mode-dependent ──
+  if (mode == PhoneControlMode.adb) {
+    // ADB-based tools (no accessibility service needed)
+    registry.register(AdbTapTool());
+    registry.register(AdbSwipeTool());
+    registry.register(AdbTypeTextTool());
+    registry.register(AdbPressKeyTool());
+    registry.register(AdbScreenshotTool());
+    registry.register(AdbDumpUiTool());
+    registry.register(AdbScrollTool());
+    registry.register(AdbLongPressTool());
+  } else {
+    // Accessibility-based tools (default)
+    registry.register(StartControllerTool());
+    registry.register(StopControllerTool());
+    registry.register(ReadScreenTool());
+    registry.register(ScreenshotTool());
+    registry.register(TapTool());
+    registry.register(SwipeTool());
+    registry.register(TypeTextTool());
+    registry.register(PressKeyTool());
+    registry.register(ScrollTool());
+    registry.register(ClickByTextTool());
+    registry.register(LongPressTool());
+  }
   registry.register(ShowActionTool());
   registry.register(AnalyzeScreenTool());
 
@@ -113,6 +130,9 @@ ToolRegistry bootstrapTools() {
   registry.register(LaunchAppTool());
   registry.register(ListInstalledAppsTool());
   registry.register(DeviceInfoTool());
+
+  // ── App Scanner (ADB) ──
+  registry.register(ScanPhoneAppsTool());
 
   // ── Android Phone Control Overlay (3) ──
   registry.register(PhoneControlStartTool());

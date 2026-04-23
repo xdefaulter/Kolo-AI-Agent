@@ -3,12 +3,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/tools/tool_base.dart';
 import '../../core/tools/tool_bootstrap.dart';
 import '../../core/tools/tool_registry.dart';
+import '../../core/tools/android/phone_control_mode.dart';
 import '../../core/permissions/permission_manager.dart';
 import '../../core/storage/database.dart';
 import '../../core/agent/agent_session.dart';
 
-// Tool registry — shared with chat screen
-final toolsScreenRegistryProvider = Provider<ToolRegistry>((ref) => bootstrapTools());
+// 3.5: Reuse the shared tool registry instead of creating a separate one.
+import '../chat/chat_screen.dart' show toolRegistryProvider;
+final toolsScreenRegistryProvider = toolRegistryProvider;
 
 // Permission modes state
 final toolPermissionModesProvider = StateNotifierProvider<ToolPermissionModesNotifier, Map<String, ToolPermissionMode>>((ref) {

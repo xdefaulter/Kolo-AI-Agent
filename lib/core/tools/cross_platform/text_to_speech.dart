@@ -54,4 +54,10 @@ class TextToSpeechTool extends KoloTool {
       return ToolResult.err('Text-to-speech failed: $e');
     }
   }
+
+  /// Stop TTS and release resources
+  Future<void> dispose() async {
+    await _tts?.stop();
+    _tts = null;
+  }
 }

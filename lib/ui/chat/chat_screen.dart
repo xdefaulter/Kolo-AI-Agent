@@ -15,6 +15,7 @@ import '../../core/agent/conversation_manager.dart';
 import '../../core/storage/database.dart';
 import '../../core/tools/tool_bootstrap.dart';
 import '../../core/tools/tool_registry.dart';
+import '../../core/tools/android/phone_control_mode.dart';
 import '../../core/tools/tool_base.dart';
 import '../../core/theme_provider.dart';
 import '../../core/providers.dart';
@@ -27,8 +28,11 @@ import '../shared/page_transitions.dart';
 
 const _uuid = Uuid();
 
-// Tool registry — initialized once
-final toolRegistryProvider = Provider<ToolRegistry>((ref) => bootstrapTools());
+// Tool registry — rebuilds when phone control mode changes
+final toolRegistryProvider = Provider<ToolRegistry>((ref) {
+  final mode = ref.watch(phoneControlModeProvider);
+  return bootstrapTools(mode: mode);
+});
 
 // Chat messages UI state — now includes timestamp
 final chatMessagesProvider = StateProvider<List<ChatMessageUI>>((ref) => []);
@@ -52,6 +56,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   String _searchQuery = '';
   bool _enterToSend = false;
   ProviderSubscription<AgentSessionState>? _sessionSub;
+  // 2.5: Cache interleaved items to avoid recomputation on every build
+  List<dynamic>? _cachedInterleavedItems;
+  int _cachedMessageCount = -1;
 
   @override
   void initState() {
@@ -605,8 +612,12 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     );
   }
 
-  /// Pre-compute the interleaved list of date separators and messages
+  /// Pre-compute the interleaved list of date separators and messages.
+  /// 2.5: Cached — only recomputed when message count changes.
   List<dynamic> _buildInterleavedItems(List<ChatMessageUI> messages) {
+    if (_cachedInterleavedItems != null && _cachedMessageCount == messages.length) {
+      return _cachedInterleavedItems!;
+    }
     final items = <dynamic>[];
     DateTime? lastDate;
     for (var i = 0; i < messages.length; i++) {
@@ -617,6 +628,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       }
       items.add(_MsgItem(msg: m, index: i));
     }
+    _cachedInterleavedItems = items;
+    _cachedMessageCount = messages.length;
     return items;
   }
 

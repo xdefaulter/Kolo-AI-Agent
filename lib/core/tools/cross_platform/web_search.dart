@@ -59,6 +59,9 @@ class WebSearchTool extends KoloTool {
         'query': query,
         'resultCount': results.length,
       });
+    } on FormatException {
+      // 4.4: DuckDuckGo HTML format may have changed
+      return ToolResult.err('Search parsing failed — DuckDuckGo HTML format may have changed. Try again later.');
     } catch (e) {
       return ToolResult.err('Search failed: $e');
     }

@@ -74,12 +74,10 @@ class ProviderConfig {
   }
 
   /// Get the currently selected model (first active, or first model, or null)
+  /// 9.3: Use null-safe lookup instead of try/catch for flow control.
   ModelConfig? get activeModel {
-    try {
-      return models.firstWhere((m) => m.isActive);
-    } catch (_) {
-      return models.isNotEmpty ? models.first : null;
-    }
+    final active = models.where((m) => m.isActive).firstOrNull;
+    return active ?? (models.isNotEmpty ? models.first : null);
   }
 
   ProviderConfig copyWith({
@@ -105,11 +103,13 @@ class ProviderConfig {
     );
   }
 
+  /// Serialize to map. API key is included for persistence but should be
+  /// stored securely (see flutter_secure_storage migration TODO).
   Map<String, dynamic> toMap() => {
         'id': id,
         'name': name,
         'baseUrl': baseUrl,
-        'apiKey': apiKey,
+        'apiKey': apiKey, // 1.2: TODO migrate to flutter_secure_storage
         'customHeaders': customHeaders,
         'isActive': isActive,
         'modelsEndpoint': modelsEndpoint,

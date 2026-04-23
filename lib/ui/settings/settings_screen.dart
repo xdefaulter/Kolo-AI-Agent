@@ -6,13 +6,17 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:share_plus/share_plus.dart';
 import '../../core/api/provider.dart';
 import '../../core/providers_state.dart';
+import '../../core/tools/tool_base.dart';
 import '../../core/tools/tool_bootstrap.dart';
 import '../../core/tools/android/vlm_analyzer.dart';
+import '../../core/tools/android/phone_control_mode.dart';
+import '../../core/tools/android/scan_phone_apps.dart';
 import '../../core/agent/agent_settings.dart';
 import '../../core/storage/database.dart';
 import '../../core/haptics.dart';
 import '../shared/page_transitions.dart';
 import 'tools_permission_screen.dart';
+import '../chat/chat_screen.dart' show toolRegistryProvider;
 
 // ---- Settings Screen ----
 
@@ -34,6 +38,8 @@ class SettingsScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final providers = ref.watch(providersProvider);
+    // 2.4: Reuse existing registry provider instead of calling bootstrapTools()
+    final toolCount = ref.watch(toolRegistryProvider).all.length;
 
     return Scaffold(
       appBar: AppBar(title: const Text('Settings')),
@@ -72,7 +78,7 @@ class SettingsScreen extends ConsumerWidget {
           FilledButton.tonalIcon(
             onPressed: () => pushSlideRight(context, const ToolsPermissionScreen()),
             icon: const Icon(Icons.build_outlined),
-            label: Text('Manage ${bootstrapTools().all.length} Tools'),
+            label: Text('Manage $toolCount Tools'),
           ),
 
           const SizedBox(height: 16),
@@ -81,6 +87,13 @@ class SettingsScreen extends ConsumerWidget {
           _sectionHeader(context, 'Vision Model', 'Configure the model for screen analysis & phone control. Some models (GPT-4o, Gemini) support both text and vision.'),
           const SizedBox(height: 8),
           const _VisionModelSection(),
+
+          const SizedBox(height: 16),
+
+          // ---- Phone Control Mode ----
+          _sectionHeader(context, 'Phone Control', 'Choose how the agent controls the connected phone.'),
+          const SizedBox(height: 8),
+          const _PhoneControlModeSection(),
 
           const SizedBox(height: 16),
 
@@ -114,7 +127,7 @@ class SettingsScreen extends ConsumerWidget {
                 ListTile(
                   leading: const Icon(Icons.info_outline),
                   title: const Text('About'),
-                  subtitle: Text('v0.1.0 · ${bootstrapTools().all.length} tools', style: TextStyle(fontSize: 12, color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.5))),
+                  subtitle: Text('v0.1.0 · ${toolCount} tools', style: TextStyle(fontSize: 12, color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.5))),
                   onTap: () => _showAbout(context),
                 ),
               ],
@@ -191,7 +204,7 @@ class SettingsScreen extends ConsumerWidget {
       applicationVersion: '0.1.0',
       applicationIcon: Icon(Icons.smart_toy, size: 48, color: Theme.of(context).colorScheme.primary),
       children: [
-        Text('Unlimited AI assistant with ${bootstrapTools().all.length} tools.'),
+        const Text('Unlimited AI assistant with 50+ tools.'),
         const SizedBox(height: 8),
         const Text('Built with Flutter. Powered by OpenAI-compatible APIs.'),
       ],
@@ -813,6 +826,136 @@ class _VisionModelSection extends ConsumerWidget {
         ),
       ),
     );
+  }
+}
+
+// ── Phone Control Mode Section ──
+
+class _PhoneControlModeSection extends ConsumerStatefulWidget {
+  const _PhoneControlModeSection();
+  @override
+  ConsumerState<_PhoneControlModeSection> createState() => _PhoneControlModeSectionState();
+}
+
+class _PhoneControlModeSectionState extends ConsumerState<_PhoneControlModeSection> {
+  bool _scanning = false;
+  String? _scanResult;
+
+  @override
+  Widget build(BuildContext context) {
+    final mode = ref.watch(phoneControlModeProvider);
+    final cs = Theme.of(context).colorScheme;
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.phonelink, size: 20, color: cs.primary),
+                const SizedBox(width: 8),
+                Text('Control Mode', style: Theme.of(context).textTheme.titleMedium),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Accessibility uses the built-in service. ADB uses shell commands over USB/Wi-Fi debug connection.',
+              style: TextStyle(fontSize: 12, color: cs.onSurface.withValues(alpha: 0.6)),
+            ),
+            const SizedBox(height: 12),
+            SegmentedButton<PhoneControlMode>(
+              segments: const [
+                ButtonSegment(
+                  value: PhoneControlMode.accessibility,
+                  label: Text('Accessibility'),
+                  icon: Icon(Icons.accessibility_new, size: 16),
+                ),
+                ButtonSegment(
+                  value: PhoneControlMode.adb,
+                  label: Text('ADB'),
+                  icon: Icon(Icons.usb, size: 16),
+                ),
+              ],
+              selected: {mode},
+              onSelectionChanged: (modes) {
+                Haptics.selection();
+                ref.read(phoneControlModeProvider.notifier).update(modes.first);
+              },
+            ),
+            const SizedBox(height: 16),
+            const Divider(height: 1),
+            const SizedBox(height: 12),
+
+            // Scan Phone Apps button
+            Row(
+              children: [
+                Icon(Icons.app_registration, size: 20, color: cs.primary),
+                const SizedBox(width: 8),
+                Text('App Scanner', style: Theme.of(context).textTheme.titleMedium),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Scan installed apps via ADB to discover intents, deep links, and exported components. '
+              'Results are saved and injected into AI context.',
+              style: TextStyle(fontSize: 12, color: cs.onSurface.withValues(alpha: 0.6)),
+            ),
+            const SizedBox(height: 12),
+            if (_scanning)
+              const Row(
+                children: [
+                  SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)),
+                  SizedBox(width: 12),
+                  Expanded(child: Text('Scanning apps... this may take a minute.')),
+                ],
+              )
+            else
+              FilledButton.tonalIcon(
+                onPressed: _scanApps,
+                icon: const Icon(Icons.radar),
+                label: const Text('Scan Phone Apps'),
+              ),
+            if (_scanResult != null) ...[
+              const SizedBox(height: 8),
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: cs.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  _scanResult!,
+                  style: TextStyle(fontSize: 12, color: cs.onSurface.withValues(alpha: 0.8)),
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _scanApps() async {
+    setState(() { _scanning = true; _scanResult = null; });
+    try {
+      final tool = ScanPhoneAppsTool();
+      final result = await tool.execute(
+        {},
+        ToolContext(chatId: 'settings', permissionChecker: (_) async => true),
+      );
+      if (mounted) {
+        setState(() {
+          _scanning = false;
+          _scanResult = result.success ? result.output : 'Error: ${result.error}';
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() { _scanning = false; _scanResult = 'Scan failed: $e'; });
+      }
+    }
   }
 }
 

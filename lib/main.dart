@@ -58,19 +58,13 @@ class _MainNavigator extends StatefulWidget {
 class _MainNavigatorState extends State<_MainNavigator> {
   int _currentIndex = 0;
 
-  static const _screens = [
-    ChatScreen(),
-    DevScreen(),
-  ];
-
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    // 2.6: Only build the active tab instead of IndexedStack keeping both alive
+    final Widget body = _currentIndex == 0 ? const ChatScreen() : const DevScreen();
     return Scaffold(
-      body: IndexedStack(
-        index: _currentIndex,
-        children: _screens,
-      ),
+      body: body,
       bottomNavigationBar: NavigationBar(
         selectedIndex: _currentIndex,
         onDestinationSelected: (i) => setState(() => _currentIndex = i),

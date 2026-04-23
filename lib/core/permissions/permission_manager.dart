@@ -96,23 +96,11 @@ class PermissionManager {
     }
   }
 
-  /// Persist current permission settings to DB
+  /// Persist current permission settings to DB (single write — modes format is authoritative)
   Future<void> _persistSettings() async {
-    // Also update legacy always/never for backward compat
-    final alwaysList = _toolModes.entries
-        .where((e) => e.value == ToolPermissionMode.alwaysAllow)
-        .map((e) => e.key)
-        .toList();
-    final neverList = _toolModes.entries
-        .where((e) => e.value == ToolPermissionMode.neverAllow)
-        .map((e) => e.key)
-        .toList();
     final modesStr = _toolModes.entries
         .map((e) => '${e.key}:${e.value.name}')
         .join(',');
-
-    await AppDatabase.instance.saveSetting('always_allow_tools', alwaysList.join(','));
-    await AppDatabase.instance.saveSetting('never_allow_tools', neverList.join(','));
     await AppDatabase.instance.saveSetting('tool_permission_modes', modesStr);
   }
 

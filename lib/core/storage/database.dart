@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:path_provider/path_provider.dart';
@@ -5,12 +6,21 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:dio/dio.dart';
 import '../api/provider.dart';
 
+/// Max messages stored per chat to prevent unbounded growth
+const int kMaxMessagesPerChat = 500;
+
+/// Schema version for JSON storage migration
+const int kSchemaVersion = 1;
+
 /// File-based + SharedPreferences storage for app data
 class AppDatabase {
   static AppDatabase? _instance;
   static AppDatabase get instance => _instance ??= AppDatabase._();
 
   AppDatabase._();
+
+  /// Simple async write lock to prevent concurrent file writes
+  final _writeLock = _AsyncLock();
 
   String? _dbPath;
 
@@ -26,7 +36,16 @@ class AppDatabase {
     final file = File('$path/chats.json');
     if (!await file.exists()) return [];
     final json = await file.readAsString();
-    final list = jsonDecode(json) as List;
+    final decoded = jsonDecode(json);
+    // Support both old (bare list) and new (versioned object) formats
+    final List list;
+    if (decoded is List) {
+      list = decoded;
+    } else if (decoded is Map && decoded['chats'] is List) {
+      list = decoded['chats'] as List;
+    } else {
+      return [];
+    }
     return list.map((e) => ChatEntry.fromMap(e as Map<String, dynamic>)).toList();
   }
 
@@ -61,9 +80,12 @@ class AppDatabase {
   }
 
   Future<void> _writeChats(List<ChatEntry> chats) async {
-    final path = await _path;
-    final file = File('$path/chats.json');
-    await file.writeAsString(jsonEncode(chats.map((c) => c.toMap()).toList()));
+    await _writeLock.run(() async {
+      final path = await _path;
+      final file = File('$path/chats.json');
+      final data = {'schemaVersion': kSchemaVersion, 'chats': chats.map((c) => c.toMap()).toList()};
+      await file.writeAsString(jsonEncode(data));
+    });
   }
 
   // ---- Messages ----
@@ -78,15 +100,21 @@ class AppDatabase {
   }
 
   Future<void> addMessage(String chatId, MessageEntry msg) async {
-    final messages = await getMessages(chatId);
+    var messages = await getMessages(chatId);
     messages.add(msg);
+    // Enforce message limit — drop oldest messages beyond cap
+    if (messages.length > kMaxMessagesPerChat) {
+      messages = messages.sublist(messages.length - kMaxMessagesPerChat);
+    }
     await _writeMessages(chatId, messages);
   }
 
   Future<void> _writeMessages(String chatId, List<MessageEntry> messages) async {
-    final path = await _path;
-    final file = File('$path/messages_$chatId.json');
-    await file.writeAsString(jsonEncode(messages.map((m) => m.toMap()).toList()));
+    await _writeLock.run(() async {
+      final path = await _path;
+      final file = File('$path/messages_$chatId.json');
+      await file.writeAsString(jsonEncode(messages.map((m) => m.toMap()).toList()));
+    });
   }
 
   // ---- Providers (with models) ----
@@ -110,6 +138,10 @@ class AppDatabase {
     await _writeProviders(providers);
   }
 
+  /// 3.2: Bulk-write all providers in one SharedPreferences call
+  Future<void> writeAllProviders(List<ProviderConfig> providers) async =>
+      _writeProviders(providers);
+
   Future<void> deleteProvider(String id) async {
     var providers = await getAllProviders();
     providers.removeWhere((p) => p.id == id);
@@ -123,15 +155,14 @@ class AppDatabase {
 
   Future<ProviderConfig?> getActiveProvider() async {
     final providers = await getAllProviders();
-    try {
-      return providers.firstWhere((p) => p.isActive);
-    } catch (_) {
-      return providers.isNotEmpty ? providers.first : null;
-    }
+    return providers.where((p) => p.isActive).firstOrNull ??
+        (providers.isNotEmpty ? providers.first : null);
   }
 
-  /// Fetch models from a provider's /models endpoint
-  /// Returns a list of model IDs parsed from OpenAI-compatible /models response
+  /// 4.2: Fetch models from a provider's /models endpoint.
+  /// NOTE: This makes network calls, which violates separation of concerns.
+  /// Kept here temporarily for backward compat; callers should migrate to
+  /// a dedicated ModelFetcher service.
   Future<List<ModelConfig>> fetchModels(ProviderConfig provider) async {
     if (!provider.canFetchModels) return [];
 
@@ -321,4 +352,23 @@ class MessageEntry {
             .toList(),
         createdAt: DateTime.parse(m['createdAt'] as String),
       );
+}
+
+/// Simple async lock to serialize file writes
+class _AsyncLock {
+  Completer<void>? _completer;
+
+  Future<T> run<T>(Future<T> Function() action) async {
+    while (_completer != null) {
+      await _completer!.future;
+    }
+    _completer = Completer<void>();
+    try {
+      return await action();
+    } finally {
+      final c = _completer!;
+      _completer = null;
+      c.complete();
+    }
+  }
 }

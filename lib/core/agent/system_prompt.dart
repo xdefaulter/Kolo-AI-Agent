@@ -1,6 +1,6 @@
 /// Builds the system prompt with tool awareness instructions
 class SystemPromptBuilder {
-  static String build({String? customInstructions}) {
+  static String build({String? customInstructions, String? appIntentsSummary}) {
     final buffer = StringBuffer();
 
     buffer.writeln('You are Kolo AI Agent, a powerful assistant with access to tools on the user\'s device.');
@@ -71,6 +71,14 @@ class SystemPromptBuilder {
     buffer.writeln('- Never delete system files or modify critical configurations without explicit user approval.');
     buffer.writeln('- If you\'re unsure about an operation, ask the user first.');
     buffer.writeln();
+
+    if (appIntentsSummary != null && appIntentsSummary.isNotEmpty) {
+      buffer.writeln('## [PHONE APPS] Installed Apps & Intents');
+      buffer.writeln('The following apps are installed on the connected phone with these intents/deep links.');
+      buffer.writeln('Use this to know which apps are available and how to launch them with specific intents.');
+      buffer.writeln(appIntentsSummary);
+      buffer.writeln();
+    }
 
     if (customInstructions != null && customInstructions.isNotEmpty) {
       buffer.writeln('## Custom Instructions');

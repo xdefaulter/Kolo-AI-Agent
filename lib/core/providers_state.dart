@@ -19,10 +19,9 @@ class ProvidersNotifier extends StateNotifier<List<ProviderConfig>> {
     state = providers;
   }
 
+  /// 3.2: Write the entire providers list in one operation instead of N individual saves.
   Future<void> _save() async {
-    for (final p in state) {
-      await AppDatabase.instance.saveProvider(p);
-    }
+    await AppDatabase.instance.writeAllProviders(state);
   }
 
   void addProvider(ProviderConfig provider) {

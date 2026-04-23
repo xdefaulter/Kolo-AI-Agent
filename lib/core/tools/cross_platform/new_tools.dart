@@ -39,17 +39,51 @@ class ListFilesTool extends KoloTool {
 
 class DeleteFileTool extends KoloTool {
   @override String get name => 'delete_file';
-  @override String get description => 'Delete a file at the given path.';
+  @override String get description => 'Delete a file at the given path. Only files within the workspace/project directories can be deleted.';
   @override Map<String, dynamic> get parameterSchema => {
     'type': 'object',
     'properties': {
-      'path': {'type': 'string', 'description': 'Absolute path to file to delete'},
+      'path': {'type': 'string', 'description': 'Absolute path to file to delete (must be in workspace)'},
     },
     'required': ['path'],
   };
   @override ToolPermission get permission => ToolPermission.dangerous;
+
+  /// Directories that are safe to delete files from
+  static const _allowedPrefixes = [
+    '/storage/emulated/0/Android/data/',  // Android app-specific storage
+    '/data/data/',                          // Android internal app data
+    '/sdcard/KoloProjects/',               // Kolo workspace
+    '/tmp/', '/var/tmp/',                   // Temp dirs
+  ];
+
+  bool _isAllowedPath(String path) {
+    final normalized = File(path).absolute.path;
+    // Block dangerous system paths
+    if (normalized.startsWith('/system') ||
+        normalized.startsWith('/bin') ||
+        normalized.startsWith('/sbin') ||
+        normalized.startsWith('/etc') ||
+        normalized.startsWith('/proc') ||
+        normalized.startsWith('/dev')) {
+      return false;
+    }
+    // Allow paths within known safe prefixes
+    for (final prefix in _allowedPrefixes) {
+      if (normalized.startsWith(prefix)) return true;
+    }
+    // Allow paths under Documents/KoloProjects (macOS/iOS)
+    if (normalized.contains('/KoloProjects/') || normalized.contains('/Documents/')) return true;
+    // Allow paths under the temp directory
+    if (normalized.startsWith(Directory.systemTemp.path)) return true;
+    return false;
+  }
+
   @override Future<ToolResult> execute(Map<String, dynamic> params, ToolContext context) async {
     final path = params['path'] as String;
+    if (!_isAllowedPath(path)) {
+      return ToolResult.err('Cannot delete files outside workspace directories. Path "$path" is not allowed.');
+    }
     try {
       final file = File(path);
       if (!await file.exists()) return ToolResult.err('File not found: $path');
@@ -191,7 +225,7 @@ class FileStatTool extends KoloTool {
 
 class ShellExecTool extends KoloTool {
   @override String get name => 'shell_exec';
-  @override String get description => 'Execute a shell command and return stdout/stderr. Not available on iOS.';
+  @override String get description => 'Execute a shell command and return stdout/stderr. Not available on iOS. Only allowed commands: ls, cat, head, tail, grep, find, wc, sort, uniq, diff, echo, pwd, whoami, date, which, file, stat, du, df, mkdir, touch, cp, mv, rm, chmod, tar, zip, unzip, curl, wget, git, python, python3, node, npm, npx, dart, flutter, pip, pip3, java, javac, go, cargo, make, cmake, gcc, g++, rustc.';
   @override Map<String, dynamic> get parameterSchema => {
     'type': 'object',
     'properties': {
@@ -203,15 +237,68 @@ class ShellExecTool extends KoloTool {
   };
   @override ToolPermission get permission => ToolPermission.dangerous;
   @override ToolPlatform get platform => ToolPlatform.android; // iOS sandbox blocks process spawning
+
+  /// Allowlist of commands that can be executed
+  static const _allowedCommands = <String>{
+    'ls', 'cat', 'head', 'tail', 'grep', 'find', 'wc', 'sort', 'uniq', 'diff',
+    'echo', 'pwd', 'whoami', 'date', 'which', 'file', 'stat', 'du', 'df',
+    'mkdir', 'touch', 'cp', 'mv', 'rm', 'chmod', 'tar', 'zip', 'unzip',
+    'curl', 'wget', 'git', 'python', 'python3', 'node', 'npm', 'npx',
+    'dart', 'flutter', 'pip', 'pip3', 'java', 'javac', 'go', 'cargo',
+    'make', 'cmake', 'gcc', 'g++', 'rustc', 'sed', 'awk', 'tr', 'cut',
+    'xargs', 'tee', 'env', 'printenv', 'uname', 'id', 'ps', 'kill',
+    'adb', 'fastboot',
+  };
+
+  /// Extract the base command from a shell command string
+  String? _extractBaseCommand(String command) {
+    final trimmed = command.trim();
+    if (trimmed.isEmpty) return null;
+    // Handle env vars at start: VAR=val command ...
+    final parts = trimmed.split(RegExp(r'\s+'));
+    for (final part in parts) {
+      if (part.contains('=') && !part.startsWith('-')) continue;
+      // Get just the command name (strip path)
+      final cmd = part.split('/').last;
+      return cmd;
+    }
+    return null;
+  }
+
+  /// Check for dangerous shell metacharacters that enable injection
+  bool _hasDangerousMetachars(String command) {
+    // Allow pipes and redirects (common in legitimate use) but block
+    // backtick execution, $() subshells, and process substitution
+    final dangerous = RegExp(r'`|\$\(|<\(|>\(');
+    return dangerous.hasMatch(command);
+  }
+
   @override Future<ToolResult> execute(Map<String, dynamic> params, ToolContext context) async {
-    // Runtime guard for safety
     if (Platform.isIOS) return ToolResult.err('Shell execution is not available on iOS due to sandbox restrictions.');
     final command = params['command'] as String;
     final timeoutSec = params['timeout'] as int? ?? 30;
     final workDir = params['workingDirectory'] as String?;
+
+    // Security: check for dangerous metacharacters
+    if (_hasDangerousMetachars(command)) {
+      return ToolResult.err('Command contains disallowed shell metacharacters (backticks, \$()). Use simple commands instead.');
+    }
+
+    // Security: validate the base command(s) — split on pipes
+    final segments = command.split('|');
+    for (final segment in segments) {
+      final baseCmd = _extractBaseCommand(segment.trim());
+      if (baseCmd == null || baseCmd.isEmpty) continue;
+      if (!_allowedCommands.contains(baseCmd)) {
+        return ToolResult.err('Command "$baseCmd" is not in the allowed commands list. Allowed: ${_allowedCommands.take(20).join(', ')}...');
+      }
+    }
+
+    final shell = Platform.isAndroid ? '/system/bin/sh' : '/bin/sh';
+
     try {
       final result = await Process.run(
-        '/bin/sh',
+        shell,
         ['-c', command],
         workingDirectory: workDir,
       ).timeout(Duration(seconds: timeoutSec));
