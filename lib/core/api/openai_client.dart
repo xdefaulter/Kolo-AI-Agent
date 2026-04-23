@@ -53,10 +53,13 @@ class OpenAIClient {
     _cancelToken = null;
   }
 
-  /// Force-close all idle connections in the Dio connection pool.
-  /// Call this on app resume to prevent stale-socket HttpException errors.
+  /// Evict stale idle connections from the Dio connection pool.
+  /// Safe to call on app resume — does NOT destroy the adapter.
   void closeConnections() {
-    _dio.httpClientAdapter.close(force: true);
+    // close(force:true) permanently kills the adapter, causing all subsequent
+    // requests to fail. Instead, just create a new adapter to discard stale
+    // pooled connections while keeping the Dio instance usable.
+    _dio.httpClientAdapter = HttpClientAdapter();
   }
 
   /// Send a streaming chat completion request
