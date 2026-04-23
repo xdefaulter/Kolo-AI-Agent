@@ -356,8 +356,11 @@ class InputBarState extends State<InputBar> {
                     maxLines: 5,
                     minLines: 1,
                     textInputAction: widget.enterToSend ? TextInputAction.send : TextInputAction.newline,
+                    style: TextStyle(color: cs.onSurface),
+                    cursorColor: cs.primary,
                     decoration: InputDecoration(
                       hintText: widget.isLoading ? 'Thinking...' : 'Message Kolo...',
+                      hintStyle: TextStyle(color: cs.onSurfaceVariant),
                       filled: true,
                       fillColor: cs.surfaceContainerLow.withValues(alpha: 0.7),
                       border: OutlineInputBorder(

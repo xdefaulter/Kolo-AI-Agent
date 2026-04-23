@@ -4,41 +4,44 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/agent/agent_session.dart';
-import '../../core/storage/database.dart';
 import '../../core/tools/tool_bootstrap.dart';
 import '../../core/tools/tool_registry.dart';
-import '../../core/theme_provider.dart';
-import '../../core/providers.dart';
-import '../../core/providers_state.dart';
 import '../chat/input_bar.dart';
-import '../shared/page_transitions.dart';
 
 /// Workspace root for dev projects
 const kWorkspaceRoot = '/sdcard/KoloProjects';
 
-// Dev message model (simpler than chat's ChatMessageUI)
-class _DevMessage {
+// ── Unified message model ──
+// Tracks both AI messages and terminal output in a single interleaved stream.
+enum _DevEntryType { userMessage, assistantMessage, terminalInput, terminalOutput, terminalError }
+
+class _DevEntry {
   final String id;
-  final String role; // 'user' or 'assistant'
+  final _DevEntryType type;
   final String content;
   final DateTime timestamp;
-  final bool isTyping;
-  _DevMessage({
+
+  _DevEntry({
     required this.id,
-    required this.role,
+    required this.type,
     required this.content,
     required this.timestamp,
-    this.isTyping = false,
   });
 }
 
-// Dev session provider — separate from chat sessions
-final devChatProvider = StateProvider<List<_DevMessage>>((ref) => []);
+// ── Dev-specific providers (completely isolated from main chat) ──
 final devToolRegistryProvider = Provider<ToolRegistry>((ref) => bootstrapTools());
+
+final devAgentSessionProvider =
+    StateNotifierProvider<AgentSessionNotifier, AgentSessionState>((ref) {
+  return AgentSessionNotifier(ref);
+});
+
+final devEntriesProvider = StateProvider<List<_DevEntry>>((ref) => []);
 final devIsTypingProvider = StateProvider<bool>((ref) => false);
 
 /// DevScreen: Claude Code-like mobile IDE
-/// Layout: AI chat (top) + Terminal (bottom), File tree drawer (left swipe)
+/// Unified terminal-style view with interleaved AI + terminal output.
 class DevScreen extends ConsumerStatefulWidget {
   const DevScreen({super.key});
 
@@ -47,23 +50,16 @@ class DevScreen extends ConsumerStatefulWidget {
 }
 
 class _DevScreenState extends ConsumerState<DevScreen> {
-  // ── Chat state ──
-  final ScrollController _chatScrollController = ScrollController();
+  final ScrollController _scrollController = ScrollController();
   final GlobalKey<InputBarState> _inputBarKey = GlobalKey();
   bool _showScrollFab = false;
-  String? _lastErrorMessage;
   bool _sessionInitialized = false;
 
-  // ── Terminal state ──
-  final List<_TerminalLine> _terminalLines = [];
-  final ScrollController _terminalScrollController = ScrollController();
-  final TextEditingController _termInputController = TextEditingController();
+  // Terminal state
   String _currentDir = kWorkspaceRoot;
   static const _termChannel = MethodChannel('com.kolo.ai/terminal');
-  StreamSubscription? _termOutputSub;
 
-  // ── Layout state ──
-  double _chatFraction = 0.45; // How much screen is chat vs terminal
+  // File tree state
   bool _fileTreeOpen = false;
   List<_FileNode> _fileTree = [];
   bool _fileTreeLoading = false;
@@ -71,7 +67,7 @@ class _DevScreenState extends ConsumerState<DevScreen> {
   @override
   void initState() {
     super.initState();
-    _chatScrollController.addListener(_onChatScroll);
+    _scrollController.addListener(_onScroll);
     _initSession();
     _ensureWorkspace();
     _loadFileTree();
@@ -79,26 +75,24 @@ class _DevScreenState extends ConsumerState<DevScreen> {
 
   @override
   void dispose() {
-    _chatScrollController.dispose();
-    _terminalScrollController.dispose();
-    _termInputController.dispose();
-    _termOutputSub?.cancel();
+    _scrollController.dispose();
     super.dispose();
   }
 
-  void _onChatScroll() {
-    final max = _chatScrollController.position.maxScrollExtent;
-    final current = _chatScrollController.offset;
-    setState(() => _showScrollFab = (max - current) > 100);
+  void _onScroll() {
+    final max = _scrollController.position.maxScrollExtent;
+    final current = _scrollController.offset;
+    final show = (max - current) > 100;
+    if (show != _showScrollFab) setState(() => _showScrollFab = show);
   }
 
-  // ── Session init ──
+  // ── Session init (uses dev-specific provider) ──
   Future<void> _initSession() async {
     if (_sessionInitialized) return;
     _sessionInitialized = true;
 
     final registry = ref.read(devToolRegistryProvider);
-    final notifier = ref.read(agentSessionProvider.notifier);
+    final notifier = ref.read(devAgentSessionProvider.notifier);
     notifier.init(registry);
     notifier.session?.permissionManager.loadPersistedSettings();
   }
@@ -110,25 +104,40 @@ class _DevScreenState extends ConsumerState<DevScreen> {
     }
   }
 
+  // ── Unified input handler ──
+  Future<void> _handleInput(String text) async {
+    if (text.trim().isEmpty) return;
+
+    // If starts with $, treat as terminal command
+    if (text.startsWith('\$')) {
+      final command = text.substring(1).trim();
+      if (command.isNotEmpty) {
+        await _executeTerminalCommand(command);
+      }
+      return;
+    }
+
+    // Otherwise send to AI
+    await _sendToAI(text);
+  }
+
   // ── Send message to AI ──
   Future<void> _sendToAI(String text) async {
     if (text.trim().isEmpty) return;
 
-    final messages = ref.read(devChatProvider);
-    final userMsg = _DevMessage(
+    final entries = ref.read(devEntriesProvider);
+    final userEntry = _DevEntry(
       id: DateTime.now().millisecondsSinceEpoch.toString(),
-      role: 'user',
+      type: _DevEntryType.userMessage,
       content: text,
       timestamp: DateTime.now(),
     );
-    ref.read(devChatProvider.notifier).state = [...messages, userMsg];
+    ref.read(devEntriesProvider.notifier).state = [...entries, userEntry];
     ref.read(devIsTypingProvider.notifier).state = true;
-
-    _scrollChatToBottom();
+    _scrollToBottom();
 
     try {
-      final notifier = ref.read(agentSessionProvider.notifier);
-      // Inject workspace context into the system so the model knows where to work
+      final notifier = ref.read(devAgentSessionProvider.notifier);
       final workspaceContext = '\n[DEV MODE] You are in a local development environment. '
           'Workspace: $kWorkspaceRoot\n'
           'Current directory: $_currentDir\n'
@@ -137,71 +146,70 @@ class _DevScreenState extends ConsumerState<DevScreen> {
 
       await notifier.sendMessage(text + workspaceContext);
     } catch (e) {
-      final current = ref.read(devChatProvider);
-      final errorMsg = _DevMessage(
+      final current = ref.read(devEntriesProvider);
+      final errorEntry = _DevEntry(
         id: DateTime.now().millisecondsSinceEpoch.toString(),
-        role: 'assistant',
+        type: _DevEntryType.assistantMessage,
         content: 'Error: $e',
         timestamp: DateTime.now(),
       );
-      ref.read(devChatProvider.notifier).state = [...current, errorMsg];
+      ref.read(devEntriesProvider.notifier).state = [...current, errorEntry];
     } finally {
       ref.read(devIsTypingProvider.notifier).state = false;
     }
-    _scrollChatToBottom();
+    _scrollToBottom();
   }
 
   void _onSessionStateChanged(AgentSessionState? prev, AgentSessionState next) {
-    final current = List<_DevMessage>.from(ref.read(devChatProvider));
+    final current = List<_DevEntry>.from(ref.read(devEntriesProvider));
     switch (next) {
       case AgentSessionRunning(:final currentContent):
-        // Update or add streaming assistant message
-        current.removeWhere((m) => m.id == 'streaming');
+        current.removeWhere((e) => e.id == 'streaming');
         if (currentContent.isNotEmpty) {
-          current.add(_DevMessage(
+          current.add(_DevEntry(
             id: 'streaming',
-            role: 'assistant',
+            type: _DevEntryType.assistantMessage,
             content: currentContent,
             timestamp: DateTime.now(),
           ));
         }
-        ref.read(devChatProvider.notifier).state = current;
+        ref.read(devEntriesProvider.notifier).state = current;
         ref.read(devIsTypingProvider.notifier).state = true;
-        _scrollChatToBottom();
+        _scrollToBottom();
       case AgentSessionCompleted(:final content, :final wasCancelled):
-        current.removeWhere((m) => m.id == 'streaming');
+        current.removeWhere((e) => e.id == 'streaming');
         if (content.isNotEmpty) {
-          current.add(_DevMessage(
+          current.add(_DevEntry(
             id: DateTime.now().millisecondsSinceEpoch.toString(),
-            role: 'assistant',
+            type: _DevEntryType.assistantMessage,
             content: wasCancelled ? '$content\n\n⏹ Stopped' : content,
             timestamp: DateTime.now(),
           ));
         }
-        ref.read(devChatProvider.notifier).state = current;
+        ref.read(devEntriesProvider.notifier).state = current;
         ref.read(devIsTypingProvider.notifier).state = false;
-        _scrollChatToBottom();
+        _scrollToBottom();
       case AgentSessionError(:final message):
-        current.removeWhere((m) => m.id == 'streaming');
-        current.add(_DevMessage(
+        current.removeWhere((e) => e.id == 'streaming');
+        current.add(_DevEntry(
           id: DateTime.now().millisecondsSinceEpoch.toString(),
-          role: 'assistant',
+          type: _DevEntryType.assistantMessage,
           content: 'Error: $message',
           timestamp: DateTime.now(),
         ));
-        ref.read(devChatProvider.notifier).state = current;
+        ref.read(devEntriesProvider.notifier).state = current;
         ref.read(devIsTypingProvider.notifier).state = false;
-        _scrollChatToBottom();
+        _scrollToBottom();
       case AgentSessionIdle():
         ref.read(devIsTypingProvider.notifier).state = false;
     }
   }
 
-  void _scrollChatToBottom() {
+  void _scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_chatScrollController.hasClients) {
-        _chatScrollController.animateTo(
-          _chatScrollController.position.maxScrollExtent,
+      if (_scrollController.hasClients) {
+        _scrollController.animateTo(
+          _scrollController.position.maxScrollExtent,
           duration: const Duration(milliseconds: 200),
           curve: Curves.easeOut,
         );
@@ -213,14 +221,22 @@ class _DevScreenState extends ConsumerState<DevScreen> {
   Future<void> _executeTerminalCommand(String command) async {
     if (command.trim().isEmpty) return;
 
-    _terminalLines.add(_TerminalLine(type: _LineType.input, text: '\$ $command'));
-    _scrollTerminalToBottom();
-    setState(() {});
+    // Add input entry
+    final entries = ref.read(devEntriesProvider);
+    ref.read(devEntriesProvider.notifier).state = [
+      ...entries,
+      _DevEntry(
+        id: 'term_in_${DateTime.now().millisecondsSinceEpoch}',
+        type: _DevEntryType.terminalInput,
+        content: '\$ $command',
+        timestamp: DateTime.now(),
+      ),
+    ];
+    _scrollToBottom();
 
     // Handle built-in commands
     if (command == 'clear') {
-      _terminalLines.clear();
-      setState(() {});
+      ref.read(devEntriesProvider.notifier).state = [];
       return;
     }
     if (command.startsWith('cd ')) {
@@ -231,49 +247,44 @@ class _DevScreenState extends ConsumerState<DevScreen> {
       final dir = Directory(newDir);
       if (await dir.exists()) {
         _currentDir = newDir;
-        _terminalLines.add(_TerminalLine(type: _LineType.output, text: '$_currentDir'));
+        _addTermOutput(newDir);
       } else {
-        _terminalLines.add(_TerminalLine(type: _LineType.error, text: 'cd: no such directory: $target'));
+        _addTermError('cd: no such directory: $target');
       }
-      _scrollTerminalToBottom();
-      setState(() {});
       _loadFileTree();
       return;
     }
 
-    // Execute via method channel (PTY) or fallback to Process.run
+    // Execute command
     try {
       if (Platform.isAndroid) {
         await _executeViaPTY(command);
       } else {
-        // Fallback for iOS / dev mode
         final result = await Process.run(
           '/bin/sh', ['-c', command],
           workingDirectory: _currentDir,
         ).timeout(const Duration(seconds: 30));
 
         if (result.stdout.toString().isNotEmpty) {
-          _terminalLines.add(_TerminalLine(type: _LineType.output, text: result.stdout.toString()));
+          _addTermOutput(result.stdout.toString());
         }
         if (result.stderr.toString().isNotEmpty) {
-          _terminalLines.add(_TerminalLine(type: _LineType.error, text: result.stderr.toString()));
+          _addTermError(result.stderr.toString());
         }
         if (result.exitCode != 0 && result.stdout.toString().isEmpty && result.stderr.toString().isEmpty) {
-          _terminalLines.add(_TerminalLine(type: _LineType.error, text: 'Exit code: ${result.exitCode}'));
+          _addTermError('Exit code: ${result.exitCode}');
         }
       }
     } on TimeoutException {
-      _terminalLines.add(_TerminalLine(type: _LineType.error, text: 'Command timed out (30s)'));
+      _addTermError('Command timed out (30s)');
     } catch (e) {
-      _terminalLines.add(_TerminalLine(type: _LineType.error, text: 'Error: $e'));
+      _addTermError('Error: $e');
     }
 
-    _scrollTerminalToBottom();
-    setState(() {});
+    _scrollToBottom();
     _loadFileTree();
   }
 
-  /// Execute command via Termux PTY on Android
   Future<void> _executeViaPTY(String command) async {
     try {
       final result = await _termChannel.invokeMethod<Map>('exec', {
@@ -284,41 +295,50 @@ class _DevScreenState extends ConsumerState<DevScreen> {
       final stderr = result?['stderr'] as String? ?? '';
       final exitCode = result?['exitCode'] as int? ?? 0;
 
-      if (stdout.isNotEmpty) {
-        _terminalLines.add(_TerminalLine(type: _LineType.output, text: stdout));
-      }
-      if (stderr.isNotEmpty) {
-        _terminalLines.add(_TerminalLine(type: _LineType.error, text: stderr));
-      }
+      if (stdout.isNotEmpty) _addTermOutput(stdout);
+      if (stderr.isNotEmpty) _addTermError(stderr);
       if (exitCode != 0 && stdout.isEmpty && stderr.isEmpty) {
-        _terminalLines.add(_TerminalLine(type: _LineType.error, text: 'Exit code: $exitCode'));
+        _addTermError('Exit code: $exitCode');
       }
-    } on PlatformException catch (e) {
-      // Fallback to Process.run if PTY channel not available
+    } on PlatformException {
       final result = await Process.run(
         '/system/bin/sh', ['-c', command],
         workingDirectory: _currentDir,
       ).timeout(const Duration(seconds: 30));
 
       if (result.stdout.toString().isNotEmpty) {
-        _terminalLines.add(_TerminalLine(type: _LineType.output, text: result.stdout.toString()));
+        _addTermOutput(result.stdout.toString());
       }
       if (result.stderr.toString().isNotEmpty) {
-        _terminalLines.add(_TerminalLine(type: _LineType.error, text: result.stderr.toString()));
+        _addTermError(result.stderr.toString());
       }
     }
   }
 
-  void _scrollTerminalToBottom() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_terminalScrollController.hasClients) {
-        _terminalScrollController.animateTo(
-          _terminalScrollController.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 100),
-          curve: Curves.easeOut,
-        );
-      }
-    });
+  void _addTermOutput(String text) {
+    final entries = ref.read(devEntriesProvider);
+    ref.read(devEntriesProvider.notifier).state = [
+      ...entries,
+      _DevEntry(
+        id: 'term_out_${DateTime.now().millisecondsSinceEpoch}',
+        type: _DevEntryType.terminalOutput,
+        content: text,
+        timestamp: DateTime.now(),
+      ),
+    ];
+  }
+
+  void _addTermError(String text) {
+    final entries = ref.read(devEntriesProvider);
+    ref.read(devEntriesProvider.notifier).state = [
+      ...entries,
+      _DevEntry(
+        id: 'term_err_${DateTime.now().millisecondsSinceEpoch}',
+        type: _DevEntryType.terminalError,
+        content: text,
+        timestamp: DateTime.now(),
+      ),
+    ];
   }
 
   // ── File Tree ──
@@ -336,7 +356,7 @@ class _DevScreenState extends ConsumerState<DevScreen> {
     final nodes = <_FileNode>[];
     await for (final entity in dir.list()) {
       final name = entity.path.split('/').last;
-      if (name.startsWith('.')) continue; // Skip hidden files
+      if (name.startsWith('.')) continue;
       final isDir = entity is Directory;
       nodes.add(_FileNode(
         name: name,
@@ -355,66 +375,172 @@ class _DevScreenState extends ConsumerState<DevScreen> {
   Future<void> _toggleNode(_FileNode node) async {
     if (!node.isDirectory) return;
     if (node.children != null && node.children!.isNotEmpty) {
-      setState(() => node.children = []); // Collapse
+      setState(() => node.children = []);
     } else {
       final children = await _loadDirectory(node.path);
-      setState(() => node.children = children); // Expand
+      setState(() => node.children = children);
     }
   }
 
   void _openFileInTerminal(_FileNode node) {
     if (node.isDirectory) return;
-    _termInputController.text = 'cat ${node.path}';
+    _executeTerminalCommand('cat ${node.path}');
+  }
+
+  // ── Create Project Dialog (Issue 3) ──
+  void _showCreateProjectDialog() {
+    final nameController = TextEditingController();
+    String selectedType = 'Blank';
+    final types = ['Flutter', 'Python', 'Node.js', 'Blank'];
+
+    showDialog(
+      context: context,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setDialogState) {
+            final cs = Theme.of(ctx).colorScheme;
+            return AlertDialog(
+              title: Row(
+                children: [
+                  Icon(Icons.create_new_folder, color: cs.primary),
+                  const SizedBox(width: 8),
+                  const Text('New Project'),
+                ],
+              ),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextField(
+                    controller: nameController,
+                    style: TextStyle(color: cs.onSurface),
+                    cursorColor: cs.primary,
+                    decoration: InputDecoration(
+                      labelText: 'Project name',
+                      hintText: 'my_app',
+                      hintStyle: TextStyle(color: cs.onSurfaceVariant),
+                      border: const OutlineInputBorder(),
+                    ),
+                    autofocus: true,
+                  ),
+                  const SizedBox(height: 16),
+                  DropdownButtonFormField<String>(
+                    value: selectedType,
+                    decoration: const InputDecoration(
+                      labelText: 'Project type',
+                      border: OutlineInputBorder(),
+                    ),
+                    items: types.map((t) => DropdownMenuItem(value: t, child: Text(t))).toList(),
+                    onChanged: (v) {
+                      if (v != null) setDialogState(() => selectedType = v);
+                    },
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: () {
+                    final name = nameController.text.trim();
+                    if (name.isEmpty) return;
+                    Navigator.pop(ctx);
+                    _createProject(name, selectedType);
+                  },
+                  child: const Text('Create'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Future<void> _createProject(String name, String type) async {
+    final projectPath = '$kWorkspaceRoot/$name';
+    final dir = Directory(projectPath);
+
+    if (await dir.exists()) {
+      _addTermError('Project "$name" already exists at $projectPath');
+      return;
+    }
+
+    _addTermOutput('Creating $type project "$name"...');
+
+    try {
+      await dir.create(recursive: true);
+
+      switch (type) {
+        case 'Flutter':
+          _addTermOutput('Running flutter create $name...');
+          await _executeTerminalCommand('flutter create $projectPath');
+        case 'Python':
+          await File('$projectPath/main.py').writeAsString('# $name\n\ndef main():\n    print("Hello from $name!")\n\nif __name__ == "__main__":\n    main()\n');
+          await File('$projectPath/requirements.txt').writeAsString('# Add dependencies here\n');
+          await File('$projectPath/README.md').writeAsString('# $name\n\nA Python project.\n');
+          _addTermOutput('Created Python project with main.py, requirements.txt, README.md');
+        case 'Node.js':
+          await File('$projectPath/index.js').writeAsString('// $name\n\nconsole.log("Hello from $name!");\n');
+          await File('$projectPath/package.json').writeAsString('{\n  "name": "$name",\n  "version": "1.0.0",\n  "main": "index.js",\n  "scripts": {\n    "start": "node index.js"\n  }\n}\n');
+          await File('$projectPath/README.md').writeAsString('# $name\n\nA Node.js project.\n');
+          _addTermOutput('Created Node.js project with index.js, package.json, README.md');
+        default: // Blank
+          await File('$projectPath/README.md').writeAsString('# $name\n\nA new project.\n');
+          _addTermOutput('Created blank project with README.md');
+      }
+
+      _currentDir = projectPath;
+      await _loadFileTree();
+      if (_fileTreeOpen == false) setState(() => _fileTreeOpen = true);
+      _scrollToBottom();
+    } catch (e) {
+      _addTermError('Failed to create project: $e');
+    }
   }
 
   // ── Build ──
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    final messages = ref.watch(devChatProvider);
+    final entries = ref.watch(devEntriesProvider);
     final isTyping = ref.watch(devIsTypingProvider);
 
-    // Listen to agent session state changes
-    ref.listen<AgentSessionState>(agentSessionProvider, (prev, next) {
+    // Listen to dev agent session state changes (isolated from main chat)
+    ref.listen<AgentSessionState>(devAgentSessionProvider, (prev, next) {
       _onSessionStateChanged(prev, next);
     });
 
     return Scaffold(
+      backgroundColor: const Color(0xFF1E1E1E),
       body: SafeArea(
         child: Row(
           children: [
-            // File tree drawer (slides in from left)
+            // File tree drawer
             AnimatedContainer(
               duration: const Duration(milliseconds: 250),
               curve: Curves.easeInOut,
               width: _fileTreeOpen ? 220 : 0,
-              child: _fileTreeOpen
-                  ? _buildFileTree(cs)
-                  : const SizedBox.shrink(),
+              child: _fileTreeOpen ? _buildFileTree(cs) : const SizedBox.shrink(),
             ),
-            // Main content: Chat (top) + Terminal (bottom)
+            // Main content: unified terminal-style view
             Expanded(
               child: Column(
                 children: [
-                  // Dev toolbar
                   _buildToolbar(cs),
-                  // Chat area
-                  Expanded(
-                    flex: (_chatFraction * 100).round(),
-                    child: _buildChatArea(cs, messages),
-                  ),
-                  // Draggable divider
-                  _buildDivider(cs),
-                  // Terminal area
-                  Expanded(
-                    flex: ((1 - _chatFraction) * 100).round(),
-                    child: _buildTerminalArea(cs),
-                  ),
+                  Expanded(child: _buildUnifiedView(cs, entries, isTyping)),
+                  _buildInputArea(cs, isTyping),
                 ],
               ),
             ),
           ],
         ),
+      ),
+      floatingActionButton: FloatingActionButton.small(
+        onPressed: _showCreateProjectDialog,
+        tooltip: 'New Project',
+        child: const Icon(Icons.create_new_folder),
       ),
     );
   }
@@ -423,14 +549,17 @@ class _DevScreenState extends ConsumerState<DevScreen> {
     return Container(
       height: 44,
       decoration: BoxDecoration(
-        color: cs.surface,
-        border: Border(bottom: BorderSide(color: cs.outlineVariant, width: 0.5)),
+        color: const Color(0xFF252526),
+        border: Border(bottom: BorderSide(color: const Color(0xFF3C3C3C), width: 0.5)),
       ),
       child: Row(
         children: [
-          // File tree toggle
           IconButton(
-            icon: Icon(_fileTreeOpen ? Icons.folder_open : Icons.folder_outlined, size: 20),
+            icon: Icon(
+              _fileTreeOpen ? Icons.folder_open : Icons.folder_outlined,
+              size: 20,
+              color: const Color(0xFFCCCCCC),
+            ),
             onPressed: () {
               setState(() => _fileTreeOpen = !_fileTreeOpen);
               if (_fileTreeOpen) _loadFileTree();
@@ -440,33 +569,33 @@ class _DevScreenState extends ConsumerState<DevScreen> {
             constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
           ),
           const SizedBox(width: 4),
-          Icon(Icons.terminal, size: 18, color: cs.primary),
+          const Icon(Icons.terminal, size: 18, color: Color(0xFF4EC9B0)),
           const SizedBox(width: 6),
-          Text('Dev Mode', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: cs.onSurface)),
+          const Text(
+            'Dev Mode',
+            style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Color(0xFFCCCCCC)),
+          ),
           const Spacer(),
-          // Current directory breadcrumb
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
             decoration: BoxDecoration(
-              color: cs.surfaceContainerHighest,
+              color: const Color(0xFF333333),
               borderRadius: BorderRadius.circular(6),
             ),
             constraints: const BoxConstraints(maxWidth: 200),
             child: Text(
               _currentDir.replaceFirst(kWorkspaceRoot, '~/Projects'),
-              style: TextStyle(fontSize: 11, color: cs.onSurface.withValues(alpha: 0.7), fontFamily: 'monospace'),
+              style: const TextStyle(fontSize: 11, color: Color(0xFF9D9D9D), fontFamily: 'monospace'),
               overflow: TextOverflow.ellipsis,
             ),
           ),
           const SizedBox(width: 8),
-          // Clear terminal
           IconButton(
-            icon: const Icon(Icons.cleaning_services_outlined, size: 18),
+            icon: const Icon(Icons.cleaning_services_outlined, size: 18, color: Color(0xFF9D9D9D)),
             onPressed: () {
-              _terminalLines.clear();
-              setState(() {});
+              ref.read(devEntriesProvider.notifier).state = [];
             },
-            tooltip: 'Clear terminal',
+            tooltip: 'Clear',
             padding: EdgeInsets.zero,
             constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
           ),
@@ -475,225 +604,163 @@ class _DevScreenState extends ConsumerState<DevScreen> {
     );
   }
 
-  Widget _buildChatArea(ColorScheme cs, List<_DevMessage> messages) {
-    final isTyping = ref.watch(devIsTypingProvider);
-    return Container(
-      decoration: BoxDecoration(
-        color: cs.surface,
-        border: Border(bottom: BorderSide(color: cs.outlineVariant, width: 0.5)),
-      ),
-      child: Column(
-        children: [
-          // Messages
-          Expanded(
-            child: messages.isEmpty
-                ? Center(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(Icons.code, size: 48, color: cs.primary.withValues(alpha: 0.5)),
-                        const SizedBox(height: 12),
-                        Text('Dev Mode', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: cs.onSurface)),
-                        const SizedBox(height: 4),
-                        Text('Ask me to code, debug, or build anything',
-                            style: TextStyle(fontSize: 13, color: cs.onSurface.withValues(alpha: 0.6))),
-                        const SizedBox(height: 16),
-                        _QuickAction(text: 'Create a new Flutter project', onTap: () => _sendToAI('Create a new Flutter project in $kWorkspaceRoot/my_app')),
-                        _QuickAction(text: 'Build a REST API', onTap: () => _sendToAI('Create a Python Flask REST API in $kWorkspaceRoot/api')),
-                        _QuickAction(text: 'Write a web scraper', onTap: () => _sendToAI('Write a web scraper in $kWorkspaceRoot/scraper')),
-                      ],
-                    ),
-                  )
-                : Stack(
-                    children: [
-                      ListView.builder(
-                        controller: _chatScrollController,
-                        padding: const EdgeInsets.only(left: 8, right: 8, top: 8, bottom: 60),
-                        itemCount: messages.length + (isTyping ? 1 : 0),
-                        itemBuilder: (context, index) {
-                          if (isTyping && index == messages.length) {
-                            return Padding(
-                              padding: const EdgeInsets.all(12),
-                              child: Row(children: [
-                                SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: cs.primary)),
-                                const SizedBox(width: 8),
-                                Text('Thinking...', style: TextStyle(fontSize: 13, color: cs.onSurface.withValues(alpha: 0.6))),
-                              ]),
-                            );
-                          }
-                          final msg = messages[index];
-                          return Padding(
-                            padding: const EdgeInsets.symmetric(vertical: 2),
-                            child: Align(
-                              alignment: msg.role == 'user' ? Alignment.centerRight : Alignment.centerLeft,
-                              child: Container(
-                                padding: const EdgeInsets.all(10),
-                                constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.8),
-                                decoration: BoxDecoration(
-                                  color: msg.role == 'user' ? cs.primaryContainer : cs.surfaceContainerHighest,
-                                  borderRadius: BorderRadius.circular(12),
-                                ),
-                                child: SelectableText(
-                                  msg.content,
-                                  style: TextStyle(fontSize: 13, color: cs.onSurface, fontFamily: 'monospace'),
-                                ),
-                              ),
-                            ),
-                          );
-                        },
-                      ),
-                      if (_showScrollFab)
-                        Positioned(
-                          right: 8,
-                          bottom: 8,
-                          child: FloatingActionButton.small(
-                            onPressed: _scrollChatToBottom,
-                            child: const Icon(Icons.arrow_downward, size: 18),
-                          ),
-                        ),
-                    ],
-                  ),
-          ),
-          // Input bar
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-            decoration: BoxDecoration(
-              color: cs.surface,
-              border: Border(top: BorderSide(color: cs.outlineVariant, width: 0.5)),
-            ),
-            child: InputBar(
-              key: _inputBarKey,
-              onSend: (text, {attachments}) => _sendToAI(text),
-              isLoading: isTyping,
-              onCancel: () {
-                ref.read(agentSessionProvider.notifier).cancel();
-                ref.read(devIsTypingProvider.notifier).state = false;
-              },
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildDivider(ColorScheme cs) {
-    return GestureDetector(
-      onVerticalDragUpdate: (details) {
-        setState(() {
-          _chatFraction += details.delta.dy / MediaQuery.of(context).size.height;
-          _chatFraction = _chatFraction.clamp(0.15, 0.85);
-        });
-      },
-      child: Container(
-        height: 12,
-        color: cs.surfaceContainerHighest,
-        child: Row(
+  Widget _buildUnifiedView(ColorScheme cs, List<_DevEntry> entries, bool isTyping) {
+    if (entries.isEmpty && !isTyping) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
           children: [
-            const SizedBox(width: 12),
-            // Chat label
-            Icon(Icons.chat_bubble_outline, size: 12, color: cs.onSurface.withValues(alpha: 0.4)),
-            const SizedBox(width: 4),
-            Text('AI', style: TextStyle(fontSize: 10, color: cs.onSurface.withValues(alpha: 0.4), fontWeight: FontWeight.w600)),
-            const Spacer(),
-            // Drag handle
-            Container(
-              width: 40, height: 4,
-              decoration: BoxDecoration(color: cs.outline, borderRadius: BorderRadius.circular(2)),
+            const Icon(Icons.terminal, size: 48, color: Color(0xFF4EC9B0)),
+            const SizedBox(height: 12),
+            const Text(
+              'Dev Mode',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: Color(0xFFCCCCCC)),
             ),
-            const Spacer(),
-            // Terminal label
-            Text('Terminal', style: TextStyle(fontSize: 10, color: cs.onSurface.withValues(alpha: 0.4), fontWeight: FontWeight.w600)),
-            const SizedBox(width: 4),
-            Icon(Icons.terminal, size: 12, color: cs.onSurface.withValues(alpha: 0.4)),
-            const SizedBox(width: 12),
+            const SizedBox(height: 4),
+            const Text(
+              'Type a message for AI, or prefix with \$ for shell commands',
+              style: TextStyle(fontSize: 13, color: Color(0xFF808080)),
+            ),
+            const SizedBox(height: 16),
+            _QuickAction(
+              text: 'Create a Flutter project',
+              onTap: () => _sendToAI('Create a new Flutter project in $kWorkspaceRoot/my_app'),
+            ),
+            _QuickAction(
+              text: 'Build a REST API',
+              onTap: () => _sendToAI('Create a Python Flask REST API in $kWorkspaceRoot/api'),
+            ),
+            _QuickAction(
+              text: '\$ ls -la',
+              onTap: () => _executeTerminalCommand('ls -la'),
+            ),
           ],
         ),
-      ),
+      );
+    }
+
+    return Stack(
+      children: [
+        ListView.builder(
+          controller: _scrollController,
+          padding: const EdgeInsets.only(left: 12, right: 12, top: 8, bottom: 60),
+          itemCount: entries.length + (isTyping ? 1 : 0),
+          itemBuilder: (context, index) {
+            if (isTyping && index == entries.length) {
+              return Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                child: Row(children: [
+                  const SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF4EC9B0)),
+                  ),
+                  const SizedBox(width: 8),
+                  const Text('Thinking...', style: TextStyle(fontSize: 13, color: Color(0xFF808080), fontFamily: 'monospace')),
+                ]),
+              );
+            }
+            return _buildEntry(entries[index]);
+          },
+        ),
+        if (_showScrollFab)
+          Positioned(
+            right: 8,
+            bottom: 8,
+            child: FloatingActionButton.small(
+              onPressed: _scrollToBottom,
+              backgroundColor: const Color(0xFF333333),
+              child: const Icon(Icons.arrow_downward, size: 18, color: Color(0xFFCCCCCC)),
+            ),
+          ),
+      ],
     );
   }
 
-  Widget _buildTerminalArea(ColorScheme cs) {
+  Widget _buildEntry(_DevEntry entry) {
+    switch (entry.type) {
+      case _DevEntryType.userMessage:
+        return Padding(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('❯ ', style: TextStyle(color: Color(0xFF569CD6), fontFamily: 'monospace', fontSize: 13, fontWeight: FontWeight.bold)),
+              Expanded(
+                child: SelectableText(
+                  entry.content,
+                  style: const TextStyle(color: Color(0xFFD4D4D4), fontFamily: 'monospace', fontSize: 13),
+                ),
+              ),
+            ],
+          ),
+        );
+      case _DevEntryType.assistantMessage:
+        return Container(
+          width: double.infinity,
+          margin: const EdgeInsets.symmetric(vertical: 4),
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: const Color(0xFF252526),
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: const Color(0xFF3C3C3C), width: 0.5),
+          ),
+          child: SelectableText(
+            entry.content,
+            style: const TextStyle(color: Color(0xFFD4D4D4), fontFamily: 'monospace', fontSize: 13, height: 1.5),
+          ),
+        );
+      case _DevEntryType.terminalInput:
+        return Padding(
+          padding: const EdgeInsets.only(top: 6, bottom: 2),
+          child: SelectableText(
+            entry.content,
+            style: const TextStyle(color: Color(0xFF4EC9B0), fontFamily: 'monospace', fontSize: 12, fontWeight: FontWeight.w600),
+          ),
+        );
+      case _DevEntryType.terminalOutput:
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 2),
+          child: SelectableText(
+            entry.content,
+            style: const TextStyle(color: Color(0xFFD4D4D4), fontFamily: 'monospace', fontSize: 12, height: 1.4),
+          ),
+        );
+      case _DevEntryType.terminalError:
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 2),
+          child: SelectableText(
+            entry.content,
+            style: const TextStyle(color: Color(0xFFF44747), fontFamily: 'monospace', fontSize: 12, height: 1.4),
+          ),
+        );
+    }
+  }
+
+  Widget _buildInputArea(ColorScheme cs, bool isTyping) {
     return Container(
-      color: const Color(0xFF1E1E1E), // Dark terminal bg
-      child: Column(
-        children: [
-          // Terminal output
-          Expanded(
-            child: ListView.builder(
-              controller: _terminalScrollController,
-              padding: const EdgeInsets.all(8),
-              itemCount: _terminalLines.length,
-              itemBuilder: (context, index) {
-                final line = _terminalLines[index];
-                Color color;
-                switch (line.type) {
-                  case _LineType.input:
-                    color = const Color(0xFF4EC9B0); // Green for commands
-                  case _LineType.output:
-                    color = const Color(0xFFD4D4D4); // Light gray
-                  case _LineType.error:
-                    color = const Color(0xFFF44747); // Red
-                }
-                return SelectableText(
-                  line.text,
-                  style: TextStyle(
-                    color: color,
-                    fontFamily: 'monospace',
-                    fontSize: 12,
-                    height: 1.4,
-                  ),
-                );
-              },
-            ),
-          ),
-          // Terminal input
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-            decoration: const BoxDecoration(
-              color: Color(0xFF252526),
-              border: Border(top: BorderSide(color: Color(0xFF3C3C3C), width: 0.5)),
-            ),
-            child: Row(
-              children: [
-                Text('\$ ', style: const TextStyle(color: Color(0xFF4EC9B0), fontFamily: 'monospace', fontSize: 13)),
-                Expanded(
-                  child: TextField(
-                    controller: _termInputController,
-                    style: const TextStyle(color: Color(0xFFD4D4D4), fontFamily: 'monospace', fontSize: 13),
-                    decoration: const InputDecoration(
-                      border: InputBorder.none,
-                      isDense: true,
-                      hintText: 'Type a command...',
-                      hintStyle: TextStyle(color: Color(0xFF6A6A6A)),
-                    ),
-                    onSubmitted: (cmd) {
-                      _executeTerminalCommand(cmd);
-                      _termInputController.clear();
-                    },
-                  ),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.play_arrow, color: Color(0xFF4EC9B0), size: 20),
-                  onPressed: () {
-                    _executeTerminalCommand(_termInputController.text);
-                    _termInputController.clear();
-                  },
-                  padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-                ),
-              ],
-            ),
-          ),
-        ],
+      decoration: const BoxDecoration(
+        color: Color(0xFF252526),
+        border: Border(top: BorderSide(color: Color(0xFF3C3C3C), width: 0.5)),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+      child: InputBar(
+        key: _inputBarKey,
+        onSend: (text, {attachments}) => _handleInput(text),
+        isLoading: isTyping,
+        onCancel: () {
+          ref.read(devAgentSessionProvider.notifier).cancel();
+          ref.read(devIsTypingProvider.notifier).state = false;
+        },
       ),
     );
   }
 
   Widget _buildFileTree(ColorScheme cs) {
     return Container(
-      decoration: BoxDecoration(
-        color: cs.surface,
-        border: Border(right: BorderSide(color: cs.outlineVariant, width: 0.5)),
+      decoration: const BoxDecoration(
+        color: Color(0xFF252526),
+        border: Border(right: BorderSide(color: Color(0xFF3C3C3C), width: 0.5)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -702,24 +769,35 @@ class _DevScreenState extends ConsumerState<DevScreen> {
             padding: const EdgeInsets.all(12),
             child: Row(
               children: [
-                Icon(Icons.folder_special, size: 18, color: cs.primary),
+                const Icon(Icons.folder_special, size: 18, color: Color(0xFFC09553)),
                 const SizedBox(width: 8),
-                Text('Projects', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: cs.onSurface)),
+                const Text(
+                  'Projects',
+                  style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: Color(0xFFCCCCCC)),
+                ),
               ],
             ),
           ),
-          Divider(height: 1, color: cs.outlineVariant),
+          const Divider(height: 1, color: Color(0xFF3C3C3C)),
           if (_fileTreeLoading)
-            const Padding(padding: EdgeInsets.all(20), child: Center(child: CircularProgressIndicator()))
+            const Padding(
+              padding: EdgeInsets.all(20),
+              child: Center(child: CircularProgressIndicator(color: Color(0xFF4EC9B0))),
+            )
           else if (_fileTree.isEmpty)
             Padding(
               padding: const EdgeInsets.all(20),
               child: Column(
                 children: [
-                  Icon(Icons.create_new_folder_outlined, size: 32, color: cs.onSurface.withValues(alpha: 0.3)),
+                  const Icon(Icons.create_new_folder_outlined, size: 32, color: Color(0xFF555555)),
                   const SizedBox(height: 8),
-                  Text('No projects yet', style: TextStyle(fontSize: 12, color: cs.onSurface.withValues(alpha: 0.5))),
-                  Text('Ask the AI to create one!', style: TextStyle(fontSize: 11, color: cs.onSurface.withValues(alpha: 0.4))),
+                  const Text('No projects yet', style: TextStyle(fontSize: 12, color: Color(0xFF808080))),
+                  const SizedBox(height: 4),
+                  TextButton.icon(
+                    onPressed: _showCreateProjectDialog,
+                    icon: const Icon(Icons.add, size: 14),
+                    label: const Text('Create one', style: TextStyle(fontSize: 12)),
+                  ),
                 ],
               ),
             )
@@ -727,18 +805,21 @@ class _DevScreenState extends ConsumerState<DevScreen> {
             Expanded(
               child: ListView.builder(
                 itemCount: _fileTree.length,
-                itemBuilder: (context, index) => _buildFileTreeNode(_fileTree[index], 0, cs),
+                itemBuilder: (context, index) => _buildFileTreeNode(_fileTree[index], 0),
               ),
             ),
-          // New project button
           Padding(
             padding: const EdgeInsets.all(8),
             child: SizedBox(
               width: double.infinity,
               child: OutlinedButton.icon(
-                onPressed: () => _sendToAI('Create a new project in $kWorkspaceRoot'),
+                onPressed: _showCreateProjectDialog,
                 icon: const Icon(Icons.add, size: 16),
                 label: const Text('New Project', style: TextStyle(fontSize: 12)),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: const Color(0xFFCCCCCC),
+                  side: const BorderSide(color: Color(0xFF555555)),
+                ),
               ),
             ),
           ),
@@ -747,7 +828,7 @@ class _DevScreenState extends ConsumerState<DevScreen> {
     );
   }
 
-  Widget _buildFileTreeNode(_FileNode node, int depth, ColorScheme cs) {
+  Widget _buildFileTreeNode(_FileNode node, int depth) {
     final indent = depth * 16.0;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -769,13 +850,15 @@ class _DevScreenState extends ConsumerState<DevScreen> {
                       ? (node.children?.isNotEmpty == true ? Icons.folder_open : Icons.folder)
                       : _fileIcon(node.name),
                   size: 16,
-                  color: node.isDirectory ? const Color(0xFFC09553) : cs.onSurface.withValues(alpha: 0.6),
+                  color: node.isDirectory
+                      ? const Color(0xFFC09553)
+                      : const Color(0xFF9D9D9D),
                 ),
                 const SizedBox(width: 6),
                 Expanded(
                   child: Text(
                     node.name,
-                    style: TextStyle(fontSize: 12, color: cs.onSurface, fontFamily: 'monospace'),
+                    style: const TextStyle(fontSize: 12, color: Color(0xFFCCCCCC), fontFamily: 'monospace'),
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
@@ -784,7 +867,7 @@ class _DevScreenState extends ConsumerState<DevScreen> {
           ),
         ),
         if (node.children != null)
-          ...node.children!.map((child) => _buildFileTreeNode(child, depth + 1, cs)),
+          ...node.children!.map((child) => _buildFileTreeNode(child, depth + 1)),
       ],
     );
   }
@@ -805,14 +888,6 @@ class _DevScreenState extends ConsumerState<DevScreen> {
 
 // ── Models ──
 
-enum _LineType { input, output, error }
-
-class _TerminalLine {
-  final _LineType type;
-  final String text;
-  _TerminalLine({required this.type, required this.text});
-}
-
 class _FileNode {
   final String name;
   final String path;
@@ -830,13 +905,13 @@ class _QuickAction extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 3, horizontal: 24),
       child: ActionChip(
-        label: Text(text, style: TextStyle(fontSize: 12)),
+        label: Text(text, style: const TextStyle(fontSize: 12, color: Color(0xFFCCCCCC))),
         onPressed: onTap,
-        side: BorderSide(color: cs.outlineVariant),
+        side: const BorderSide(color: Color(0xFF555555)),
+        backgroundColor: const Color(0xFF333333),
         labelPadding: const EdgeInsets.symmetric(horizontal: 8),
       ),
     );
