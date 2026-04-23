@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:async';
 import 'package:crypto/crypto.dart';
 import '../tool_base.dart';
+import '../../bootstrap/bootstrap_service.dart';
 
 // ──────────────────────────────────────────────
 // FILE & SYSTEM TOOLS
@@ -247,7 +248,7 @@ class ShellExecTool extends KoloTool {
     'dart', 'flutter', 'pip', 'pip3', 'java', 'javac', 'go', 'cargo',
     'make', 'cmake', 'gcc', 'g++', 'rustc', 'sed', 'awk', 'tr', 'cut',
     'xargs', 'tee', 'env', 'printenv', 'uname', 'id', 'ps', 'kill',
-    'adb', 'fastboot',
+    'adb', 'fastboot', 'aapt2', 'clang', 'clang++', 'cc', 'c++',
   };
 
   /// Extract the base command from a shell command string
@@ -295,11 +296,22 @@ class ShellExecTool extends KoloTool {
 
     final shell = Platform.isAndroid ? '/system/bin/sh' : '/bin/sh';
 
+    // Inject bootstrap environment (Termux-compiled tools) on Android
+    Map<String, String>? env;
+    if (Platform.isAndroid) {
+      final bootstrap = BootstrapService.instance;
+      if (bootstrap.isReady) {
+        env = Map<String, String>.from(Platform.environment);
+        env.addAll(bootstrap.environment);
+      }
+    }
+
     try {
       final result = await Process.run(
         shell,
         ['-c', command],
         workingDirectory: workDir,
+        environment: env,
       ).timeout(Duration(seconds: timeoutSec));
       final output = StringBuffer();
       if (result.stdout.toString().isNotEmpty) output.writeln(result.stdout);

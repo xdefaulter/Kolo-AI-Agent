@@ -29,6 +29,7 @@ import 'android/app_launcher.dart';
 import 'android/phone_control_overlay.dart';
 import 'android/phone_control_mode.dart';
 import 'android/scan_phone_apps.dart';
+import 'android/bootstrap_status_tool.dart';
 
 /// Cached cross-platform tools — only created once, reused across mode changes
 List<KoloTool>? _cachedCrossPlatformTools;
@@ -110,6 +111,9 @@ ToolRegistry bootstrapTools({PhoneControlMode mode = PhoneControlMode.accessibil
 
   // ── App Scanner (ADB) ──
   registry.register(ScanPhoneAppsTool());
+
+  // ── Bootstrap / Dev Tools Status ──
+  registry.register(BootstrapStatusTool());
 
   // ── Android Phone Control Overlay (3) ──
   registry.register(PhoneControlStartTool());

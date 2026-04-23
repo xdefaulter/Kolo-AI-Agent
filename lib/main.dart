@@ -1,3 +1,5 @@
+import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:firebase_core/firebase_core.dart';
@@ -8,6 +10,7 @@ import 'core/theme_provider.dart';
 import 'core/agent/agent_session.dart';
 import 'core/agent/agent_settings.dart';
 import 'core/stt_service.dart';
+import 'core/bootstrap/bootstrap_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -22,6 +25,13 @@ void main() async {
 
   // Pre-initialize STT (checks availability, requests permissions on first use)
   SttService.instance.init();
+
+  // Bootstrap Termux development tools on Android (non-blocking, fire-and-forget)
+  if (Platform.isAndroid) {
+    unawaited(BootstrapService.instance.initialize().then((status) {
+      debugPrint('[Bootstrap] ${status.message}');
+    }));
+  }
 
   runApp(const ProviderScope(child: KoloApp()));
 }
