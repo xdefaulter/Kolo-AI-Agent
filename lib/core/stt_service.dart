@@ -108,9 +108,6 @@ class SttService {
     // We handle state transitions via isListening
   }
 
-  void dispose() {
-    _partialController.close();
-    _resultController.close();
-    _speech.cancel();
-  }
+  // Singleton lives for app lifetime — no dispose needed.
+  // StreamControllers are broadcast and never closed.
 }

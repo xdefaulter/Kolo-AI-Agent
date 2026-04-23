@@ -281,14 +281,16 @@ class _TestConnectionChipState extends State<_TestConnectionChip> {
   Future<void> _test() async {
     setState(() { _testing = true; _result = null; });
     try {
+      final client = HttpClient();
+      client.connectionTimeout = const Duration(seconds: 10);
       final uri = Uri.parse('${widget.provider.baseUrl}/models');
-      final request = await HttpClient().getUrl(uri);
+      final request = await client.getUrl(uri);
       if (widget.provider.apiKey.isNotEmpty) {
         request.headers.set('Authorization', 'Bearer ${widget.provider.apiKey}');
       }
       final response = await request.close().timeout(const Duration(seconds: 10));
+      client.close();
       if (response.statusCode == 200 || response.statusCode == 401) {
-        // 401 = server is reachable, auth issue (which means connection works)
         if (mounted) setState(() { _testing = false; _result = 'ok'; });
       } else {
         if (mounted) setState(() { _testing = false; _result = 'fail'; });

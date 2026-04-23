@@ -418,29 +418,25 @@ class _DevScreenState extends ConsumerState<DevScreen> {
   }
 
   void _addTermOutput(String text) {
-    final entries = ref.read(devEntriesProvider);
-    ref.read(devEntriesProvider.notifier).state = [
-      ...entries,
-      _DevEntry(
-        id: 'term_out_${DateTime.now().millisecondsSinceEpoch}',
-        type: _DevEntryType.terminalOutput,
-        content: text,
-        timestamp: DateTime.now(),
-      ),
-    ];
+    final entries = List<_DevEntry>.from(ref.read(devEntriesProvider));
+    entries.add(_DevEntry(
+      id: 'term_out_${DateTime.now().millisecondsSinceEpoch}',
+      type: _DevEntryType.terminalOutput,
+      content: text,
+      timestamp: DateTime.now(),
+    ));
+    ref.read(devEntriesProvider.notifier).state = entries;
   }
 
   void _addTermError(String text) {
-    final entries = ref.read(devEntriesProvider);
-    ref.read(devEntriesProvider.notifier).state = [
-      ...entries,
-      _DevEntry(
-        id: 'term_err_${DateTime.now().millisecondsSinceEpoch}',
-        type: _DevEntryType.terminalError,
-        content: text,
-        timestamp: DateTime.now(),
-      ),
-    ];
+    final entries = List<_DevEntry>.from(ref.read(devEntriesProvider));
+    entries.add(_DevEntry(
+      id: 'term_err_${DateTime.now().millisecondsSinceEpoch}',
+      type: _DevEntryType.terminalError,
+      content: text,
+      timestamp: DateTime.now(),
+    ));
+    ref.read(devEntriesProvider.notifier).state = entries;
   }
 
   // ── File Tree ──

@@ -12,8 +12,16 @@ class OpenAIClient {
   /// Maximum number of retries for transient errors (429, 500, 502, 503)
   static const _maxRetries = 3;
 
+  /// Reusable Random instance for backoff jitter
+  static final _random = Random();
+
   /// Cancellation token for the current stream
   CancelToken? _cancelToken;
+
+  /// Timeout constants
+  static const _connectTimeout = Duration(seconds: 30);
+  static const _receiveTimeout = Duration(seconds: 120);
+  static const _sendTimeout = Duration(seconds: 30);
 
   OpenAIClient(this.provider)
       : _dio = Dio(BaseOptions(
@@ -23,9 +31,9 @@ class OpenAIClient {
             'Content-Type': 'application/json',
             ...provider.customHeaders,
           },
-          connectTimeout: const Duration(seconds: 30),
-          receiveTimeout: const Duration(seconds: 120),
-          sendTimeout: const Duration(seconds: 30),
+          connectTimeout: _connectTimeout,
+          receiveTimeout: _receiveTimeout,
+          sendTimeout: _sendTimeout,
           followRedirects: true,
           maxRedirects: 5,
           validateStatus: (status) => status != null && status < 500,
@@ -296,7 +304,7 @@ class OpenAIClient {
   /// Exponential backoff with jitter
   Future<void> _backoff(int attempt) async {
     final baseMs = 1000 * (1 << attempt); // 1s, 2s, 4s
-    final jitter = Random().nextInt(500);
+    final jitter = _random.nextInt(500);
     await Future.delayed(Duration(milliseconds: baseMs + jitter));
   }
 

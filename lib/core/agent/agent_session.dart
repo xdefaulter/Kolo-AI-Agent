@@ -263,6 +263,10 @@ class AgentSessionNotifier extends StateNotifier<AgentSessionState> {
   final Ref _ref;
   AgentSession? _session;
 
+  /// Throttle: minimum interval between streaming state updates
+  static const _throttleInterval = Duration(milliseconds: 50);
+  DateTime _lastStateUpdate = DateTime(0);
+
   AgentSessionNotifier(this._ref) : super(const AgentSessionIdle());
 
   AgentSession? get session => _session;
@@ -304,20 +308,28 @@ class AgentSessionNotifier extends StateNotifier<AgentSessionState> {
         switch (event) {
           case AgentThinkingChunk():
             thinkingBuffer.write(event.thinking);
-            state = AgentSessionRunning(
-              currentContent: buffer.toString(),
-              currentThinking: thinkingBuffer.toString(),
-              toolCalls: toolCalls,
-              toolResults: toolResults,
-            );
+            final now = DateTime.now();
+            if (now.difference(_lastStateUpdate) >= _throttleInterval) {
+              _lastStateUpdate = now;
+              state = AgentSessionRunning(
+                currentContent: buffer.toString(),
+                currentThinking: thinkingBuffer.toString(),
+                toolCalls: toolCalls,
+                toolResults: toolResults,
+              );
+            }
           case AgentContentChunk():
             buffer.write(event.content);
-            state = AgentSessionRunning(
-              currentContent: buffer.toString(),
-              currentThinking: thinkingBuffer.toString(),
-              toolCalls: toolCalls,
-              toolResults: toolResults,
-            );
+            final now = DateTime.now();
+            if (now.difference(_lastStateUpdate) >= _throttleInterval) {
+              _lastStateUpdate = now;
+              state = AgentSessionRunning(
+                currentContent: buffer.toString(),
+                currentThinking: thinkingBuffer.toString(),
+                toolCalls: toolCalls,
+                toolResults: toolResults,
+              );
+            }
           case AgentTextComplete():
             state = AgentSessionCompleted(
               content: event.content,

@@ -73,12 +73,12 @@ class ToolPermissionModesNotifier extends StateNotifier<Map<String, ToolPermissi
         .join(',');
     await AppDatabase.instance.saveSetting('tool_permission_modes', modesStr);
 
-    // Also sync to the active permission manager
+    // Sync to the active permission manager (persist: false — we already saved)
     final session = _ref.read(agentSessionProvider.notifier).session;
     if (session != null) {
       final pm = session.permissionManager;
       for (final entry in state.entries) {
-        pm.setMode(entry.key, entry.value);
+        pm.setMode(entry.key, entry.value, persist: false);
       }
     }
   }

@@ -28,10 +28,12 @@ class PermissionManager {
     );
   }
 
-  /// Set the permission mode for a tool
-  void setMode(String toolName, ToolPermissionMode mode) {
+  /// Set the permission mode for a tool.
+  /// [persist] controls whether to save to DB — false when called from
+  /// ToolPermissionModesNotifier which handles its own persistence.
+  void setMode(String toolName, ToolPermissionMode mode, {bool persist = true}) {
     _toolModes[toolName] = mode;
-    _persistSettings();
+    if (persist) _persistSettings();
   }
 
   /// Check whether a tool is enabled (i.e., not neverAllow)

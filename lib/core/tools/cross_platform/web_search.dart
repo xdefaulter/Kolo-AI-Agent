@@ -1,21 +1,14 @@
 import 'package:dio/dio.dart';
 import '../tool_base.dart';
+import '../../api/shared_dio.dart';
+import 'web_cache.dart';
 
 /// Web search using DuckDuckGo HTML search (lite.duckduckgo.com).
 /// The old api.duckduckgo.com/?format=json endpoint is the Instant Answer API
 /// which returns almost nothing for most queries — this uses the HTML endpoint
 /// and parses the actual search results.
 class WebSearchTool extends KoloTool {
-  final Dio _dio = Dio(BaseOptions(
-    connectTimeout: const Duration(seconds: 10),
-    receiveTimeout: const Duration(seconds: 15),
-    followRedirects: true,
-    validateStatus: (s) => s != null && s < 500, // accept 4xx to read error body
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    },
-  ));
+  Dio get _dio => SharedDio.instance;
 
   @override String get name => 'web_search';
   @override String get description => 'Search the web using DuckDuckGo. Returns top results with titles, URLs, and snippets.';
@@ -34,11 +27,20 @@ class WebSearchTool extends KoloTool {
   Future<ToolResult> execute(Map<String, dynamic> params, ToolContext context) async {
     final query = params['query'] as String;
     final maxResults = ((params['count'] as int?) ?? 8).clamp(1, 15);
+
+    final cacheKey = 'search:$query:$maxResults';
+    final cached = WebCache.instance.get(cacheKey);
+    if (cached != null) return ToolResult.ok(cached);
+
     try {
       // Use DuckDuckGo HTML lite endpoint which returns parseable search results
       final response = await _dio.get(
         'https://lite.duckduckgo.com/lite/',
         queryParameters: {'q': query, 'kl': 'wt-wt'},
+        options: Options(headers: {
+          'User-Agent': 'Mozilla/5.0 (Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        }),
       );
 
       if (response.statusCode != 200) {
@@ -55,6 +57,7 @@ class WebSearchTool extends KoloTool {
       final formatted = results.asMap().entries.map((e) =>
         '${e.key + 1}. ${e.value['title']}\n   ${e.value['url']}\n   ${e.value['snippet']}'
       ).join('\n\n');
+      WebCache.instance.put(cacheKey, formatted);
       return ToolResult.ok(formatted, metadata: {
         'query': query,
         'resultCount': results.length,

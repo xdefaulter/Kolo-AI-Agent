@@ -78,23 +78,25 @@ class ChatSkeletonLoader extends StatelessWidget {
 
   Widget _skeletonBubble(BuildContext context, {required bool isUser, required double width}) {
     final cs = Theme.of(context).colorScheme;
-    return Align(
-      alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
-      child: Container(
-        width: MediaQuery.of(context).size.width * width,
-        height: 60,
-        margin: const EdgeInsets.symmetric(vertical: 3, horizontal: 16),
-        decoration: BoxDecoration(
-          color: cs.surfaceContainerHighest,
-          borderRadius: BorderRadius.only(
-            topLeft: const Radius.circular(16),
-            topRight: const Radius.circular(16),
-            bottomLeft: isUser ? const Radius.circular(16) : const Radius.circular(4),
-            bottomRight: isUser ? const Radius.circular(4) : const Radius.circular(16),
+    return LayoutBuilder(builder: (context, constraints) {
+      return Align(
+        alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
+        child: Container(
+          width: constraints.maxWidth * width,
+          height: 60,
+          margin: const EdgeInsets.symmetric(vertical: 3, horizontal: 16),
+          decoration: BoxDecoration(
+            color: cs.surfaceContainerHighest,
+            borderRadius: BorderRadius.only(
+              topLeft: const Radius.circular(16),
+              topRight: const Radius.circular(16),
+              bottomLeft: isUser ? const Radius.circular(16) : const Radius.circular(4),
+              bottomRight: isUser ? const Radius.circular(4) : const Radius.circular(16),
+            ),
           ),
         ),
-      ),
-    );
+      );
+    });
   }
 }
 

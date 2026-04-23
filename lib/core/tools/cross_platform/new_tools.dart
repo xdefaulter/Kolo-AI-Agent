@@ -266,11 +266,10 @@ class ShellExecTool extends KoloTool {
   }
 
   /// Check for dangerous shell metacharacters that enable injection
+  static final _dangerousPattern = RegExp(r'`|\$\(|<\(|>\(|;|&&|\|\||[\n\r]');
+
   bool _hasDangerousMetachars(String command) {
-    // Allow pipes and redirects (common in legitimate use) but block
-    // backtick execution, $() subshells, and process substitution
-    final dangerous = RegExp(r'`|\$\(|<\(|>\(');
-    return dangerous.hasMatch(command);
+    return _dangerousPattern.hasMatch(command);
   }
 
   @override Future<ToolResult> execute(Map<String, dynamic> params, ToolContext context) async {
@@ -321,6 +320,38 @@ class ShellExecTool extends KoloTool {
 // WEB & NETWORK TOOLS
 // ──────────────────────────────────────────────
 
+/// SSRF protection: block requests to private/internal IP ranges
+bool _isBlockedUrl(String url) {
+  try {
+    final uri = Uri.parse(url);
+    final host = uri.host.toLowerCase();
+
+    // Block cloud metadata endpoints
+    if (host == '169.254.169.254' || host == 'metadata.google.internal') return true;
+
+    // Block localhost variants
+    if (host == 'localhost' || host == '127.0.0.1' || host == '::1' || host == '0.0.0.0') return true;
+
+    // Block private IP ranges (10.x, 172.16-31.x, 192.168.x)
+    final parts = host.split('.');
+    if (parts.length == 4) {
+      final a = int.tryParse(parts[0]);
+      final b = int.tryParse(parts[1]);
+      if (a == 10) return true;
+      if (a == 172 && b != null && b >= 16 && b <= 31) return true;
+      if (a == 192 && b == 168) return true;
+      if (a == 169 && b == 254) return true; // link-local
+    }
+
+    // Block file:// and other non-http schemes
+    if (uri.scheme != 'http' && uri.scheme != 'https') return true;
+
+    return false;
+  } catch (_) {
+    return true; // Block unparseable URLs
+  }
+}
+
 class HttpGetTool extends KoloTool {
   @override String get name => 'http_get';
   @override String get description => 'Make an HTTP GET request to a URL and return the response body.';
@@ -335,6 +366,7 @@ class HttpGetTool extends KoloTool {
   @override ToolPermission get permission => ToolPermission.sensitive;
   @override Future<ToolResult> execute(Map<String, dynamic> params, ToolContext context) async {
     final url = params['url'] as String;
+    if (_isBlockedUrl(url)) return ToolResult.err('URL blocked: requests to private/internal addresses are not allowed.');
     final headers = params['headers'] as Map<String, dynamic>? ?? {};
     try {
       final client = HttpClient();
@@ -366,6 +398,7 @@ class HttpPostTool extends KoloTool {
   @override ToolPermission get permission => ToolPermission.sensitive;
   @override Future<ToolResult> execute(Map<String, dynamic> params, ToolContext context) async {
     final url = params['url'] as String;
+    if (_isBlockedUrl(url)) return ToolResult.err('URL blocked: requests to private/internal addresses are not allowed.');
     final body = params['body'];
     final headers = params['headers'] as Map<String, dynamic>? ?? {};
     try {

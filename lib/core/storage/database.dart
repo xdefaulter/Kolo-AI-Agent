@@ -3,8 +3,9 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:dio/dio.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import '../api/provider.dart';
+import '../api/model_fetcher.dart';
 
 /// Max messages stored per chat to prevent unbounded growth
 const int kMaxMessagesPerChat = 500;
@@ -21,6 +22,11 @@ class AppDatabase {
 
   /// Simple async write lock to prevent concurrent file writes
   final _writeLock = _AsyncLock();
+
+  /// Secure storage for API keys (Keystore/Keychain-backed)
+  final FlutterSecureStorage _secureStorage = const FlutterSecureStorage(
+    aOptions: AndroidOptions(encryptedSharedPreferences: true),
+  );
 
   String? _dbPath;
 
@@ -95,18 +101,66 @@ class AppDatabase {
     final file = File('$path/messages_$chatId.json');
     if (!await file.exists()) return [];
     final json = await file.readAsString();
-    final list = jsonDecode(json) as List;
-    return list.map((e) => MessageEntry.fromMap(e as Map<String, dynamic>)).toList();
+    if (json.trim().isEmpty) return [];
+    try {
+      final decoded = jsonDecode(json);
+      // Support both old (bare list) and new (versioned object) formats
+      final List list;
+      if (decoded is List) {
+        list = decoded;
+      } else if (decoded is Map && decoded['messages'] is List) {
+        // Future versioned format
+        list = decoded['messages'] as List;
+      } else {
+        return [];
+      }
+      final messages = list.map((e) => MessageEntry.fromMap(e as Map<String, dynamic>)).toList();
+      _messageCountCache[chatId] = messages.length;
+      return messages;
+    } catch (e) {
+      return [];
+    }
   }
 
+  /// In-memory message count cache to avoid reading full file for cap checks
+  final Map<String, int> _messageCountCache = {};
+
   Future<void> addMessage(String chatId, MessageEntry msg) async {
-    var messages = await getMessages(chatId);
-    messages.add(msg);
-    // Enforce message limit — drop oldest messages beyond cap
-    if (messages.length > kMaxMessagesPerChat) {
+    final count = _messageCountCache[chatId];
+    if (count != null && count >= kMaxMessagesPerChat) {
+      // Hit cap — do a full read-modify-write to trim oldest
+      var messages = await getMessages(chatId);
+      messages.add(msg);
       messages = messages.sublist(messages.length - kMaxMessagesPerChat);
+      _messageCountCache[chatId] = messages.length;
+      await _writeMessages(chatId, messages);
+    } else {
+      // Append-only: just append the new message JSON line
+      await _appendMessage(chatId, msg);
+      _messageCountCache[chatId] = (count ?? 0) + 1;
     }
-    await _writeMessages(chatId, messages);
+  }
+
+  /// Append a single message to the JSON file without reading the entire file.
+  /// The file stores a JSON array; we overwrite the trailing ']' with ',newMsg]'.
+  Future<void> _appendMessage(String chatId, MessageEntry msg) async {
+    await _writeLock.run(() async {
+      final path = await _path;
+      final file = File('$path/messages_$chatId.json');
+      final msgJson = jsonEncode(msg.toMap());
+      if (!await file.exists() || (await file.length()) < 3) {
+        // New file — write as array
+        await file.writeAsString('[$msgJson]');
+      } else {
+        // Seek to end, overwrite trailing ']' with ',newEntry]'
+        final raf = await file.open(mode: FileMode.writeOnlyAppend);
+        // Move back 1 byte to overwrite the ']'
+        final length = await raf.length();
+        await raf.setPosition(length - 1);
+        await raf.writeString(',$msgJson]');
+        await raf.close();
+      }
+    });
   }
 
   Future<void> _writeMessages(String chatId, List<MessageEntry> messages) async {
@@ -115,6 +169,7 @@ class AppDatabase {
       final file = File('$path/messages_$chatId.json');
       await file.writeAsString(jsonEncode(messages.map((m) => m.toMap()).toList()));
     });
+    _messageCountCache[chatId] = messages.length;
   }
 
   // ---- Providers (with models) ----
@@ -124,7 +179,15 @@ class AppDatabase {
     final json = prefs.getString('kolo_providers_v2');
     if (json == null) return [];
     final list = jsonDecode(json) as List;
-    return list.map((e) => ProviderConfig.fromMap(e as Map<String, dynamic>)).toList();
+    final providers = list.map((e) => ProviderConfig.fromMap(e as Map<String, dynamic>)).toList();
+    // Hydrate API keys from secure storage
+    for (final p in providers) {
+      final secureKey = await _secureStorage.read(key: 'provider_apikey_${p.id}');
+      if (secureKey != null && secureKey.isNotEmpty) {
+        p.apiKey = secureKey;
+      }
+    }
+    return providers;
   }
 
   Future<void> saveProvider(ProviderConfig provider) async {
@@ -145,12 +208,21 @@ class AppDatabase {
   Future<void> deleteProvider(String id) async {
     var providers = await getAllProviders();
     providers.removeWhere((p) => p.id == id);
+    await _secureStorage.delete(key: 'provider_apikey_$id');
     await _writeProviders(providers);
   }
 
   Future<void> _writeProviders(List<ProviderConfig> providers) async {
+    // Store API keys in secure storage, strip them from SharedPreferences
+    for (final p in providers) {
+      if (p.apiKey.isNotEmpty) {
+        await _secureStorage.write(key: 'provider_apikey_${p.id}', value: p.apiKey);
+      } else {
+        await _secureStorage.delete(key: 'provider_apikey_${p.id}');
+      }
+    }
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('kolo_providers_v2', jsonEncode(providers.map((p) => p.toMap()).toList()));
+    await prefs.setString('kolo_providers_v2', jsonEncode(providers.map((p) => p.toMapWithoutApiKey()).toList()));
   }
 
   Future<ProviderConfig?> getActiveProvider() async {
@@ -159,60 +231,10 @@ class AppDatabase {
         (providers.isNotEmpty ? providers.first : null);
   }
 
-  /// 4.2: Fetch models from a provider's /models endpoint.
-  /// NOTE: This makes network calls, which violates separation of concerns.
-  /// Kept here temporarily for backward compat; callers should migrate to
-  /// a dedicated ModelFetcher service.
-  Future<List<ModelConfig>> fetchModels(ProviderConfig provider) async {
-    if (!provider.canFetchModels) return [];
-
-    try {
-      final dio = Dio(BaseOptions(
-        followRedirects: true,
-        maxRedirects: 5,
-        validateStatus: (status) => status != null && status < 400,
-      ));
-      final headers = <String, dynamic>{
-        'Content-Type': 'application/json',
-        ...provider.customHeaders,
-      };
-      if (provider.apiKey.isNotEmpty) {
-        headers['Authorization'] = 'Bearer ${provider.apiKey}';
-      }
-      // Re-attach auth on redirects (Dio strips Authorization on cross-origin redirects)
-      dio.interceptors.add(InterceptorsWrapper(
-        onRequest: (options, handler) {
-          if (provider.apiKey.isNotEmpty) {
-            options.headers['Authorization'] = 'Bearer ${provider.apiKey}';
-          }
-          handler.next(options);
-        },
-      ));
-
-      final response = await dio.get(
-        provider.effectiveModelsUrl,
-        options: Options(headers: headers),
-      );
-
-      final data = response.data as Map<String, dynamic>;
-      final modelList = data['data'] as List<dynamic>? ?? [];
-
-      return modelList.map((m) {
-        final map = m as Map<String, dynamic>;
-        final id = map['id'] as String? ?? 'unknown';
-        return ModelConfig(
-          modelId: id,
-          displayName: id,
-          maxTokens: 4096,
-          isCustom: false,
-          description: map['description'] as String?,
-        );
-      }).toList();
-    } catch (e) {
-      // silently fail — caller can handle
-      return [];
-    }
-  }
+  /// @deprecated Use ModelFetcher.fetchModels() directly instead.
+  /// Delegates to ModelFetcher to keep network logic out of storage layer.
+  Future<List<ModelConfig>> fetchModels(ProviderConfig provider) =>
+      ModelFetcher.fetchModels(provider);
 
   // ---- Active Model Selection (per chat) ----
 

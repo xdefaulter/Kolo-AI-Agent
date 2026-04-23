@@ -1,14 +1,11 @@
 import 'package:dio/dio.dart';
 import '../tool_base.dart';
+import '../../api/shared_dio.dart';
+import 'web_cache.dart';
 
 /// Fetch a URL and extract clean readable text, stripping HTML/JS/CSS noise.
 class WebScrapeTool extends KoloTool {
-  final Dio _dio = Dio(BaseOptions(
-    connectTimeout: const Duration(seconds: 15),
-    receiveTimeout: const Duration(seconds: 30),
-    followRedirects: true,
-    validateStatus: (s) => s != null && s < 400,
-  ));
+  Dio get _dio => SharedDio.instance;
 
   @override
   String get name => 'web_scrape';
@@ -30,9 +27,16 @@ class WebScrapeTool extends KoloTool {
   Future<ToolResult> execute(Map<String, dynamic> params, ToolContext context) async {
     final url = params['url'] as String;
     final maxLength = params['max_length'] as int? ?? 8000;
+
+    // Check cache first
+    final cacheKey = 'scrape:$url';
+    final cached = WebCache.instance.get(cacheKey);
+    if (cached != null) return ToolResult.ok(cached);
+
     try {
       final response = await _dio.get<String>(url, options: Options(
         responseType: ResponseType.plain,
+        validateStatus: (s) => s != null && s < 400,
         headers: {
           'User-Agent': 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36',
           'Accept': 'text/html,application/xhtml+xml',
@@ -49,8 +53,12 @@ class WebScrapeTool extends KoloTool {
       if (cleanText.length > maxLength) {
         cleanText = '${cleanText.substring(0, maxLength)}... [truncated]';
       }
+      // Sanitize: strip common prompt injection patterns
+      cleanText = _sanitizeForLlm(cleanText);
       result.write(cleanText);
-      return ToolResult.ok(result.toString());
+      final output = result.toString();
+      WebCache.instance.put(cacheKey, output);
+      return ToolResult.ok(output);
     } catch (e) {
       return ToolResult.err('Scrape failed: $e');
     }
@@ -73,6 +81,15 @@ class WebScrapeTool extends KoloTool {
     text = text.replaceAll(RegExp(r'[ \t]+'), ' ');
     text = text.replaceAll(RegExp(r'\n{3,}'), '\n\n');
     return text.trim();
+  }
+
+  /// Strip common prompt injection patterns from scraped content
+  String _sanitizeForLlm(String text) {
+    // Remove lines that look like prompt injection attempts
+    return text.replaceAll(RegExp(
+      r'(ignore|disregard|forget)\s+(all\s+)?(previous|prior|above)\s+(instructions|prompts|context)',
+      caseSensitive: false,
+    ), '[content filtered]');
   }
 
   String _decodeEntities(String s) {

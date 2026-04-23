@@ -1,3 +1,4 @@
+import 'tool_base.dart';
 import 'tool_registry.dart';
 import 'cross_platform/read_file.dart';
 import 'cross_platform/write_file.dart';
@@ -29,74 +30,50 @@ import 'android/phone_control_overlay.dart';
 import 'android/phone_control_mode.dart';
 import 'android/scan_phone_apps.dart';
 
+/// Cached cross-platform tools — only created once, reused across mode changes
+List<KoloTool>? _cachedCrossPlatformTools;
+
+List<KoloTool> _buildCrossPlatformTools() {
+  if (_cachedCrossPlatformTools != null) return _cachedCrossPlatformTools!;
+  _cachedCrossPlatformTools = [
+    // File & directory
+    ReadFileTool(), WriteFileTool(), ListDirectoryTool(), ListFilesTool(),
+    DeleteFileTool(), CreateDirectoryTool(), FindFileTool(),
+    // File operations
+    AppendFileTool(), CopyFileTool(), MoveFileTool(), FileStatTool(),
+    // Web & network
+    WebSearchTool(), WebScrapeTool(), HttpGetTool(), HttpPostTool(),
+    // Utility
+    CalculatorTool(), JsonParseTool(), Base64Tool(), HashTool(), DateTool(),
+    // Clipboard
+    ClipboardReadTool(), ClipboardWriteTool(),
+    // Shell & system
+    ShellExecTool(), EnvInfoTool(),
+    // Platform capabilities
+    LocationTool(), ConnectivityTool(), BatteryInfoTool(), VibrateTool(),
+    TextToSpeechTool(), SpeechToTextTool(), OpenAppTool(),
+    // Media & downloads
+    QrCodeTool(), DownloadFileTool(), ImageMetadataTool(),
+    // Contacts & search
+    GrepTool(), ContactsTool(),
+    // Coding tools
+    EditFileTool(), SearchFilesTool(), SetProjectRootTool(), FlutterTaskTool(),
+    // Timers
+    TimerTool(),
+  ];
+  return _cachedCrossPlatformTools!;
+}
+
 /// Bootstrap: Register all tools into the registry
 /// Called once at app startup
 /// [mode] determines whether phone control tools use Accessibility or ADB.
 ToolRegistry bootstrapTools({PhoneControlMode mode = PhoneControlMode.accessibility}) {
   final registry = ToolRegistry();
 
-  // ── File & directory (7) ──
-  registry.register(ReadFileTool());
-  registry.register(WriteFileTool());
-  registry.register(ListDirectoryTool());
-  registry.register(ListFilesTool());
-  registry.register(DeleteFileTool());
-  registry.register(CreateDirectoryTool());
-  registry.register(FindFileTool());
-
-  // ── File operations (4) ──
-  registry.register(AppendFileTool());
-  registry.register(CopyFileTool());
-  registry.register(MoveFileTool());
-  registry.register(FileStatTool());
-
-  // ── Web & network (4) ──
-  registry.register(WebSearchTool());
-  registry.register(WebScrapeTool());
-  registry.register(HttpGetTool());
-  registry.register(HttpPostTool());
-
-  // ── Utility (5) ──
-  registry.register(CalculatorTool());
-  registry.register(JsonParseTool());
-  registry.register(Base64Tool());
-  registry.register(HashTool());
-  registry.register(DateTool());
-
-  // ── Clipboard (2) ──
-  registry.register(ClipboardReadTool());
-  registry.register(ClipboardWriteTool());
-
-  // ── Shell & system (2) ──
-  registry.register(ShellExecTool());
-  registry.register(EnvInfoTool());
-
-  // ── Platform capabilities (7) ──
-  registry.register(LocationTool());
-  registry.register(ConnectivityTool());
-  registry.register(BatteryInfoTool());
-  registry.register(VibrateTool());
-  registry.register(TextToSpeechTool());
-  registry.register(SpeechToTextTool());
-  registry.register(OpenAppTool());
-
-  // ── Media & downloads (3) ──
-  registry.register(QrCodeTool());
-  registry.register(DownloadFileTool());
-  registry.register(ImageMetadataTool());
-
-  // ── Contacts & search (2) ──
-  registry.register(GrepTool());
-  registry.register(ContactsTool());
-
-  // ── Coding tools (4) ──
-  registry.register(EditFileTool());
-  registry.register(SearchFilesTool());
-  registry.register(SetProjectRootTool());
-  registry.register(FlutterTaskTool());
-
-  // ── Timers (1) ──
-  registry.register(TimerTool());
+  // Register cached cross-platform tools (not recreated on mode change)
+  for (final tool in _buildCrossPlatformTools()) {
+    registry.register(tool);
+  }
 
   // ── Android Phone Controller — mode-dependent ──
   if (mode == PhoneControlMode.adb) {

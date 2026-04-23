@@ -56,18 +56,39 @@ class ToolRouter {
     }
   }
 
-  /// Execute multiple tool calls in parallel
+  /// Execute multiple tool calls in parallel, deduplicating identical calls
   Future<List<ToolResult>> executeToolsParallel({
     required List<ResolvedToolCall> calls,
     required String chatId,
   }) async {
-    return Future.wait(
-      calls.map((call) => executeTool(
-            toolName: call.name,
-            toolCallId: call.id,
-            argumentsJson: call.arguments,
-            chatId: chatId,
-          )),
-    );
+    // Dedup: group calls by (name, arguments)
+    final dedupMap = <String, List<int>>{}; // key -> list of indices
+    for (var i = 0; i < calls.length; i++) {
+      final key = '${calls[i].name}:${calls[i].arguments}';
+      (dedupMap[key] ??= []).add(i);
+    }
+
+    final results = List<ToolResult?>.filled(calls.length, null);
+    final futures = <Future<void>>[];
+
+    for (final entry in dedupMap.entries) {
+      final indices = entry.value;
+      final call = calls[indices.first];
+      futures.add(
+        executeTool(
+          toolName: call.name,
+          toolCallId: call.id,
+          argumentsJson: call.arguments,
+          chatId: chatId,
+        ).then((result) {
+          for (final idx in indices) {
+            results[idx] = result;
+          }
+        }),
+      );
+    }
+
+    await Future.wait(futures);
+    return results.cast<ToolResult>();
   }
 }

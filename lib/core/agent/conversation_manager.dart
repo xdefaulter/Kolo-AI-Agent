@@ -1,9 +1,15 @@
+/// Default max context tokens for conversation budgeting
+const int kDefaultMaxContextTokens = 32000;
+
 /// Manages conversation history with token budgeting
 class ConversationManager {
   final List<ChatMessage> _messages = [];
   final int maxContextTokens;
 
-  ConversationManager({this.maxContextTokens = 32000});
+  /// Max messages kept in memory — older messages are pruned
+  static const _maxInMemoryMessages = 200;
+
+  ConversationManager({this.maxContextTokens = kDefaultMaxContextTokens});
 
   List<ChatMessage> get messages => List.unmodifiable(_messages);
 
@@ -39,15 +45,21 @@ class ConversationManager {
   /// Add a pre-built message (for loading from persistence)
   void addMessage(ChatMessage message) {
     _messages.add(message);
+    _pruneIfNeeded();
   }
 
-  /// 3.6: Improved token estimation — accounts for whitespace splitting,
-  /// special characters, and multi-byte characters (~1.3 tokens per word average).
+  /// Prune oldest messages if list exceeds cap
+  void _pruneIfNeeded() {
+    if (_messages.length > _maxInMemoryMessages) {
+      _messages.removeRange(0, _messages.length - _maxInMemoryMessages);
+    }
+  }
+
+  static final _whitespaceRegExp = RegExp(r'\s+');
+
   int _estimateTokens(String text) {
     if (text.isEmpty) return 0;
-    // Word-based estimation is more accurate than char/4
-    final words = text.split(RegExp(r'\s+')).where((w) => w.isNotEmpty).length;
-    // Add overhead for special tokens, tool call JSON structure
+    final words = text.split(_whitespaceRegExp).where((w) => w.isNotEmpty).length;
     return ((words * 1.3) + 4).ceil();
   }
 

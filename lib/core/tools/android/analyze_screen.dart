@@ -1,6 +1,5 @@
 import 'dart:convert';
 import 'package:flutter/services.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../tool_base.dart';
 import '../../storage/database.dart';
 import '../../api/provider.dart';
@@ -10,9 +9,7 @@ import 'vlm_analyzer.dart';
 /// Tool: Analyze screen with Vision model
 /// Takes screenshot → sends to VLM → gets back actions → optionally executes them
 class AnalyzeScreenTool extends KoloTool {
-  final WidgetRef? ref;
-
-  AnalyzeScreenTool({this.ref});
+  AnalyzeScreenTool();
 
   @override
   String get name => 'analyze_screen';
@@ -62,31 +59,23 @@ class AnalyzeScreenTool extends KoloTool {
       } catch (_) {}
     }
 
-    // 3. Get VLM provider — if ref is null, try to build from database directly
+    // 3. Build VLM provider from database (no UI dependency)
     ApiProvider? visionProvider;
-    if (ref != null) {
-      visionProvider = await VlmScreenAnalyzer.buildVisionProvider(ref!);
-    }
-    
-    // Fallback: try building provider from database without WidgetRef
-    if (visionProvider == null) {
-      try {
-        final db = AppDatabase.instance;
-        final activeProvider = await db.getActiveProvider();
-        if (activeProvider != null && activeProvider.activeModel != null) {
-          visionProvider = ApiProvider(
-            id: activeProvider.id,
-            name: activeProvider.name,
-            baseUrl: activeProvider.baseUrl,
-            apiKey: activeProvider.apiKey,
-            model: activeProvider.activeModel!.modelId,
-            customHeaders: activeProvider.customHeaders,
-            maxTokens: 1024,
-            temperature: 0.1,
-          );
-        }
-      } catch (_) {}
-    }
+    try {
+      final db = AppDatabase.instance;
+      final allProviders = await db.getAllProviders();
+
+      // Load persisted vision config
+      final configJson = await db.getSetting('vision_model_config');
+      final visionConfig = configJson != null
+          ? VisionModelConfig.fromMap(jsonDecode(configJson) as Map<String, dynamic>)
+          : VisionModelConfig();
+
+      visionProvider = await VlmScreenAnalyzer.buildVisionProvider(
+        visionConfig: visionConfig,
+        providers: allProviders,
+      );
+    } catch (_) {}
 
     if (visionProvider == null) {
       // Can't do VLM analysis, but still provide the screenshot data

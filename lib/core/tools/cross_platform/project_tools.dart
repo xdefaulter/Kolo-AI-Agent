@@ -1,15 +1,24 @@
 import 'dart:io';
 import '../tool_base.dart';
 
-/// Session-scoped project root that other tools can reference
+/// Session-scoped project root that other tools can reference.
+/// Access is synchronized through a single static field — only set via
+/// SetProjectRootTool to keep mutation explicit and traceable.
 class ProjectRoot {
-  static String? root;
+  static String? _root;
+
+  static String? get root => _root;
+  static set root(String? value) {
+    // Intentionally simple — single-isolate app, no concurrent writes
+    _root = value;
+  }
 
   /// Resolve a path: if absolute, return as-is. If relative and project root is set, resolve against it.
   static String resolve(String path) {
     if (path.startsWith('/')) return path;
-    if (root != null) {
-      return '${root!}${Platform.pathSeparator}$path';
+    final r = _root;
+    if (r != null) {
+      return '$r${Platform.pathSeparator}$path';
     }
     return path;
   }

@@ -59,6 +59,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   // 2.5: Cache interleaved items to avoid recomputation on every build
   List<dynamic>? _cachedInterleavedItems;
   int _cachedMessageCount = -1;
+  int _cachedContentHash = -1;
 
   @override
   void initState() {
@@ -476,8 +477,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   void _scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scrollController.hasClients) {
+        final pos = _scrollController.position;
+        // Skip if already at bottom (within 50px tolerance)
+        if (pos.maxScrollExtent - pos.pixels < 50) return;
         _scrollController.animateTo(
-          _scrollController.position.maxScrollExtent,
+          pos.maxScrollExtent,
           duration: const Duration(milliseconds: 300),
           curve: Curves.easeOut,
         );
@@ -615,7 +619,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   /// Pre-compute the interleaved list of date separators and messages.
   /// 2.5: Cached — only recomputed when message count changes.
   List<dynamic> _buildInterleavedItems(List<ChatMessageUI> messages) {
-    if (_cachedInterleavedItems != null && _cachedMessageCount == messages.length) {
+    // Hash includes count + last message content to detect streaming updates
+    final contentHash = messages.isEmpty ? 0 :
+        Object.hash(messages.length, messages.last.content.length, messages.last.isStreaming);
+    if (_cachedInterleavedItems != null && _cachedMessageCount == messages.length && _cachedContentHash == contentHash) {
       return _cachedInterleavedItems!;
     }
     final items = <dynamic>[];
@@ -630,6 +637,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     }
     _cachedInterleavedItems = items;
     _cachedMessageCount = messages.length;
+    _cachedContentHash = contentHash;
     return items;
   }
 

@@ -103,13 +103,27 @@ class ProviderConfig {
     );
   }
 
-  /// Serialize to map. API key is included for persistence but should be
-  /// stored securely (see flutter_secure_storage migration TODO).
+  /// Serialize to map including API key (used for in-memory transport only).
   Map<String, dynamic> toMap() => {
         'id': id,
         'name': name,
         'baseUrl': baseUrl,
-        'apiKey': apiKey, // 1.2: TODO migrate to flutter_secure_storage
+        'apiKey': apiKey,
+        'customHeaders': customHeaders,
+        'isActive': isActive,
+        'modelsEndpoint': modelsEndpoint,
+        'createdAt': createdAt.toIso8601String(),
+        'updatedAt': updatedAt.toIso8601String(),
+        'models': models.map((m) => m.toMap()).toList(),
+      };
+
+  /// Serialize without API key — for SharedPreferences persistence.
+  /// API keys are stored separately in flutter_secure_storage.
+  Map<String, dynamic> toMapWithoutApiKey() => {
+        'id': id,
+        'name': name,
+        'baseUrl': baseUrl,
+        'apiKey': '', // stored in secure storage
         'customHeaders': customHeaders,
         'isActive': isActive,
         'modelsEndpoint': modelsEndpoint,

@@ -553,21 +553,36 @@ class _SyntaxHighlight extends StatelessWidget {
     return TextSpan(children: children);
   }
 
+  // Pre-built style maps to avoid allocating TextStyle on every build
+  static const _darkStyles = <String, TextStyle>{
+    'keyword': TextStyle(color: Color(0xFFC678DD), fontWeight: FontWeight.bold, fontSize: 13, fontFamily: 'monospace'),
+    'string': TextStyle(color: Color(0xFF98C379), fontSize: 13, fontFamily: 'monospace'),
+    'number': TextStyle(color: Color(0xFFD19A66), fontSize: 13, fontFamily: 'monospace'),
+    'comment': TextStyle(color: Color(0xFF5C6370), fontStyle: FontStyle.italic, fontSize: 13, fontFamily: 'monospace'),
+    'function': TextStyle(color: Color(0xFF61AFEF), fontSize: 13, fontFamily: 'monospace'),
+    'title': TextStyle(color: Color(0xFF61AFEF), fontWeight: FontWeight.bold, fontSize: 13, fontFamily: 'monospace'),
+    'params': TextStyle(color: Color(0xFFE06C75), fontSize: 13, fontFamily: 'monospace'),
+    'built_in': TextStyle(color: Color(0xFFE5C07B), fontSize: 13, fontFamily: 'monospace'),
+    'attr': TextStyle(color: Color(0xFFD19A66), fontSize: 13, fontFamily: 'monospace'),
+    'literal': TextStyle(color: Color(0xFFD19A66), fontSize: 13, fontFamily: 'monospace'),
+    'type': TextStyle(color: Color(0xFFE5C07B), fontSize: 13, fontFamily: 'monospace'),
+  };
+  static const _lightStyles = <String, TextStyle>{
+    'keyword': TextStyle(color: Color(0xFF7B30A0), fontWeight: FontWeight.bold, fontSize: 13, fontFamily: 'monospace'),
+    'string': TextStyle(color: Color(0xFF2E7D32), fontSize: 13, fontFamily: 'monospace'),
+    'number': TextStyle(color: Color(0xFFB8600D), fontSize: 13, fontFamily: 'monospace'),
+    'comment': TextStyle(color: Color(0xFF8E8E8E), fontStyle: FontStyle.italic, fontSize: 13, fontFamily: 'monospace'),
+    'function': TextStyle(color: Color(0xFF1565C0), fontSize: 13, fontFamily: 'monospace'),
+    'title': TextStyle(color: Color(0xFF1565C0), fontWeight: FontWeight.bold, fontSize: 13, fontFamily: 'monospace'),
+    'params': TextStyle(color: Color(0xFFC62828), fontSize: 13, fontFamily: 'monospace'),
+    'built_in': TextStyle(color: Color(0xFF9E6D00), fontSize: 13, fontFamily: 'monospace'),
+    'attr': TextStyle(color: Color(0xFFB8600D), fontSize: 13, fontFamily: 'monospace'),
+    'literal': TextStyle(color: Color(0xFFB8600D), fontSize: 13, fontFamily: 'monospace'),
+    'type': TextStyle(color: Color(0xFF9E6D00), fontSize: 13, fontFamily: 'monospace'),
+  };
+
   TextStyle _styleForClass(String? className, ColorScheme cs) {
-    final isDark = cs.brightness == Brightness.dark;
-    switch (className) {
-      case 'keyword':      return TextStyle(color: isDark ? const Color(0xFFC678DD) : const Color(0xFF7B30A0), fontWeight: FontWeight.bold, fontSize: 13, fontFamily: 'monospace');
-      case 'string':        return TextStyle(color: isDark ? const Color(0xFF98C379) : const Color(0xFF2E7D32), fontSize: 13, fontFamily: 'monospace');
-      case 'number':        return TextStyle(color: isDark ? const Color(0xFFD19A66) : const Color(0xFFB8600D), fontSize: 13, fontFamily: 'monospace');
-      case 'comment':       return TextStyle(color: isDark ? const Color(0xFF5C6370) : const Color(0xFF8E8E8E), fontStyle: FontStyle.italic, fontSize: 13, fontFamily: 'monospace');
-      case 'function':      return TextStyle(color: isDark ? const Color(0xFF61AFEF) : const Color(0xFF1565C0), fontSize: 13, fontFamily: 'monospace');
-      case 'title':         return TextStyle(color: isDark ? const Color(0xFF61AFEF) : const Color(0xFF1565C0), fontWeight: FontWeight.bold, fontSize: 13, fontFamily: 'monospace');
-      case 'params':        return TextStyle(color: isDark ? const Color(0xFFE06C75) : const Color(0xFFC62828), fontSize: 13, fontFamily: 'monospace');
-      case 'built_in':      return TextStyle(color: isDark ? const Color(0xFFE5C07B) : const Color(0xFF9E6D00), fontSize: 13, fontFamily: 'monospace');
-      case 'attr':          return TextStyle(color: isDark ? const Color(0xFFD19A66) : const Color(0xFFB8600D), fontSize: 13, fontFamily: 'monospace');
-      case 'literal':       return TextStyle(color: isDark ? const Color(0xFFD19A66) : const Color(0xFFB8600D), fontSize: 13, fontFamily: 'monospace');
-      case 'type':          return TextStyle(color: isDark ? const Color(0xFFE5C07B) : const Color(0xFF9E6D00), fontSize: 13, fontFamily: 'monospace');
-      default:              return TextStyle(color: cs.onSurface, fontSize: 13, fontFamily: 'monospace');
-    }
+    final styles = cs.brightness == Brightness.dark ? _darkStyles : _lightStyles;
+    return styles[className] ?? TextStyle(color: cs.onSurface, fontSize: 13, fontFamily: 'monospace');
   }
 }

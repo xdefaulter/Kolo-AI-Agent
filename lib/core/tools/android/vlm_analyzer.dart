@@ -177,14 +177,17 @@ If the task is already complete, respond: [{"action": "done"}]''';
     return VlmAnalysisResult(actions: [], rawContent: content, needsInterpretation: true);
   }
 
-  /// Build a vision-capable ApiProvider from the current settings
-  static Future<ApiProvider?> buildVisionProvider(WidgetRef ref) async {
-    final config = ref.read(visionModelConfigProvider);
-    final db = AppDatabase.instance;
+  /// Build a vision-capable ApiProvider from the current settings.
+  /// [visionConfig] and [providers] are passed in to avoid UI-layer dependency.
+  static Future<ApiProvider?> buildVisionProvider({
+    required VisionModelConfig visionConfig,
+    required List<ProviderConfig> providers,
+  }) async {
+    final config = visionConfig;
 
     if (config.mode == VisionModelMode.sameAsChat) {
-      // Use the same active provider+model
-      final activeProvider = await db.getActiveProvider();
+      final activeProvider = providers.where((p) => p.isActive).firstOrNull ??
+          (providers.isNotEmpty ? providers.first : null);
       if (activeProvider == null) return null;
       final activeModel = activeProvider.activeModel;
       if (activeModel == null) return null;
@@ -199,9 +202,7 @@ If the task is already complete, respond: [{"action": "done"}]''';
         temperature: 0.1,
       );
     } else {
-      // Use the configured separate vision provider
       if (config.providerId == null) return null;
-      final providers = await db.getAllProviders();
       final provider = providers.where((p) => p.id == config.providerId).firstOrNull;
       if (provider == null) return null;
       return ApiProvider(
