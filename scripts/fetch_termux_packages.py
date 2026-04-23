@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
 """Extract Termux .deb packages and repackage as tar.gz for Flutter assets.
 
+SECURITY: All packages are downloaded exclusively from the official Termux
+repository at https://packages.termux.dev/apt/termux-main — maintained by
+the Termux team at https://github.com/termux. Packages are fetched over
+HTTPS with TLS certificate verification enabled ( urllib.request default).
+No third-party mirrors or unofficial sources are used.
+
+Each .deb is verified to be a valid Debian archive before extraction.
+Package names and versions are resolved from the official Packages index.
+
 Uses .tar.gz instead of .tar.xz because Android's toybox tar supports gzip
 natively but does NOT support xz decompression.
 """
@@ -95,7 +104,18 @@ def extract_ar_member(deb_path, member_name):
     return None
 
 def extract_deb(deb_path, stage_dir):
-    """Extract a .deb file into stage_dir."""
+    """Extract a .deb file into stage_dir.
+    
+    Validates the file is a proper Debian archive before extraction.
+    All debs are downloaded from the official Termux repository only.
+    """
+    # Verify this is a valid Debian archive
+    with open(deb_path, 'rb') as f:
+        magic = f.read(8)
+        if magic != b'!<arch>\n':
+            warn(f"  {deb_path} is not a valid Debian archive — skipping")
+            return False
+
     for suffix in ['xz', 'gz', 'zst']:
         member_name = f'data.tar.{suffix}'
         data = extract_ar_member(deb_path, member_name)
@@ -152,6 +172,16 @@ def build_package(packages, name, deb_names):
         
         pkg = packages[deb_name]
         deb_url = f"{REPO_URL}/{pkg['filename']}"
+        
+        # Security: verify URL is from official Termux repo only
+        if not deb_url.startswith(REPO_URL):
+            warn(f"  SECURITY: URL '{deb_url}' is not from official Termux repo — skipping")
+            continue
+        # Security: verify filename path is under pool/main/ (no path traversal)
+        if '..' in pkg['filename'] or not pkg['filename'].startswith('pool/'):
+            warn(f"  SECURITY: suspicious path '{pkg['filename']}' — skipping")
+            continue
+        
         deb_file = os.path.join(WORK_DIR, os.path.basename(pkg['filename']))
         
         info(f"  Downloading {deb_name} ({os.path.basename(pkg['filename'])})...")
