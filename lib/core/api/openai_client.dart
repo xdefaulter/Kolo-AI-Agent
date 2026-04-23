@@ -198,11 +198,8 @@ class OpenAIClient {
           return;
         }
 
-        // Retry on connection/timeout errors
-        if (attempt < _maxRetries &&
-            (e.type == DioExceptionType.connectionTimeout ||
-             e.type == DioExceptionType.receiveTimeout ||
-             e.type == DioExceptionType.connectionError)) {
+        // Retry on connection/timeout/broken-pipe errors (common after app backgrounding)
+        if (attempt < _maxRetries && _isRetryableDioError(e)) {
           await _backoff(attempt);
           continue;
         }
@@ -232,6 +229,12 @@ class OpenAIClient {
         );
         return;
       } catch (e) {
+        // Catch raw HttpException ("Connection closed while receiving data")
+        // and other dart:io errors that escape Dio — retry once if backgrounding-related
+        if (attempt < _maxRetries && _isRetryableRawError(e)) {
+          await _backoff(attempt);
+          continue;
+        }
         yield ChatStreamChunk(
           content: '',
           finishReason: 'error',
@@ -289,6 +292,30 @@ class OpenAIClient {
     final baseMs = 1000 * (1 << attempt); // 1s, 2s, 4s
     final jitter = Random().nextInt(500);
     await Future.delayed(Duration(milliseconds: baseMs + jitter));
+  }
+
+  /// Whether a DioException is worth retrying (connection issues, timeouts, broken pipes)
+  bool _isRetryableDioError(DioException e) {
+    if (e.type == DioExceptionType.connectionTimeout ||
+        e.type == DioExceptionType.receiveTimeout ||
+        e.type == DioExceptionType.connectionError) {
+      return true;
+    }
+    // Broken pipe / connection reset — often from OS reclaiming sockets after backgrounding
+    final msg = e.message?.toLowerCase() ?? '';
+    return msg.contains('connection reset') ||
+        msg.contains('broken pipe') ||
+        msg.contains('connection closed') ||
+        msg.contains('connection aborted');
+  }
+
+  /// Whether a raw (non-Dio) exception is a backgrounding-related network error
+  bool _isRetryableRawError(Object e) {
+    final msg = e.toString().toLowerCase();
+    return msg.contains('connection closed') ||
+        msg.contains('connection reset') ||
+        msg.contains('broken pipe') ||
+        msg.contains('httpexception');
   }
 }
 

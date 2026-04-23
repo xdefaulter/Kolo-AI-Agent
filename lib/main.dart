@@ -26,11 +26,40 @@ void main() async {
   runApp(const ProviderScope(child: KoloApp()));
 }
 
-class KoloApp extends ConsumerWidget {
+class KoloApp extends ConsumerStatefulWidget {
   const KoloApp({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<KoloApp> createState() => _KoloAppState();
+}
+
+class _KoloAppState extends ConsumerState<KoloApp> with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // When app resumes from background, cancel any stale streaming connections
+    // and let the next message start fresh (prevents HttpException: Connection closed)
+    if (state == AppLifecycleState.resumed) {
+      final session = ref.read(agentSessionProvider.notifier);
+      if (session.state.isRunning) {
+        session.cancel();
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final themeMode = ref.watch(themeModeProvider);
     // Initialize custom instructions from DB
     ref.watch(customInstructionsInitProvider);
