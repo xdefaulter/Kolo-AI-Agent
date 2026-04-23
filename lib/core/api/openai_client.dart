@@ -45,6 +45,12 @@ class OpenAIClient {
     _cancelToken = null;
   }
 
+  /// Force-close all idle connections in the Dio connection pool.
+  /// Call this on app resume to prevent stale-socket HttpException errors.
+  void closeConnections() {
+    _dio.httpClientAdapter.close(force: true);
+  }
+
   /// Send a streaming chat completion request
   Stream<ChatStreamChunk> chatStream({
     required List<Map<String, dynamic>> messages,

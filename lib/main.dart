@@ -48,12 +48,18 @@ class _KoloAppState extends ConsumerState<KoloApp> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // When app resumes from background, cancel any stale streaming connections
-    // and let the next message start fresh (prevents HttpException: Connection closed)
+    // When app resumes from background:
+    // 1. Force-close all idle HTTP connections (OS reclaims sockets after ~5min background)
+    // 2. If a stream was mid-flight, cancel it — it'll error anyway
+    // This prevents HttpException: Connection closed while receiving data
     if (state == AppLifecycleState.resumed) {
-      final session = ref.read(agentSessionProvider.notifier);
-      if (session.state.isRunning) {
-        session.cancel();
+      final sessionNotifier = ref.read(agentSessionProvider.notifier);
+      final session = sessionNotifier.session;
+      if (session != null) {
+        session.closeStaleConnections();
+        if (sessionNotifier.state.isRunning) {
+          sessionNotifier.cancel();
+        }
       }
     }
   }

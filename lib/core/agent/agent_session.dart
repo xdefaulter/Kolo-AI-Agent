@@ -71,6 +71,12 @@ class AgentSession {
     _cachedClient?.cancel();
   }
 
+  /// Force-close idle HTTP connections to prevent stale-socket errors
+  /// after app has been in background. Safe to call anytime.
+  void closeStaleConnections() {
+    _cachedClient?.closeConnections();
+  }
+
   /// Get or create a cached OpenAIClient for the active provider
   OpenAIClient _getClient(ApiProvider provider) {
     if (_cachedClient != null && _cachedProviderId == provider.id) {
