@@ -3,6 +3,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../api/provider.dart';
 import '../tools/tool_base.dart';
 import '../tools/tool_registry.dart';
+import '../tools/skills.dart';
+import '../tools/custom_tools_state.dart';
+import '../memory/memory_service.dart';
+import '../environment/environment_probe.dart';
+import 'agent_metrics.dart';
 import '../tools/android/scan_phone_apps.dart';
 import '../permissions/permission_manager.dart';
 import '../../core/providers_state.dart';
@@ -32,14 +37,73 @@ class AgentSession {
   OpenAIClient? _cachedClient;
   String? _cachedProviderId;
 
-  /// 2.10: Cached tool router — reused across messages
-  late final ToolRouter _toolRouter = ToolRouter(
-    registry: registry,
-    permissionManager: permissionManager,
-  );
+  /// 2.10: Cached tool router — reused across messages. On first access
+  /// we also wire its sub-LLM callback so `prompt`-kind custom tools can
+  /// fire off one-shot completions against the currently-active provider.
+  /// The closure reads `_activeProvider` at call time (not construction
+  /// time) so switching providers mid-session works correctly.
+  late final ToolRouter _toolRouter = (() {
+    final router = ToolRouter(
+      registry: registry,
+      permissionManager: permissionManager,
+    );
+    router.setSubLlmCall(_subLlmCall);
+    return router;
+  })();
+
+  /// Sub-LLM implementation used by custom `prompt`-kind tools. Uses the
+  /// same [OpenAIClient] cache as the main loop — so whatever model the
+  /// user has selected is what the sub-call uses. No tools, no streaming
+  /// to UI; just a blocking call that collects the full response.
+  Future<String> _subLlmCall({
+    required String systemPrompt,
+    required String userMessage,
+  }) async {
+    final provider = _activeProvider;
+    if (provider == null) {
+      throw StateError(
+        'No active API provider — prompt-kind custom tools need one.',
+      );
+    }
+    final client = _getClient(provider);
+    final buf = StringBuffer();
+    await for (final chunk in client.chatStream(
+      messages: [
+        {'role': 'system', 'content': systemPrompt},
+        {'role': 'user', 'content': userMessage},
+      ],
+      tools: const [],
+    )) {
+      if (chunk.error != null) {
+        throw Exception(chunk.error);
+      }
+      buf.write(chunk.content);
+      if (chunk.finishReason == 'stop' ||
+          chunk.finishReason == 'error' ||
+          chunk.finishReason == 'cancelled') {
+        break;
+      }
+    }
+    return buf.toString();
+  }
 
   /// Cached app intents summary for system prompt injection
   String? _appIntentsSummary;
+
+  /// Cached skills manifest — rebuilt once per session. Skills added
+  /// mid-session won't appear until a new chat or app relaunch, which
+  /// is fine (the agent can still read them with list_skills + read_file).
+  String? _skillsManifest;
+
+  /// Rebuilt per-turn inside [sendMessage]. Empty when memory recall is
+  /// disabled or no memories match. Kept as a field so the `messages` getter
+  /// can stay a pure transform without taking args.
+  String _memoriesBlock = '';
+
+  /// Cached shell-environment snapshot (python/node/git availability etc).
+  /// Probed once on first send — the state doesn't change during a chat
+  /// session, so we don't pay the cost on every turn.
+  String? _environmentBlock;
 
   AgentSession._({
     required this.registry,
@@ -124,14 +188,22 @@ class AgentSession {
         systemPrompt: SystemPromptBuilder.build(
           customInstructions: _ref.read(customInstructionsProvider),
           appIntentsSummary: _appIntentsSummary,
+          skillsManifest: _skillsManifest,
+          memoriesBlock: _memoriesBlock,
+          environmentBlock: _environmentBlock,
         ),
       );
 
   /// Send a user message and run the full agent loop — yields events in real-time
-  Stream<AgentEvent> sendMessage(String text, {List<ChatAttachment>? imageAttachments}) async* {
+  Stream<AgentEvent> sendMessage(
+    String text, {
+    List<ChatAttachment>? imageAttachments,
+  }) async* {
     final provider = _activeProvider;
     if (provider == null) {
-      yield AgentError(error: 'No API provider configured. Go to Settings to add one.');
+      yield AgentError(
+        error: 'No API provider configured. Go to Settings to add one.',
+      );
       return;
     }
 
@@ -143,15 +215,53 @@ class AgentSession {
     // Check connectivity before making API call
     final isOnline = _ref.read(isOnlineProvider);
     if (!isOnline) {
-      yield AgentError(error: 'No internet connection. Check your network and try again.');
+      yield AgentError(
+        error: 'No internet connection. Check your network and try again.',
+      );
       return;
     }
 
     // Create a fresh cancel token for this run
     _cancelToken = Completer<void>();
 
-    // Load app intents summary if available (for AI context)
-    _appIntentsSummary ??= await loadAppIntentsSummary();
+    // Run independent per-turn/per-session I/O in parallel to cut TTFR.
+    // Each branch is idempotent: cached fields short-circuit to Future.value().
+    final skillsEnabled = _ref.read(skillsEnabledProvider);
+    final memRecallEnabled = _ref.read(memoryRecallEnabledProvider);
+
+    String? intentsResult = _appIntentsSummary;
+    String? skillsResult = _skillsManifest;
+    String memoriesResult = '';
+    String envResult = '';
+
+    final pendingFutures = <Future<void>>[
+      if (_appIntentsSummary == null)
+        loadAppIntentsSummary()
+            .then<void>((v) => intentsResult = v)
+            .catchError((_) {}),
+      if (_skillsManifest == null && skillsEnabled)
+        listAvailableSkills()
+            .then(buildSkillsManifest)
+            .then<void>((v) => skillsResult = v)
+            .catchError((_) {}),
+      // Memory recall runs every turn (query changes); pass cached flag to
+      // skip the per-turn DB getSetting round-trip.
+      MemoryService.instance
+          .buildRecallBlock(text, enabled: memRecallEnabled)
+          .then<void>((v) => memoriesResult = v)
+          .catchError((_) {}),
+      if (_environmentBlock == null)
+        EnvironmentProbe.probe()
+            .then((s) => s.toPromptBlock())
+            .then<void>((v) => envResult = v)
+            .catchError((_) {}),
+    ];
+    await Future.wait(pendingFutures);
+
+    _appIntentsSummary = intentsResult;
+    _skillsManifest = skillsResult;
+    _memoriesBlock = memoriesResult;
+    _environmentBlock ??= envResult;
 
     // Add user message to conversation — support vision (images)
     if (imageAttachments != null && imageAttachments.isNotEmpty) {
@@ -163,9 +273,7 @@ class AgentSession {
       for (final att in imageAttachments) {
         contentParts.add({
           'type': 'image_url',
-          'image_url': {
-            'url': 'data:${att.mimeType};base64,${att.base64Data}',
-          },
+          'image_url': {'url': 'data:${att.mimeType};base64,${att.base64Data}'},
         });
       }
       conversationManager.addUserMessageMultimodal(contentParts);
@@ -195,21 +303,29 @@ class AgentSession {
       } else if (event is AgentToolResult) {
         conversationManager.addToolResultMessage(
           event.toolCallId,
-          event.result.success ? event.result.output : 'Error: ${event.result.error}',
+          event.result.success
+              ? event.result.output
+              : 'Error: ${event.result.error}',
         );
       } else if (event is AgentToolCallsStart) {
         conversationManager.addAssistantToolCallMessage(
           '',
-          event.calls.map((tc) => {
-            'id': tc.id,
-            'type': 'function',
-            'function': {'name': tc.name, 'arguments': tc.arguments},
-          }).toList(),
+          event.calls
+              .map(
+                (tc) => {
+                  'id': tc.id,
+                  'type': 'function',
+                  'function': {'name': tc.name, 'arguments': tc.arguments},
+                },
+              )
+              .toList(),
         );
       } else if (event is AgentCancelled) {
         // Preserve partial content
         if (event.partialContent.isNotEmpty) {
-          conversationManager.addAssistantMessage('${event.partialContent} [cancelled]');
+          conversationManager.addAssistantMessage(
+            '${event.partialContent} [cancelled]',
+          );
         }
       }
       yield event;
@@ -224,10 +340,83 @@ class AgentSession {
     conversationManager.clear();
   }
 
+  /// Re-run the last user turn. Strips trailing assistant / tool-call /
+  /// tool-result messages (typically an error bubble + anything it
+  /// produced), then re-invokes the loop over the remaining history.
+  /// Safe no-op when the transcript is empty or doesn't end in a user
+  /// turn after stripping.
+  Stream<AgentEvent> retryLastTurn() async* {
+    conversationManager.popTrailingAssistantTurn();
+    if (conversationManager.messages.isEmpty ||
+        conversationManager.messages.last.role != 'user') {
+      yield AgentError(error: 'Nothing to retry.');
+      return;
+    }
+    final provider = _activeProvider;
+    if (provider == null) {
+      yield AgentError(error: 'No API provider configured.');
+      return;
+    }
+    final isOnline = _ref.read(isOnlineProvider);
+    if (!isOnline) {
+      yield AgentError(error: 'No internet connection.');
+      return;
+    }
+    _cancelToken = Completer<void>();
+    final maxIter = _ref.read(maxIterationsProvider);
+    final loop = AgentLoop(
+      toolRouter: _toolRouter,
+      client: _getClient(provider),
+      cancelToken: _cancelToken,
+      maxIterations: maxIter,
+    );
+    await for (final event in loop.run(
+      messages: _messagesForApi,
+      chatId: _ref.read(activeChatIdProvider),
+      toolDefinitions: _toolDefinitions,
+    )) {
+      if (event is AgentTextComplete) {
+        conversationManager.addAssistantMessage(event.content);
+      } else if (event is AgentToolResult) {
+        conversationManager.addToolResultMessage(
+          event.toolCallId,
+          event.result.success
+              ? event.result.output
+              : 'Error: ${event.result.error}',
+        );
+      } else if (event is AgentToolCallsStart) {
+        conversationManager.addAssistantToolCallMessage(
+          '',
+          event.calls
+              .map(
+                (tc) => {
+                  'id': tc.id,
+                  'type': 'function',
+                  'function': {'name': tc.name, 'arguments': tc.arguments},
+                },
+              )
+              .toList(),
+        );
+      }
+      yield event;
+    }
+    _cancelToken = null;
+  }
+
+  /// Truncate the conversation at [index] and re-send with [newText] as
+  /// the user message. Caller is responsible for also mutating the
+  /// persisted store + the UI list; this only touches in-memory state.
+  Stream<AgentEvent> editMessageAt(int index, String newText) async* {
+    conversationManager.truncateFrom(index);
+    yield* sendMessage(newText);
+  }
+
   /// Set the user permission prompt callback (called from UI)
   void setPermissionCallbacks({
-    Future<bool> Function(String, Map<String, dynamic>, ToolPermission)? promptUser,
-    Future<bool> Function(String, Map<String, dynamic>, ToolPermission)? biometricPrompt,
+    Future<bool> Function(String, Map<String, dynamic>, ToolPermission)?
+    promptUser,
+    Future<bool> Function(String, Map<String, dynamic>, ToolPermission)?
+    biometricPrompt,
   }) {
     permissionManager.promptUser = promptUser;
     permissionManager.biometricPrompt = biometricPrompt;
@@ -255,9 +444,10 @@ final customInstructionsInitProvider = FutureProvider<void>((ref) async {
 });
 
 /// Riverpod provider for the agent session
-final agentSessionProvider = StateNotifierProvider<AgentSessionNotifier, AgentSessionState>((ref) {
-  return AgentSessionNotifier(ref);
-});
+final agentSessionProvider =
+    StateNotifierProvider<AgentSessionNotifier, AgentSessionState>((ref) {
+      return AgentSessionNotifier(ref);
+    });
 
 class AgentSessionNotifier extends StateNotifier<AgentSessionState> {
   final Ref _ref;
@@ -277,13 +467,21 @@ class AgentSessionNotifier extends StateNotifier<AgentSessionState> {
   }
 
   /// Send a message through the agent loop — streams UI updates in real-time
-  Future<void> sendMessage(String text, {List<ChatAttachment>? imageAttachments}) async {
+  Future<void> sendMessage(
+    String text, {
+    List<ChatAttachment>? imageAttachments,
+  }) async {
     if (_session == null) {
       state = const AgentSessionError('Session not initialized');
       return;
     }
 
     if (text.trim().isEmpty) return;
+
+    // Begin metrics capture — cheap (int + DateTime.now) and happens once
+    // per turn. UI widgets watching agentMetricsProvider will see the
+    // initial "streaming: true" snapshot.
+    _ref.read(agentMetricsProvider.notifier).beginTurn();
 
     state = const AgentSessionRunning(
       currentContent: '',
@@ -292,14 +490,39 @@ class AgentSessionNotifier extends StateNotifier<AgentSessionState> {
       toolResults: [],
     );
 
+    final stream = _session!.sendMessage(
+      text,
+      imageAttachments: imageAttachments,
+    );
+    await _drive(stream);
+  }
+
+  /// Re-run the last user turn. Used by the UI's retry-on-error flow.
+  /// Shares the stream-to-state translation with [sendMessage] so tool
+  /// cards, streaming, and error rendering all work identically.
+  Future<void> retryLast() async {
+    if (_session == null) {
+      state = const AgentSessionError('Session not initialized');
+      return;
+    }
+    _ref.read(agentMetricsProvider.notifier).beginTurn();
+    state = const AgentSessionRunning(
+      currentContent: '',
+      currentThinking: '',
+      toolCalls: [],
+      toolResults: [],
+    );
+    await _drive(_session!.retryLastTurn());
+  }
+
+  /// Common stream consumer shared by [sendMessage] and [retryLast].
+  /// Translates [AgentEvent]s into state transitions + metrics calls.
+  Future<void> _drive(Stream<AgentEvent> stream) async {
     final buffer = StringBuffer();
     final thinkingBuffer = StringBuffer();
     final toolCalls = <AgentToolCallsStart>[];
     final toolResults = <AgentToolResult>[];
-
     try {
-      // Subscribe to the stream and update state on every event
-      final stream = _session!.sendMessage(text, imageAttachments: imageAttachments);
       await for (final event in stream) {
         if (state is! AgentSessionRunning && state is! AgentSessionError) {
           // Cancelled or completed — stop processing
@@ -308,6 +531,12 @@ class AgentSessionNotifier extends StateNotifier<AgentSessionState> {
         switch (event) {
           case AgentThinkingChunk():
             thinkingBuffer.write(event.thinking);
+            // Reasoning tokens count toward completion speed too — many
+            // providers bill them and users want to see speed during a
+            // long "thinking" phase. Cheap increment; throttled inside.
+            _ref
+                .read(agentMetricsProvider.notifier)
+                .onContentDelta(event.thinking.length);
             final now = DateTime.now();
             if (now.difference(_lastStateUpdate) >= _throttleInterval) {
               _lastStateUpdate = now;
@@ -320,6 +549,9 @@ class AgentSessionNotifier extends StateNotifier<AgentSessionState> {
             }
           case AgentContentChunk():
             buffer.write(event.content);
+            _ref
+                .read(agentMetricsProvider.notifier)
+                .onContentDelta(event.content.length);
             final now = DateTime.now();
             if (now.difference(_lastStateUpdate) >= _throttleInterval) {
               _lastStateUpdate = now;
@@ -330,6 +562,9 @@ class AgentSessionNotifier extends StateNotifier<AgentSessionState> {
                 toolResults: toolResults,
               );
             }
+          case AgentUsageUpdate():
+            // Authoritative counts from the server — override estimate.
+            _ref.read(agentMetricsProvider.notifier).onServerUsage(event.usage);
           case AgentTextComplete():
             state = AgentSessionCompleted(
               content: event.content,
@@ -371,6 +606,11 @@ class AgentSessionNotifier extends StateNotifier<AgentSessionState> {
       }
     } catch (e) {
       state = AgentSessionError('Unexpected error: $e');
+    } finally {
+      // Always close out metrics — whether the turn finished normally,
+      // errored, or was cancelled. endTurn() is a single snapshot push;
+      // no cost if called on an already-idle notifier.
+      _ref.read(agentMetricsProvider.notifier).endTurn();
     }
   }
 
@@ -383,6 +623,9 @@ class AgentSessionNotifier extends StateNotifier<AgentSessionState> {
   void clearConversation() {
     _session?.clearConversation();
     state = const AgentSessionIdle();
+    // Reset cumulative metrics on chat clear so the per-chat totals
+    // stay accurate. Same reset happens on chat switch via loadMessages.
+    _ref.read(agentMetricsProvider.notifier).resetSession();
   }
 
   /// Load messages into the session (for chat switch)
@@ -392,10 +635,15 @@ class AgentSessionNotifier extends StateNotifier<AgentSessionState> {
 
   /// Set permission callbacks
   void setPermissionCallbacks({
-    Future<bool> Function(String, Map<String, dynamic>, ToolPermission)? promptUser,
-    Future<bool> Function(String, Map<String, dynamic>, ToolPermission)? biometricPrompt,
+    Future<bool> Function(String, Map<String, dynamic>, ToolPermission)?
+    promptUser,
+    Future<bool> Function(String, Map<String, dynamic>, ToolPermission)?
+    biometricPrompt,
   }) {
-    _session?.setPermissionCallbacks(promptUser: promptUser, biometricPrompt: biometricPrompt);
+    _session?.setPermissionCallbacks(
+      promptUser: promptUser,
+      biometricPrompt: biometricPrompt,
+    );
   }
 }
 

@@ -19,7 +19,9 @@ class ConversationManager {
 
   /// Add a user message with multimodal content (text + images)
   void addUserMessageMultimodal(List<Map<String, dynamic>> contentParts) {
-    _messages.add(ChatMessage(role: 'user', content: '', multimodalContent: contentParts));
+    _messages.add(
+      ChatMessage(role: 'user', content: '', multimodalContent: contentParts),
+    );
   }
 
   void addAssistantMessage(String content) {
@@ -27,19 +29,18 @@ class ConversationManager {
   }
 
   void addToolResultMessage(String toolCallId, String content) {
-    _messages.add(ChatMessage(
-      role: 'tool',
-      content: content,
-      toolCallId: toolCallId,
-    ));
+    _messages.add(
+      ChatMessage(role: 'tool', content: content, toolCallId: toolCallId),
+    );
   }
 
-  void addAssistantToolCallMessage(String content, List<Map<String, dynamic>> toolCalls) {
-    _messages.add(ChatMessage(
-      role: 'assistant',
-      content: content,
-      toolCalls: toolCalls,
-    ));
+  void addAssistantToolCallMessage(
+    String content,
+    List<Map<String, dynamic>> toolCalls,
+  ) {
+    _messages.add(
+      ChatMessage(role: 'assistant', content: content, toolCalls: toolCalls),
+    );
   }
 
   /// Add a pre-built message (for loading from persistence)
@@ -55,12 +56,32 @@ class ConversationManager {
     }
   }
 
-  static final _whitespaceRegExp = RegExp(r'\s+');
-
+  /// Estimate tokens for a chunk of text. Uses the higher of:
+  ///   - word-based (~1.3 tokens/word) — good for English prose
+  ///   - byte-based (~3.5 bytes/token) — kicks in for minified JSON, base64,
+  ///     or tool payloads where whitespace-split gives almost no words.
+  /// Using max() protects against the prose heuristic silently undercounting
+  /// dense JSON and letting us blow past the provider's context limit.
+  ///
+  /// Allocation-free: counts whitespace transitions via codeUnitAt so no
+  /// intermediate List<String> is created (previously O(n) alloc per call).
   int _estimateTokens(String text) {
     if (text.isEmpty) return 0;
-    final words = text.split(_whitespaceRegExp).where((w) => w.isNotEmpty).length;
-    return ((words * 1.3) + 4).ceil();
+    int words = 0;
+    bool inWord = false;
+    for (int i = 0; i < text.length; i++) {
+      final c = text.codeUnitAt(i);
+      final isWs = c == 32 || c == 9 || c == 10 || c == 13;
+      if (!isWs && !inWord) {
+        words++;
+        inWord = true;
+      } else if (isWs) {
+        inWord = false;
+      }
+    }
+    final wordEstimate = ((words * 1.3) + 4).ceil();
+    final byteEstimate = (text.length / 3.5).ceil();
+    return wordEstimate > byteEstimate ? wordEstimate : byteEstimate;
   }
 
   /// Get messages that fit within token budget, keeping system prompt + recent messages
@@ -71,23 +92,45 @@ class ConversationManager {
       result.add({'role': 'system', 'content': systemPrompt});
     }
 
-    final systemTokens = systemPrompt != null ? _estimateTokens(systemPrompt) : 0;
+    final systemTokens = systemPrompt != null
+        ? _estimateTokens(systemPrompt)
+        : 0;
     final budget = maxContextTokens - systemTokens;
 
-    final apiMessages = <Map<String, dynamic>>[];
+    // Build in reverse order with O(1) add(), then reverse once — avoids the
+    // O(n) element shift that List.insert(0, …) causes on every iteration.
+    final reversed = <Map<String, dynamic>>[];
     int usedTokens = 0;
 
     for (final msg in _messages.reversed) {
       final tokens = _estimateTokens(msg.content) + 50;
       if (usedTokens + tokens > budget) break;
-      apiMessages.insert(0, msg.toApiFormat());
+      reversed.add(msg.toApiFormat());
       usedTokens += tokens;
     }
 
-    return [...result, ...apiMessages];
+    return [...result, ...reversed.reversed];
   }
 
   void clear() => _messages.clear();
+
+  /// Drop every message from [index] onwards (inclusive). Used by the
+  /// edit flow to roll the conversation back to just before the edited
+  /// message. [index] is clamped; negative or past-end values are no-ops.
+  void truncateFrom(int index) {
+    if (index < 0 || index >= _messages.length) return;
+    _messages.removeRange(index, _messages.length);
+  }
+
+  /// Drop trailing assistant / tool / tool-call messages until the last
+  /// remaining message is a user message. Used by the retry flow so the
+  /// next run re-processes the same user turn. No-op if the tail is
+  /// already a user message (or empty).
+  void popTrailingAssistantTurn() {
+    while (_messages.isNotEmpty && _messages.last.role != 'user') {
+      _messages.removeLast();
+    }
+  }
 }
 
 class ChatMessage {
