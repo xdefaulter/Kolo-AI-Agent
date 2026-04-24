@@ -1,97 +1,312 @@
+import 'dart:convert';
+
 import 'package:dio/dio.dart';
+
 import '../tool_base.dart';
 import '../../api/shared_dio.dart';
+import '../../search_settings.dart';
+import '../../storage/database.dart';
 import 'web_cache.dart';
 
-/// Web search using DuckDuckGo HTML search (lite.duckduckgo.com).
-/// The old api.duckduckgo.com/?format=json endpoint is the Instant Answer API
-/// which returns almost nothing for most queries — this uses the HTML endpoint
-/// and parses the actual search results.
+/// Web search tool.
+///
+/// Strategy:
+///  1. User can pick a provider in Settings (stored under `search_provider`).
+///  2. If the provider needs a key and none is configured, we fall through to
+///     the next available option in this order:
+///         Jina AI (no key needed) → Brave → Serper → Tavily → DuckDuckGo HTML
+///  3. Jina is the default because it works without signup and returns
+///     LLM-friendly markdown.
 class WebSearchTool extends KoloTool {
   Dio get _dio => SharedDio.instance;
 
-  @override String get name => 'web_search';
-  @override String get description => 'Search the web using DuckDuckGo. Returns top results with titles, URLs, and snippets.';
-  @override Map<String, dynamic> get parameterSchema => {
+  @override
+  String get name => 'web_search';
+
+  @override
+  String get description =>
+      'Search the web. Returns top results with titles, URLs, and snippets. '
+      'Backed by Jina AI by default; Brave / Serper / Tavily can be configured in Settings.';
+
+  @override
+  Map<String, dynamic> get parameterSchema => {
     'type': 'object',
     'properties': {
       'query': {'type': 'string', 'description': 'Search query'},
-      'count': {'type': 'integer', 'description': 'Number of results to return (default 8, max 15)'},
+      'count': {
+        'type': 'integer',
+        'description': 'Number of results to return (default 8, max 15)',
+      },
     },
     'required': ['query'],
     'additionalProperties': false,
   };
-  @override ToolPermission get permission => ToolPermission.safe;
 
   @override
-  Future<ToolResult> execute(Map<String, dynamic> params, ToolContext context) async {
-    final query = params['query'] as String;
+  ToolPermission get permission => ToolPermission.safe;
+
+  @override
+  Future<ToolResult> execute(
+    Map<String, dynamic> params,
+    ToolContext context,
+  ) async {
+    final query = (params['query'] as String).trim();
+    if (query.isEmpty) return ToolResult.err('Empty query');
     final maxResults = ((params['count'] as int?) ?? 8).clamp(1, 15);
 
     final cacheKey = 'search:$query:$maxResults';
     final cached = WebCache.instance.get(cacheKey);
     if (cached != null) return ToolResult.ok(cached);
 
-    try {
-      // Use DuckDuckGo HTML lite endpoint which returns parseable search results
-      final response = await _dio.get(
-        'https://lite.duckduckgo.com/lite/',
-        queryParameters: {'q': query, 'kl': 'wt-wt'},
-        options: Options(headers: {
-          'User-Agent': 'Mozilla/5.0 (Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        }),
-      );
+    final configured = await _resolveProvider();
 
-      if (response.statusCode != 200) {
-        return ToolResult.err('Search returned HTTP ${response.statusCode}');
+    // Try the configured provider first, then fall back through the chain.
+    final attempts = _providerChain(configured);
+    Object? lastError;
+    for (final provider in attempts) {
+      try {
+        final result = await _runProvider(provider, query, maxResults);
+        if (result != null && result.isNotEmpty) {
+          WebCache.instance.put(cacheKey, result);
+          return ToolResult.ok(
+            result,
+            metadata: {'query': query, 'provider': provider.name},
+          );
+        }
+      } catch (e) {
+        lastError = e;
+        // continue to next provider
       }
+    }
+    return ToolResult.err(
+      'Search failed across all providers${lastError != null ? ': $lastError' : ''}',
+    );
+  }
 
-      final html = response.data as String;
-      final results = _parseDuckDuckGoLite(html, maxResults);
+  Future<SearchProvider> _resolveProvider() async {
+    final raw = await AppDatabase.instance.getSetting(kSearchProviderKey);
+    return SearchProvider.values.firstWhere(
+      (p) => p.name == raw,
+      orElse: () => SearchProvider.jina,
+    );
+  }
 
-      if (results.isEmpty) {
-        return ToolResult.ok('No results found for "$query". Try different keywords.');
-      }
+  /// Return the provider we try first, then reasonable fallbacks.
+  List<SearchProvider> _providerChain(SearchProvider first) {
+    final rest = [
+      SearchProvider.jina,
+      SearchProvider.brave,
+      SearchProvider.serper,
+      SearchProvider.tavily,
+      SearchProvider.duckduckgo,
+    ]..removeWhere((p) => p == first);
+    return [first, ...rest];
+  }
 
-      final formatted = results.asMap().entries.map((e) =>
-        '${e.key + 1}. ${e.value['title']}\n   ${e.value['url']}\n   ${e.value['snippet']}'
-      ).join('\n\n');
-      WebCache.instance.put(cacheKey, formatted);
-      return ToolResult.ok(formatted, metadata: {
-        'query': query,
-        'resultCount': results.length,
-      });
-    } on FormatException {
-      // 4.4: DuckDuckGo HTML format may have changed
-      return ToolResult.err('Search parsing failed — DuckDuckGo HTML format may have changed. Try again later.');
-    } catch (e) {
-      return ToolResult.err('Search failed: $e');
+  Future<String?> _runProvider(SearchProvider p, String query, int maxResults) {
+    switch (p) {
+      case SearchProvider.jina:
+        return _searchJina(query, maxResults);
+      case SearchProvider.brave:
+        return _searchBrave(query, maxResults);
+      case SearchProvider.serper:
+        return _searchSerper(query, maxResults);
+      case SearchProvider.tavily:
+        return _searchTavily(query, maxResults);
+      case SearchProvider.duckduckgo:
+        return _searchDuckDuckGo(query, maxResults);
     }
   }
 
-  /// Parse DuckDuckGo Lite HTML page into structured results
+  // ── Jina AI (default; no key required) ────────────────────────────────
+
+  Future<String?> _searchJina(String query, int maxResults) async {
+    // `s.jina.ai` returns LLM-friendly markdown directly. No API key needed
+    // for the public endpoint — key only raises rate limits.
+    final apiKey = await AppDatabase.instance.getSetting(kSearchJinaKey);
+    final response = await _dio.get<dynamic>(
+      'https://s.jina.ai/${Uri.encodeComponent(query)}',
+      options: Options(
+        headers: {
+          'Accept': 'application/json',
+          'X-Return-Format': 'markdown',
+          if (apiKey != null && apiKey.isNotEmpty)
+            'Authorization': 'Bearer $apiKey',
+        },
+        responseType: ResponseType.plain,
+      ),
+    );
+    if (response.statusCode != 200 || response.data == null) return null;
+
+    // Jina returns either JSON (with Accept: application/json) or markdown
+    // (without). We request JSON for reliable parsing.
+    try {
+      final raw = response.data;
+      final parsed = raw is String ? jsonDecode(raw) : raw;
+      if (parsed is Map && parsed['data'] is List) {
+        final items = (parsed['data'] as List).take(maxResults);
+        if (items.isEmpty) return null;
+        return items
+            .toList()
+            .asMap()
+            .entries
+            .map((e) {
+              final item = e.value as Map;
+              final title = item['title']?.toString() ?? '';
+              final url = item['url']?.toString() ?? '';
+              final desc =
+                  item['description']?.toString() ??
+                  item['snippet']?.toString() ??
+                  item['content']?.toString() ??
+                  '';
+              return '${e.key + 1}. $title\n   $url\n   ${_truncate(desc, 400)}';
+            })
+            .join('\n\n');
+      }
+    } catch (_) {
+      // Fall through — treat response as markdown text.
+    }
+    // Return the markdown as-is; Jina's format is already LLM-readable.
+    final text = response.data.toString();
+    if (text.trim().isEmpty) return null;
+    return _truncate(text, 6000);
+  }
+
+  // ── Brave Search API ──────────────────────────────────────────────────
+
+  Future<String?> _searchBrave(String query, int maxResults) async {
+    final key = await AppDatabase.instance.getSetting(kSearchBraveKey);
+    if (key == null || key.isEmpty) return null;
+
+    final response = await _dio.get<Map<String, dynamic>>(
+      'https://api.search.brave.com/res/v1/web/search',
+      queryParameters: {'q': query, 'count': maxResults},
+      options: Options(
+        headers: {'Accept': 'application/json', 'X-Subscription-Token': key},
+      ),
+    );
+    if (response.statusCode != 200) return null;
+    final web = response.data?['web'];
+    final results = web is Map ? web['results'] as List? : null;
+    if (results == null || results.isEmpty) return null;
+    return results
+        .take(maxResults)
+        .toList()
+        .asMap()
+        .entries
+        .map((e) {
+          final r = e.value as Map;
+          return '${e.key + 1}. ${r['title']}\n   ${r['url']}\n   ${_truncate(r['description']?.toString() ?? '', 400)}';
+        })
+        .join('\n\n');
+  }
+
+  // ── Serper.dev (Google wrapper) ───────────────────────────────────────
+
+  Future<String?> _searchSerper(String query, int maxResults) async {
+    final key = await AppDatabase.instance.getSetting(kSearchSerperKey);
+    if (key == null || key.isEmpty) return null;
+
+    final response = await _dio.post<Map<String, dynamic>>(
+      'https://google.serper.dev/search',
+      data: {'q': query, 'num': maxResults},
+      options: Options(
+        headers: {'X-API-KEY': key, 'Content-Type': 'application/json'},
+      ),
+    );
+    if (response.statusCode != 200) return null;
+    final organic = response.data?['organic'] as List?;
+    if (organic == null || organic.isEmpty) return null;
+    return organic
+        .take(maxResults)
+        .toList()
+        .asMap()
+        .entries
+        .map((e) {
+          final r = e.value as Map;
+          return '${e.key + 1}. ${r['title']}\n   ${r['link']}\n   ${_truncate(r['snippet']?.toString() ?? '', 400)}';
+        })
+        .join('\n\n');
+  }
+
+  // ── Tavily (LLM-optimized) ────────────────────────────────────────────
+
+  Future<String?> _searchTavily(String query, int maxResults) async {
+    final key = await AppDatabase.instance.getSetting(kSearchTavilyKey);
+    if (key == null || key.isEmpty) return null;
+
+    final response = await _dio.post<Map<String, dynamic>>(
+      'https://api.tavily.com/search',
+      data: {
+        'api_key': key,
+        'query': query,
+        'max_results': maxResults,
+        'include_answer': false,
+        'search_depth': 'basic',
+      },
+      options: Options(headers: {'Content-Type': 'application/json'}),
+    );
+    if (response.statusCode != 200) return null;
+    final items = response.data?['results'] as List?;
+    if (items == null || items.isEmpty) return null;
+    return items
+        .take(maxResults)
+        .toList()
+        .asMap()
+        .entries
+        .map((e) {
+          final r = e.value as Map;
+          return '${e.key + 1}. ${r['title']}\n   ${r['url']}\n   ${_truncate(r['content']?.toString() ?? '', 400)}';
+        })
+        .join('\n\n');
+  }
+
+  // ── DuckDuckGo HTML (last-resort fallback) ────────────────────────────
+
+  Future<String?> _searchDuckDuckGo(String query, int maxResults) async {
+    final response = await _dio.get<dynamic>(
+      'https://lite.duckduckgo.com/lite/',
+      queryParameters: {'q': query, 'kl': 'wt-wt'},
+      options: Options(
+        headers: {
+          'User-Agent':
+              'Mozilla/5.0 (Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+          'Accept':
+              'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        },
+        responseType: ResponseType.plain,
+      ),
+    );
+    if (response.statusCode != 200) return null;
+    final html = response.data as String;
+    final results = _parseDuckDuckGoLite(html, maxResults);
+    if (results.isEmpty) return null;
+    return results
+        .asMap()
+        .entries
+        .map((e) {
+          return '${e.key + 1}. ${e.value['title']}\n   ${e.value['url']}\n   ${e.value['snippet']}';
+        })
+        .join('\n\n');
+  }
+
   List<Map<String, String>> _parseDuckDuckGoLite(String html, int maxResults) {
     final results = <Map<String, String>>[];
-
-    // DuckDuckGo Lite uses <a class="result-link"> for titles
-    // and <td class="result-snippet"> for snippets
-    // The HTML structure is simple tables
-
-    // Try regex-based parsing for the lite format
-    final linkPattern = RegExp(r'<a[^>]*class="result-link"[^>]*href="([^"]*)"[^>]*>(.*?)</a>', multiLine: true);
-    final snippetPattern = RegExp(r'<td[^>]*class="result-snippet"[^>]*>(.*?)</td>', multiLine: true);
-
+    final linkPattern = RegExp(
+      r'<a[^>]*class="result-link"[^>]*href="([^"]*)"[^>]*>(.*?)</a>',
+      multiLine: true,
+    );
+    final snippetPattern = RegExp(
+      r'<td[^>]*class="result-snippet"[^>]*>(.*?)</td>',
+      multiLine: true,
+    );
     final links = linkPattern.allMatches(html).toList();
     final snippets = snippetPattern.allMatches(html).toList();
-
     for (int i = 0; i < links.length && results.length < maxResults; i++) {
       final url = _decodeHtml(links[i].group(1) ?? '');
       final title = _decodeHtml(links[i].group(2) ?? '');
-
-      // Skip ad results and empty urls
-      if (url.isEmpty || url.contains('duckduckgo.com') || title.isEmpty) continue;
-      // Skip DDG redirect URLs — extract actual URL
+      if (url.isEmpty || url.contains('duckduckgo.com') || title.isEmpty)
+        continue;
       String cleanUrl = url;
       if (url.contains('uddg=')) {
         final uddgMatch = RegExp(r'uddg=([^&]+)').firstMatch(url);
@@ -99,40 +314,27 @@ class WebSearchTool extends KoloTool {
           cleanUrl = Uri.decodeComponent(uddgMatch.group(1) ?? url);
         }
       }
-
       String snippet = '';
       if (i < snippets.length) {
         snippet = _decodeHtml(snippets[i].group(1) ?? '');
       }
-
       results.add({'title': title, 'url': cleanUrl, 'snippet': snippet});
     }
-
-    // Fallback: If the regex didn't find results, try a simpler pattern
-    // (DDG HTML format can vary)
-    if (results.isEmpty) {
-      final simpleLinkPattern = RegExp(r'<a[^>]+href="(https?://[^"]+)"[^>]*>([^<]+)</a>', multiLine: true);
-      for (final m in simpleLinkPattern.allMatches(html).take(maxResults)) {
-        final url = m.group(1) ?? '';
-        final title = _decodeHtml(m.group(2) ?? '');
-        if (url.contains('duckduckgo.com') || title.isEmpty || title.contains('duckduckgo')) continue;
-        results.add({'title': title, 'url': url, 'snippet': ''});
-      }
-    }
-
     return results;
   }
 
-  /// Decode HTML entities
-  String _decodeHtml(String s) {
-    return s
+  static final _htmlTagRegExp = RegExp(r'<[^>]*>');
+
+  String _decodeHtml(String s) => s
       .replaceAll('&amp;', '&')
       .replaceAll('&lt;', '<')
       .replaceAll('&gt;', '>')
       .replaceAll('&quot;', '"')
       .replaceAll('&#39;', "'")
       .replaceAll('&apos;', "'")
-      .replaceAll(RegExp(r'<[^>]*>'), '') // strip remaining tags
+      .replaceAll(_htmlTagRegExp, '')
       .trim();
-  }
+
+  String _truncate(String s, int max) =>
+      s.length <= max ? s : '${s.substring(0, max)}...';
 }

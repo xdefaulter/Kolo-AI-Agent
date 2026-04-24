@@ -11,7 +11,12 @@ class AgentLoop {
   final Completer<void>? cancelToken;
   final int maxIterations;
 
-  AgentLoop({required this.toolRouter, required this.client, this.cancelToken, this.maxIterations = 20});
+  AgentLoop({
+    required this.toolRouter,
+    required this.client,
+    this.cancelToken,
+    this.maxIterations = 20,
+  });
 
   bool get _cancelled => cancelToken?.isCompleted ?? false;
 
@@ -21,7 +26,6 @@ class AgentLoop {
     required String chatId,
     required List<Map<String, dynamic>> toolDefinitions,
   }) async* {
-
     List<Map<String, dynamic>> currentMessages = List.from(messages);
     int iterations = 0;
 
@@ -29,7 +33,7 @@ class AgentLoop {
       iterations++;
 
       final parser = StreamingParser();
-      String fullContent = '';
+      final contentBuffer = StringBuffer();
       List<ResolvedToolCall>? toolCalls;
 
       try {
@@ -39,10 +43,12 @@ class AgentLoop {
         )) {
           // Check cancellation on every chunk
           if (_cancelled) {
-            if (fullContent.isNotEmpty) {
-              yield AgentTextComplete(content: fullContent, wasCancelled: true);
+            final partialContent = contentBuffer.toString();
+            if (partialContent.isNotEmpty) {
+              yield AgentTextComplete(
+                  content: partialContent, wasCancelled: true);
             }
-            yield AgentCancelled(partialContent: fullContent);
+            yield AgentCancelled(partialContent: partialContent);
             return;
           }
 
@@ -51,23 +57,25 @@ class AgentLoop {
             return;
           }
 
-          fullContent += chunk.content;
+          contentBuffer.write(chunk.content);
 
           if (chunk.toolCalls != null) {
             parser.processChunk(
               content: chunk.content,
-              toolCallDeltas: chunk.toolCalls?.map((tc) => {
-                    'index': tc.index,
-                    'id': tc.id,
-                    'function': {
-                      'name': tc.name,
-                      'arguments': tc.arguments,
+              toolCallDeltas: chunk.toolCalls
+                  ?.map(
+                    (tc) => {
+                      'index': tc.index,
+                      'id': tc.id,
+                      'function': {'name': tc.name, 'arguments': tc.arguments},
                     },
-                  }).toList(),
+                  )
+                  .toList(),
             );
           }
 
-          if (chunk.reasoningContent != null && chunk.reasoningContent!.isNotEmpty) {
+          if (chunk.reasoningContent != null &&
+              chunk.reasoningContent!.isNotEmpty) {
             yield AgentThinkingChunk(thinking: chunk.reasoningContent!);
           }
 
@@ -75,8 +83,16 @@ class AgentLoop {
             yield AgentContentChunk(content: chunk.content);
           }
 
+          // Server-authoritative token counts — usually arrives in the
+          // final chunk. Fire as a dedicated event so the metrics
+          // notifier can commit cumulative totals without the chat UI
+          // needing to care about the wire format.
+          if (chunk.usage != null) {
+            yield AgentUsageUpdate(usage: chunk.usage!);
+          }
+
           if (chunk.finishReason == 'stop') {
-            yield AgentTextComplete(content: fullContent);
+            yield AgentTextComplete(content: contentBuffer.toString());
             return;
           }
 
@@ -86,15 +102,19 @@ class AgentLoop {
         }
       } catch (e) {
         if (_cancelled) {
-          if (fullContent.isNotEmpty) {
-            yield AgentTextComplete(content: fullContent, wasCancelled: true);
+          final partialContent = contentBuffer.toString();
+          if (partialContent.isNotEmpty) {
+            yield AgentTextComplete(
+                content: partialContent, wasCancelled: true);
           }
-          yield AgentCancelled(partialContent: fullContent);
+          yield AgentCancelled(partialContent: partialContent);
           return;
         }
         yield AgentError(error: 'API error: $e');
         return;
       }
+
+      final fullContent = contentBuffer.toString();
 
       if (_cancelled) {
         if (fullContent.isNotEmpty) {
@@ -114,11 +134,13 @@ class AgentLoop {
         'role': 'assistant',
         'content': fullContent.isNotEmpty ? fullContent : null,
         'tool_calls': toolCalls
-            .map((tc) => {
-                  'id': tc.id,
-                  'type': 'function',
-                  'function': {'name': tc.name, 'arguments': tc.arguments},
-                })
+            .map(
+              (tc) => {
+                'id': tc.id,
+                'type': 'function',
+                'function': {'name': tc.name, 'arguments': tc.arguments},
+              },
+            )
             .toList(),
       });
 
@@ -188,7 +210,11 @@ class AgentToolResult extends AgentEvent {
   final String toolName;
   final String toolCallId;
   final ToolResult result;
-  AgentToolResult({required this.toolName, required this.toolCallId, required this.result});
+  AgentToolResult({
+    required this.toolName,
+    required this.toolCallId,
+    required this.result,
+  });
 }
 
 class AgentError extends AgentEvent {
@@ -199,4 +225,12 @@ class AgentError extends AgentEvent {
 class AgentCancelled extends AgentEvent {
   final String partialContent;
   AgentCancelled({required this.partialContent});
+}
+
+/// Server-authoritative token counts for the just-completed (or in-flight)
+/// request. Fired as soon as the streaming provider emits its `usage`
+/// payload — usually in the final SSE chunk.
+class AgentUsageUpdate extends AgentEvent {
+  final TokenUsage usage;
+  AgentUsageUpdate({required this.usage});
 }
