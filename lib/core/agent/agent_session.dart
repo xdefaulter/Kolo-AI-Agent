@@ -470,9 +470,9 @@ class AgentSession {
   /// Load messages into the conversation manager (for chat switch)
   void loadMessages(List<ChatMessage> messages) {
     conversationManager.clear();
-    for (final msg in messages) {
-      conversationManager.addMessage(msg);
-    }
+    // Bulk-add: skip the per-message prune scan that turned chat-switch
+    // into O(N²) for histories larger than the in-memory cap.
+    conversationManager.addAllMessages(messages);
   }
 }
 

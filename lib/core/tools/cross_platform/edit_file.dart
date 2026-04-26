@@ -172,7 +172,15 @@ class EditFileTool extends KoloTool {
     }
 
     final result = buf.toString().trim();
-    if (result.split('\n').length <= 2) {
+    // Count newlines without splitting — `.split('\n')` allocated a
+    // List<String> over the whole result on every edit just to read
+    // `.length`. For a multi-MB file replacement that's a wasted slab
+    // of pointers; a manual codeUnit walk is allocation-free.
+    int newlines = 0;
+    for (int k = 0; k < result.length; k++) {
+      if (result.codeUnitAt(k) == 0x0A) newlines++;
+    }
+    if (newlines + 1 <= 2) {
       // No diff lines generated, just confirm
       return 'Edit applied to $path';
     }

@@ -76,6 +76,16 @@ class ConversationManager {
     _pruneIfNeeded();
   }
 
+  /// Bulk-add a list of pre-built messages without paying the per-add
+  /// prune cost. The single-add path re-checks the cap on every call,
+  /// which made loading a long persisted chat O(N²): each `removeRange`
+  /// shifts the entire tail in place. Here we add all N in O(N) and
+  /// prune exactly once.
+  void addAllMessages(Iterable<ChatMessage> messages) {
+    _messages.addAll(messages);
+    _pruneIfNeeded();
+  }
+
   /// Prune oldest messages if list exceeds cap
   void _pruneIfNeeded() {
     if (_messages.length > _maxInMemoryMessages) {
@@ -167,7 +177,15 @@ class ChatMessage {
   int get estimatedContentTokens =>
       _cachedTokens ??= estimateTextTokens(content);
 
+  /// Memoised OpenAI-shape map. Every field on this class is final, so
+  /// the same Map can be safely shared across turns. Before this cache,
+  /// `getMessagesForApi` allocated one fresh outer Map per fitting
+  /// message on every send — for a 200-message session that was 200
+  /// pointless heap allocs (plus the dict-bucket setup) per turn.
+  Map<String, dynamic>? _cachedApiFormat;
   Map<String, dynamic> toApiFormat() {
+    final cached = _cachedApiFormat;
+    if (cached != null) return cached;
     final map = <String, dynamic>{'role': role};
     if (multimodalContent != null && multimodalContent!.isNotEmpty) {
       map['content'] = multimodalContent;
@@ -176,6 +194,6 @@ class ChatMessage {
     }
     if (toolCallId != null) map['tool_call_id'] = toolCallId;
     if (toolCalls != null) map['tool_calls'] = toolCalls;
-    return map;
+    return _cachedApiFormat = map;
   }
 }
