@@ -552,18 +552,32 @@ class AppDatabase {
         .toList();
   }
 
+  // Hot-path regexes hoisted to statics so we don't recompile two
+  // RegExps on every search/recall. Each compile is small but the
+  // function fires on every keystroke in the search UI.
+  static final RegExp _ftsNonAlnum = RegExp(r'[^a-z0-9\s]');
+  static final RegExp _ftsWhitespace = RegExp(r'\s+');
+
   /// Strip FTS5 syntax characters from user input so a raw query like
   /// `rm -rf *` doesn't blow up parsing. Wraps each token in quotes so
   /// the matcher treats punctuation as literal text.
   static String _sanitiseFtsQuery(String q) {
-    final tokens = q
-        .toLowerCase()
-        .replaceAll(RegExp(r'[^a-z0-9\s]'), ' ')
-        .split(RegExp(r'\s+'))
-        .where((t) => t.isNotEmpty)
-        .toList();
-    if (tokens.isEmpty) return '';
-    return tokens.map((t) => '"$t"').join(' ');
+    final cleaned =
+        q.toLowerCase().replaceAll(_ftsNonAlnum, ' ');
+    // Single-pass: split + filter + quote + join in one StringBuffer
+    // walk to skip the intermediate List<String> alloc that the prior
+    // .split().where().toList().map().join() chain produced.
+    final out = StringBuffer();
+    var first = true;
+    for (final t in cleaned.split(_ftsWhitespace)) {
+      if (t.isEmpty) continue;
+      if (!first) out.write(' ');
+      out.write('"');
+      out.write(t);
+      out.write('"');
+      first = false;
+    }
+    return out.toString();
   }
 
   Future<void> _trimChatIfNeeded(Database db, String chatId) async {
@@ -624,6 +638,22 @@ class AppDatabase {
     await db.rawUpdate(
       'UPDATE memories SET last_used_at = ?, use_count = use_count + 1 WHERE id = ?',
       [now, id],
+    );
+  }
+
+  /// Batch variant of [touchMemory]. Folds N UPDATEs into one statement
+  /// using `IN (?, ?, …)` so recall paths only pay a single SQLite
+  /// round-trip even when 6+ memories matched.
+  Future<void> touchMemories(List<String> ids) async {
+    if (ids.isEmpty) return;
+    if (ids.length == 1) return touchMemory(ids.first);
+    final db = await _database;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final placeholders = List.filled(ids.length, '?').join(',');
+    await db.rawUpdate(
+      'UPDATE memories SET last_used_at = ?, use_count = use_count + 1 '
+      'WHERE id IN ($placeholders)',
+      <Object?>[now, ...ids],
     );
   }
 
@@ -745,7 +775,12 @@ class AppDatabase {
     } else {
       providers.add(provider);
     }
-    await _writeProviders(providers);
+    // Only the changed provider's secure key needs to be touched —
+    // _writeProviders' bulk path used to re-encrypt every API key on
+    // every save, which is N writes against an EncryptedSharedPreferences
+    // backend instead of one. The metadata blob still rewrites in full
+    // (it's one SharedPreferences.setString — cheap).
+    await _writeProviders(providers, onlyKeyForId: provider.id);
   }
 
   Future<void> writeAllProviders(List<ProviderConfig> providers) async =>
@@ -755,20 +790,47 @@ class AppDatabase {
     var providers = await getAllProviders();
     providers.removeWhere((p) => p.id == id);
     await _secureStorage.delete(key: 'provider_apikey_$id');
-    await _writeProviders(providers);
+    // Skip touching every other provider's key — they're untouched.
+    await _writeProviders(providers, skipSecureWrites: true);
   }
 
-  Future<void> _writeProviders(List<ProviderConfig> providers) async {
-    await Future.wait(providers.map((p) {
-      if (p.apiKey.isNotEmpty) {
-        return _secureStorage.write(
-          key: 'provider_apikey_${p.id}',
-          value: p.apiKey,
+  /// [onlyKeyForId] — when set, only writes/deletes the secure key for
+  /// that provider id. Used by [saveProvider] which mutated exactly one.
+  /// [skipSecureWrites] — caller has already managed the secure keys.
+  Future<void> _writeProviders(
+    List<ProviderConfig> providers, {
+    String? onlyKeyForId,
+    bool skipSecureWrites = false,
+  }) async {
+    if (!skipSecureWrites) {
+      if (onlyKeyForId != null) {
+        final p = providers.firstWhere(
+          (e) => e.id == onlyKeyForId,
+          orElse: () => providers.first,
         );
+        if (p.id == onlyKeyForId) {
+          if (p.apiKey.isNotEmpty) {
+            await _secureStorage.write(
+              key: 'provider_apikey_${p.id}',
+              value: p.apiKey,
+            );
+          } else {
+            await _secureStorage.delete(key: 'provider_apikey_${p.id}');
+          }
+        }
       } else {
-        return _secureStorage.delete(key: 'provider_apikey_${p.id}');
+        await Future.wait(providers.map((p) {
+          if (p.apiKey.isNotEmpty) {
+            return _secureStorage.write(
+              key: 'provider_apikey_${p.id}',
+              value: p.apiKey,
+            );
+          } else {
+            return _secureStorage.delete(key: 'provider_apikey_${p.id}');
+          }
+        }));
       }
-    }));
+    }
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(
       'kolo_providers_v2',

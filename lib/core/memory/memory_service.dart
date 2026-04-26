@@ -58,6 +58,10 @@ class MemoryService {
   /// last-used ordering actually reflects usage, not just age.
   Future<void> touch(String id) => AppDatabase.instance.touchMemory(id);
 
+  /// Batch the touch UPDATE so recall doesn't pay N round-trips.
+  Future<void> touchAll(List<String> ids) =>
+      AppDatabase.instance.touchMemories(ids);
+
   Future<List<MemoryEntry>> recall(String query, {int? limit}) =>
       AppDatabase.instance.recallMemories(
         query,
@@ -84,11 +88,10 @@ class MemoryService {
     if (!isEnabled) return '';
     final memories = await recall(query);
     if (memories.isEmpty) return '';
-    // Touch in the background so we don't add latency to the send path.
-    for (final m in memories) {
-      // ignore: unawaited_futures
-      touch(m.id);
-    }
+    // One batched UPDATE in the background — recall used to fan out N
+    // round-trips here, which doubled DB load on every send.
+    // ignore: unawaited_futures
+    touchAll(memories.map((m) => m.id).toList(growable: false));
     final lines = memories
         .map((m) => '- [${m.kind}] ${m.content}')
         .take(kMemoryRecallCap)

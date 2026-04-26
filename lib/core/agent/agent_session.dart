@@ -12,7 +12,7 @@ import '../tools/android/scan_phone_apps.dart';
 import '../permissions/permission_manager.dart';
 import '../../core/providers_state.dart';
 import '../../core/storage/database.dart';
-import '../api/openai_client.dart';
+import '../api/chat_client.dart';
 import 'agent_loop.dart';
 import 'conversation_manager.dart';
 import 'system_prompt.dart';
@@ -33,8 +33,11 @@ class AgentSession {
   /// Cancel token for the current run
   Completer<void>? _cancelToken;
 
-  /// Cached OpenAI client — reused across messages for same provider
-  OpenAIClient? _cachedClient;
+  /// Cached chat client (OpenAI-compat HTTP or local llama.cpp) — reused
+  /// across messages while the provider id stays the same. Typed against
+  /// the [ChatClient] interface so swapping backends doesn't touch the
+  /// rest of the session.
+  ChatClient? _cachedClient;
   String? _cachedProviderId;
 
   /// 2.10: Cached tool router — reused across messages. On first access
@@ -52,9 +55,10 @@ class AgentSession {
   })();
 
   /// Sub-LLM implementation used by custom `prompt`-kind tools. Uses the
-  /// same [OpenAIClient] cache as the main loop — so whatever model the
-  /// user has selected is what the sub-call uses. No tools, no streaming
-  /// to UI; just a blocking call that collects the full response.
+  /// same [ChatClient] cache as the main loop — so whatever provider +
+  /// model the user has selected (cloud OAI-compat or on-device
+  /// llama.cpp) is what the sub-call uses. No tools, no streaming to
+  /// UI; just a blocking call that collects the full response.
   Future<String> _subLlmCall({
     required String systemPrompt,
     required String userMessage,
@@ -141,12 +145,15 @@ class AgentSession {
     _cachedClient?.closeConnections();
   }
 
-  /// Get or create a cached OpenAIClient for the active provider
-  OpenAIClient _getClient(ApiProvider provider) {
+  /// Get or create a cached [ChatClient] for the active provider. The
+  /// concrete type is decided by [buildChatClient] based on
+  /// `provider.kind` — OpenAI-compat HTTP vs local llama.cpp — so this
+  /// session code stays backend-agnostic.
+  ChatClient _getClient(ApiProvider provider) {
     if (_cachedClient != null && _cachedProviderId == provider.id) {
       return _cachedClient!;
     }
-    _cachedClient = OpenAIClient(provider);
+    _cachedClient = buildChatClient(provider);
     _cachedProviderId = provider.id;
     return _cachedClient!;
   }
@@ -173,14 +180,53 @@ class AgentSession {
       maxTokens: model.maxTokens,
       temperature: model.temperature,
       isActive: true,
+      kind: providerConfig.kind,
+      modelPath: providerConfig.modelPath,
+      disabledTools: {...providerConfig.disabledTools},
     );
   }
 
-  /// Get tool definitions for the API call — only enabled tools
-  List<Map<String, dynamic>> get _toolDefinitions =>
-      registry.getFunctionDefinitions(
-        isEnabled: (name) => permissionManager.isEnabled(name),
-      );
+  /// Get tool definitions for the API call.
+  ///
+  /// Two layers of filtering:
+  ///   1. `permissionManager.isEnabled(name)` — global per-tool toggle
+  ///      the user sets under Settings → Tools.
+  ///   2. Provider-scoped blocklist — `ApiProvider.disabledTools` +
+  ///      "small model mode" which auto-hides every `dangerous` tool.
+  ///      Lets the user pick a 3B local model and still stay safe
+  ///      without globally disabling anything.
+  List<Map<String, dynamic>> get _toolDefinitions {
+    final providers = _ref.read(providersProvider);
+    final activeConfig = providers.isEmpty
+        ? null
+        : providers.firstWhere(
+            (p) => p.isActive,
+            orElse: () => providers.first,
+          );
+    final blocked = activeConfig?.disabledTools ?? const <String>{};
+    final smallModel = activeConfig?.smallModelMode ?? false;
+    return registry.getFunctionDefinitions(
+      isEnabled: (name) {
+        if (!permissionManager.isEnabled(name)) return false;
+        if (blocked.contains(name)) return false;
+        if (smallModel && _isRiskyForSmallModel(name)) return false;
+        return true;
+      },
+    );
+  }
+
+  /// Heuristic: which built-in tools small local models (3–7B) tend to
+  /// misuse badly. Used when `smallModelMode` is on. Not a hard security
+  /// boundary — permissions still gate destructive actions regardless.
+  bool _isRiskyForSmallModel(String name) {
+    final tool = registry.get(name);
+    if (tool == null) return false;
+    if (tool.permission == ToolPermission.dangerous) return true;
+    // Meta / composed custom tools need multi-step JSON reasoning that
+    // small models routinely garble. Block preemptively.
+    const metaTools = {'create_tool', 'create_skill', 'delete_custom_tool'};
+    return metaTools.contains(name);
+  }
 
   /// Get messages trimmed to token budget
   List<Map<String, dynamic>> get _messagesForApi =>
@@ -520,6 +566,28 @@ class AgentSessionNotifier extends StateNotifier<AgentSessionState> {
   Future<void> _drive(Stream<AgentEvent> stream) async {
     final buffer = StringBuffer();
     final thinkingBuffer = StringBuffer();
+    // Cache the most recent `toString()` of each buffer keyed by length.
+    // A throttled state push re-stringifies BOTH buffers even though
+    // typically only one of them grew since the last tick — caching by
+    // length lets the unchanged buffer reuse its prior string instead
+    // of paying an O(n) copy per push. With long streams this saves
+    // megabytes of redundant allocation across a turn.
+    String contentStr = '';
+    int contentStrLen = 0;
+    String thinkingStr = '';
+    int thinkingStrLen = 0;
+    String contentNow() {
+      if (buffer.length == contentStrLen) return contentStr;
+      contentStr = buffer.toString();
+      contentStrLen = contentStr.length;
+      return contentStr;
+    }
+    String thinkingNow() {
+      if (thinkingBuffer.length == thinkingStrLen) return thinkingStr;
+      thinkingStr = thinkingBuffer.toString();
+      thinkingStrLen = thinkingStr.length;
+      return thinkingStr;
+    }
     final toolCalls = <AgentToolCallsStart>[];
     final toolResults = <AgentToolResult>[];
     try {
@@ -541,8 +609,8 @@ class AgentSessionNotifier extends StateNotifier<AgentSessionState> {
             if (now.difference(_lastStateUpdate) >= _throttleInterval) {
               _lastStateUpdate = now;
               state = AgentSessionRunning(
-                currentContent: buffer.toString(),
-                currentThinking: thinkingBuffer.toString(),
+                currentContent: contentNow(),
+                currentThinking: thinkingNow(),
                 toolCalls: toolCalls,
                 toolResults: toolResults,
               );
@@ -556,8 +624,8 @@ class AgentSessionNotifier extends StateNotifier<AgentSessionState> {
             if (now.difference(_lastStateUpdate) >= _throttleInterval) {
               _lastStateUpdate = now;
               state = AgentSessionRunning(
-                currentContent: buffer.toString(),
-                currentThinking: thinkingBuffer.toString(),
+                currentContent: contentNow(),
+                currentThinking: thinkingNow(),
                 toolCalls: toolCalls,
                 toolResults: toolResults,
               );
@@ -568,23 +636,23 @@ class AgentSessionNotifier extends StateNotifier<AgentSessionState> {
           case AgentTextComplete():
             state = AgentSessionCompleted(
               content: event.content,
-              thinkingContent: thinkingBuffer.toString(),
+              thinkingContent: thinkingNow(),
               toolCalls: toolCalls,
               toolResults: toolResults,
             );
           case AgentToolCallsStart():
             toolCalls.add(event);
             state = AgentSessionRunning(
-              currentContent: buffer.toString(),
-              currentThinking: thinkingBuffer.toString(),
+              currentContent: contentNow(),
+              currentThinking: thinkingNow(),
               toolCalls: List.unmodifiable(toolCalls),
               toolResults: toolResults,
             );
           case AgentToolResult():
             toolResults.add(event);
             state = AgentSessionRunning(
-              currentContent: buffer.toString(),
-              currentThinking: thinkingBuffer.toString(),
+              currentContent: contentNow(),
+              currentThinking: thinkingNow(),
               toolCalls: toolCalls,
               toolResults: List.unmodifiable(toolResults),
             );
@@ -594,7 +662,7 @@ class AgentSessionNotifier extends StateNotifier<AgentSessionState> {
             if (event.partialContent.isNotEmpty) {
               state = AgentSessionCompleted(
                 content: event.partialContent,
-                thinkingContent: thinkingBuffer.toString(),
+                thinkingContent: thinkingNow(),
                 toolCalls: toolCalls,
                 toolResults: toolResults,
                 wasCancelled: true,

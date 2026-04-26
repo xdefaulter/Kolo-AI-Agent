@@ -3,6 +3,31 @@ import '../tool_base.dart';
 import '../../api/shared_dio.dart';
 import 'web_cache.dart';
 
+// Hot-path regexes hoisted to module-level so each scrape doesn't
+// recompile half a dozen patterns. Compiling a RegExp in Dart isn't
+// free — it parses the pattern + builds an automaton — and these were
+// being constructed on every call to _htmlToText / _decodeEntities /
+// _sanitizeForLlm / _extractTitle. With a popular site that's ~6 fresh
+// allocations per scrape; cached, it's zero.
+final RegExp _kTitleRe = RegExp(
+  r'<title[^>]*>(.*?)</title>',
+  dotAll: true,
+  caseSensitive: false,
+);
+final RegExp _kStripBlockRe = RegExp(
+  r'<(script|style|svg|head|noscript)[^>]*>.*?</\1>',
+  dotAll: true,
+  caseSensitive: false,
+);
+final RegExp _kAnyTagRe = RegExp(r'<[^>]+>');
+final RegExp _kCollapseHorizWsRe = RegExp(r'[ \t]+');
+final RegExp _kCollapseBlankLinesRe = RegExp(r'\n{3,}');
+final RegExp _kPromptInjectionRe = RegExp(
+  r'(ignore|disregard|forget)\s+(all\s+)?(previous|prior|above)\s+(instructions|prompts|context)',
+  caseSensitive: false,
+);
+final RegExp _kNumericEntityRe = RegExp(r'&#(\d+);');
+
 /// Fetch a URL and extract clean readable text, stripping HTML/JS/CSS noise.
 class WebScrapeTool extends KoloTool {
   Dio get _dio => SharedDio.instance;
@@ -65,31 +90,23 @@ class WebScrapeTool extends KoloTool {
   }
 
   String _extractTitle(String html) {
-    final match = RegExp(r'<title[^>]*>(.*?)</title>', dotAll: true, caseSensitive: false).firstMatch(html);
+    final match = _kTitleRe.firstMatch(html);
     return match != null ? _decodeEntities(match.group(1)?.trim() ?? '') : '';
   }
 
   String _htmlToText(String html) {
     var text = html;
-    // Remove scripts, styles, SVG, head
-    text = text.replaceAll(RegExp(r'<(script|style|svg|head|noscript)[^>]*>.*?</\1>', dotAll: true, caseSensitive: false), '');
-    // Remove HTML tags
-    text = text.replaceAll(RegExp(r'<[^>]+>'), ' ');
-    // Decode entities
+    text = text.replaceAll(_kStripBlockRe, '');
+    text = text.replaceAll(_kAnyTagRe, ' ');
     text = _decodeEntities(text);
-    // Collapse whitespace
-    text = text.replaceAll(RegExp(r'[ \t]+'), ' ');
-    text = text.replaceAll(RegExp(r'\n{3,}'), '\n\n');
+    text = text.replaceAll(_kCollapseHorizWsRe, ' ');
+    text = text.replaceAll(_kCollapseBlankLinesRe, '\n\n');
     return text.trim();
   }
 
   /// Strip common prompt injection patterns from scraped content
   String _sanitizeForLlm(String text) {
-    // Remove lines that look like prompt injection attempts
-    return text.replaceAll(RegExp(
-      r'(ignore|disregard|forget)\s+(all\s+)?(previous|prior|above)\s+(instructions|prompts|context)',
-      caseSensitive: false,
-    ), '[content filtered]');
+    return text.replaceAll(_kPromptInjectionRe, '[content filtered]');
   }
 
   String _decodeEntities(String s) {
@@ -100,7 +117,7 @@ class WebScrapeTool extends KoloTool {
         .replaceAll('&quot;', '"')
         .replaceAll('&#39;', "'")
         .replaceAll('&nbsp;', ' ')
-        .replaceAllMapped(RegExp(r'&#(\d+);'), (Match m) {
+        .replaceAllMapped(_kNumericEntityRe, (Match m) {
           final code = int.tryParse(m.group(1) ?? '');
           return code != null ? String.fromCharCode(code) : m.group(0)!;
         });

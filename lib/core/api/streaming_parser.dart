@@ -3,16 +3,15 @@ import 'dart:convert';
 /// Parses streaming SSE data to reconstruct complete tool calls
 class StreamingParser {
   final Map<int, _ToolCallBuilder> _builders = {};
-  final StringBuffer _contentBuffer = StringBuffer();
-
-  String get accumulatedContent => _contentBuffer.toString();
 
   void processChunk({
     required String content,
     List<dynamic>? toolCallDeltas,
   }) {
-    _contentBuffer.write(content);
-
+    // NOTE: agent_loop maintains its own contentBuffer; we only care
+    // about reconstructing tool-call argument strings here. Skipping
+    // the redundant per-chunk write saves an O(n) memcpy + heap
+    // pressure on every SSE chunk for the entire stream.
     if (toolCallDeltas != null) {
       for (final delta in toolCallDeltas) {
         final Map<String, dynamic> tc = delta is Map<String, dynamic>
@@ -47,7 +46,6 @@ class StreamingParser {
 
   void reset() {
     _builders.clear();
-    _contentBuffer.clear();
   }
 }
 
