@@ -14,20 +14,26 @@ class StreamingParser {
     // pressure on every SSE chunk for the entire stream.
     if (toolCallDeltas != null) {
       for (final delta in toolCallDeltas) {
-        final Map<String, dynamic> tc = delta is Map<String, dynamic>
-            ? delta
-            : Map<String, dynamic>.from(delta as Map);
+        // Hot path: SSE tool-call deltas arrive on every chunk for
+        // tool-calling models. The Dart JSON decoder always emits
+        // `Map<String, dynamic>`, so the `is` check passes and the
+        // `Map.from` fallback is dead code in practice — keep it for
+        // safety but read fields via `Map` to avoid even the type
+        // check overhead, and never copy the map.
+        final Map tc = delta as Map;
 
         final index = tc['index'] as int? ?? 0;
-        _builders.putIfAbsent(index, () => _ToolCallBuilder());
+        final builder = _builders.putIfAbsent(index, _ToolCallBuilder.new);
 
-        final builder = _builders[index]!;
-        if (tc['id'] != null) builder.id = tc['id'] as String;
-        
-        final function = tc['function'] as Map<String, dynamic>? ?? {};
-        if (function['name'] != null) builder.name = function['name'] as String;
-        if (function['arguments'] != null) {
-          builder.argumentsBuffer.write(function['arguments']);
+        final id = tc['id'];
+        if (id != null) builder.id = id as String;
+
+        final function = tc['function'] as Map?;
+        if (function != null) {
+          final name = function['name'];
+          if (name != null) builder.name = name as String;
+          final args = function['arguments'];
+          if (args != null) builder.argumentsBuffer.write(args);
         }
       }
     }

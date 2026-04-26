@@ -149,28 +149,49 @@ class SearchFilesTool extends KoloTool {
   }
 
   bool _shouldSkip(String path) {
-    final segments = path.split(Platform.pathSeparator);
-    for (final seg in segments) {
-      if (seg.startsWith('.') && seg != '.') return true;
-      if (seg == 'node_modules' ||
-          seg == 'build' ||
-          seg == '.dart_tool' ||
-          seg == '.gradle') {
-        return true;
+    // Walk segments without materialising the split list. For a recursive
+    // search this runs once per file in the tree, so avoiding the
+    // intermediate List allocation matters. We also fold the binary-ext
+    // check into the same single pass so we touch each char at most twice.
+    final sep = Platform.pathSeparator.codeUnitAt(0);
+    final dot = '.'.codeUnitAt(0);
+    int segStart = 0;
+    for (int i = 0; i <= path.length; i++) {
+      final atEnd = i == path.length;
+      if (atEnd || path.codeUnitAt(i) == sep) {
+        final len = i - segStart;
+        if (len > 0) {
+          // Skip dotted dirs/files (`.git`, `.dart_tool`, etc.) — but
+          // not the literal `.` self-segment.
+          if (path.codeUnitAt(segStart) == dot && len > 1) return true;
+          if (len == 12 && path.startsWith('node_modules', segStart)) {
+            return true;
+          }
+          if (len == 5 && path.startsWith('build', segStart)) return true;
+          // `.dart_tool` and `.gradle` are already caught by the
+          // dotted-segment rule above.
+        }
+        segStart = i + 1;
       }
     }
-    // Skip binary file extensions
-    final ext = path.split('.').last.toLowerCase();
-    const binaryExts = {
-      'png', 'jpg', 'jpeg', 'gif', 'ico', 'webp', 'bmp',
-      'zip', 'tar', 'gz', 'jar', 'so', 'dylib', 'exe',
-      'pdf', 'ttf', 'otf', 'woff', 'woff2',
-    };
-    return binaryExts.contains(ext);
+    // Binary extension check — find last '.' from end without splitting.
+    final lastDot = path.lastIndexOf('.');
+    if (lastDot < 0 || lastDot == path.length - 1) return false;
+    final ext = path.substring(lastDot + 1).toLowerCase();
+    return _binaryExts.contains(ext);
   }
 
+  static const _binaryExts = {
+    'png', 'jpg', 'jpeg', 'gif', 'ico', 'webp', 'bmp',
+    'zip', 'tar', 'gz', 'jar', 'so', 'dylib', 'exe',
+    'pdf', 'ttf', 'otf', 'woff', 'woff2',
+  };
+
   bool _matchGlob(String filePath, String glob) {
-    final fileName = filePath.split(Platform.pathSeparator).last;
+    // Find the last separator without allocating a split list.
+    final sepIdx = filePath.lastIndexOf(Platform.pathSeparator);
+    final fileName =
+        sepIdx >= 0 ? filePath.substring(sepIdx + 1) : filePath;
     // Simple glob: *.ext or exact name
     if (glob.startsWith('*.')) {
       return fileName.endsWith(glob.substring(1));

@@ -769,15 +769,19 @@ class AppDatabase {
   Future<List<ProviderConfig>> getAllProviders() async {
     final cached = _providersCache;
     if (cached != null) {
-      // Defensive copy: callers (e.g. saveProvider) mutate the returned
-      // list, but the cache must stay pristine.
-      return cached.map((p) => p.copyWith()).toList();
+      // Read path: hand back the cached list as an unmodifiable view.
+      // Previously we deep-copied every entry on every call, which on
+      // settings-screen rebuilds + agent boot fired ~5–10 ProviderConfig
+      // allocations per read for no reason. Mutators (saveProvider /
+      // deleteProvider) take a fresh mutable copy via
+      // [_getMutableProviders] when they actually need to modify it.
+      return cached;
     }
     final prefs = await SharedPreferences.getInstance();
     final json = prefs.getString('kolo_providers_v2');
     if (json == null) {
       _providersCache = const [];
-      return [];
+      return _providersCache!;
     }
     final list = jsonDecode(json) as List;
     final providers = list
@@ -791,12 +795,20 @@ class AppDatabase {
         p.apiKey = secureKey;
       }
     }));
-    _providersCache = providers.map((p) => p.copyWith()).toList();
-    return providers;
+    _providersCache = List<ProviderConfig>.unmodifiable(providers);
+    return _providersCache!;
+  }
+
+  /// Returns a fresh mutable copy of the providers list for callers that
+  /// will mutate it (saveProvider / deleteProvider). Read-only callers
+  /// should use [getAllProviders] which returns an unmodifiable view.
+  Future<List<ProviderConfig>> _getMutableProviders() async {
+    final cached = await getAllProviders();
+    return cached.map((p) => p.copyWith()).toList(growable: true);
   }
 
   Future<void> saveProvider(ProviderConfig provider) async {
-    final providers = await getAllProviders();
+    final providers = await _getMutableProviders();
     final idx = providers.indexWhere((p) => p.id == provider.id);
     if (idx >= 0) {
       providers[idx] = provider.copyWith();
@@ -815,7 +827,7 @@ class AppDatabase {
       _writeProviders(providers);
 
   Future<void> deleteProvider(String id) async {
-    var providers = await getAllProviders();
+    var providers = await _getMutableProviders();
     providers.removeWhere((p) => p.id == id);
     await _secureStorage.delete(key: 'provider_apikey_$id');
     // Skip touching every other provider's key — they're untouched.
@@ -866,8 +878,12 @@ class AppDatabase {
     );
     // Refresh the cache from the now-canonical list so the next reader
     // doesn't pay another decryption pass. Defensive-copy each entry so
-    // caller-side mutations to `providers` can't bleed into the cache.
-    _providersCache = providers.map((p) => p.copyWith()).toList();
+    // caller-side mutations to `providers` can't bleed into the cache,
+    // then freeze the outer list — readers must use _getMutableProviders
+    // if they need to mutate.
+    _providersCache = List<ProviderConfig>.unmodifiable(
+      providers.map((p) => p.copyWith()),
+    );
   }
 
   Future<ProviderConfig?> getActiveProvider() async {
