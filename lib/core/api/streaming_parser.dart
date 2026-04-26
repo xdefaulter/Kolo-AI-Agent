@@ -63,15 +63,31 @@ class StreamingParser {
   }
 
   List<ResolvedToolCall> resolveToolCalls() {
-    return _builders.entries.map((e) {
-      final builder = e.value;
-      return ResolvedToolCall(
-        id: builder.id ?? 'call_${e.key}',
+    // Pre-allocate exactly — we know the count up front. Skips both the
+    // intermediate MappedIterable and the dynamic-grow path inside
+    // `.toList()` (which would over-allocate to the next power-of-two
+    // capacity, then trim). One walk, one allocation.
+    final out = List<ResolvedToolCall>.filled(
+      _builders.length,
+      _placeholderCall,
+      growable: false,
+    );
+    var i = 0;
+    _builders.forEach((index, builder) {
+      out[i++] = ResolvedToolCall(
+        id: builder.id ?? 'call_$index',
         name: builder.name ?? '',
         arguments: builder.argumentsBuffer.toString(),
       );
-    }).toList();
+    });
+    return out;
   }
+
+  // Filler for `List.filled` so we don't ship a nullable element type.
+  // Overwritten in-place inside `resolveToolCalls` before the list ever
+  // escapes — never observable to callers.
+  static final ResolvedToolCall _placeholderCall =
+      ResolvedToolCall(id: '', name: '', arguments: '');
 
   void reset() {
     _builders.clear();

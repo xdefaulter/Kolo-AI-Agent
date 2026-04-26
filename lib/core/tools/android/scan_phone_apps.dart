@@ -8,6 +8,18 @@ import 'adb_utils.dart';
 // Tool: Scan Phone Apps (via ADB)
 // ════════════════════════════════════════════
 
+// Hot-path patterns hoisted to module-level. _parseDumpsys is called
+// once per package and a typical Android device has 150–300 packages,
+// so re-compiling these four RegExps inside the function was burning
+// ~600–1200 fresh automaton builds per scan. Compiled once now.
+// `_kProviderRePrefix` is a template — the per-package suffix is
+// injected at use site since it embeds the package name.
+final RegExp _kActivityFilterRe =
+    RegExp(r'(\S+/\S+)\s+filter\s+\S+\n((?:\s+.+\n)*)');
+final RegExp _kReceiverFilterRe = RegExp(r'(\S+/\S+)\s+filter');
+final RegExp _kHttpLinkRe = RegExp(r'https?://[^\s"]+');
+final RegExp _kIntentActionRe = RegExp(r'Action:\s+"([^"]+)"');
+
 class ScanPhoneAppsTool extends KoloTool {
   @override
   String get name => 'scan_phone_apps';
@@ -41,19 +53,27 @@ class ScanPhoneAppsTool extends KoloTool {
       // Check ADB connection first
       final connErr = await checkAdbConnection();
       if (connErr != null) return ToolResult.err(connErr);
-      // 1. Get all installed packages
+      // 1. Get all installed packages.
+      // Single-pass parse: walk every line once, parse the package name
+      // inline, apply the optional filter, and append directly to the
+      // result list. The previous chain
+      //   split → where(prefix) → toList → map(parse) → where(non-empty)
+      //     → toList → optional where(filter) → toList
+      // allocated up to four intermediate Lists per scan (each a few KB
+      // of pointer storage). On a 250-package device that's ~1k pointer
+      // bytes saved per List × 3 = a meaningful chunk of GC pressure.
       final rawPackages = await adbShell('pm list packages -f', timeoutSec: 30);
-      final lines = rawPackages.split('\n').where((l) => l.startsWith('package:')).toList();
-
-      // Parse package names
-      List<String> packages = lines.map((line) {
+      final hasFilter = filter != null && filter.isNotEmpty;
+      final packages = <String>[];
+      for (final line in rawPackages.split('\n')) {
+        if (!line.startsWith('package:')) continue;
         // format: package:/data/app/.../base.apk=com.example.app
         final eqIdx = line.lastIndexOf('=');
-        return eqIdx >= 0 ? line.substring(eqIdx + 1).trim() : '';
-      }).where((p) => p.isNotEmpty).toList();
-
-      if (filter != null && filter.isNotEmpty) {
-        packages = packages.where((p) => p.contains(filter)).toList();
+        if (eqIdx < 0) continue;
+        final pkg = line.substring(eqIdx + 1).trim();
+        if (pkg.isEmpty) continue;
+        if (hasFilter && !pkg.contains(filter)) continue;
+        packages.add(pkg);
       }
 
       // 2. For each package, extract intent info via dumpsys
@@ -134,8 +154,7 @@ class ScanPhoneAppsTool extends KoloTool {
     // Extract exported activities with their intent filters
     final activitySection = _extractSection(dump, 'Activity Resolver Table:');
     if (activitySection != null) {
-      for (final match in RegExp(r'(\S+/\S+)\s+filter\s+\S+\n((?:\s+.+\n)*)')
-          .allMatches(activitySection)) {
+      for (final match in _kActivityFilterRe.allMatches(activitySection)) {
         final component = match.group(1) ?? '';
         final filterBlock = match.group(2) ?? '';
         if (component.startsWith(pkg) || component.contains(pkg)) {
@@ -163,8 +182,7 @@ class ScanPhoneAppsTool extends KoloTool {
     // Extract broadcast receivers
     final receiverSection = _extractSection(dump, 'Receiver Resolver Table:');
     if (receiverSection != null) {
-      for (final match in RegExp(r'(\S+/\S+)\s+filter')
-          .allMatches(receiverSection)) {
+      for (final match in _kReceiverFilterRe.allMatches(receiverSection)) {
         final component = match.group(1) ?? '';
         if (component.contains(pkg)) {
           receivers.add({'component': component});
@@ -172,22 +190,29 @@ class ScanPhoneAppsTool extends KoloTool {
       }
     }
 
-    // Extract content providers
-    final providerRegex = RegExp('ContentProvider.*?\\{[^}]*$pkg[^}]*\\}', multiLine: true);
+    // Extract content providers. The package name is part of the pattern
+    // here so we can't fully hoist it — but we can pre-escape any regex
+    // metacharacters in the package name (legal in Android pkg ids: only
+    // letters/digits/underscores/dots, so `.` is the only one that
+    // matters in practice). RegExp.escape would be ideal but Dart
+    // doesn't ship it; the manual escape is sufficient for this domain.
+    final escapedPkg = pkg.replaceAll('.', r'\.');
+    final providerRegex = RegExp(
+      'ContentProvider.*?\\{[^}]*$escapedPkg[^}]*\\}',
+      multiLine: true,
+    );
     for (final match in providerRegex.allMatches(dump)) {
       providers.add({'info': match.group(0)?.trim() ?? ''});
     }
 
     // Look for app links (http/https intent filters)
-    final httpLinkRegex = RegExp(r'https?://[^\s"]+');
     final appLinksSection = _extractSection(dump, 'App Links:') ?? '';
-    for (final match in httpLinkRegex.allMatches(appLinksSection)) {
+    for (final match in _kHttpLinkRe.allMatches(appLinksSection)) {
       deepLinks.add(match.group(0) ?? '');
     }
 
     // Parse general intent filters
-    final filterRegex = RegExp(r'Action:\s+"([^"]+)"');
-    for (final match in filterRegex.allMatches(dump)) {
+    for (final match in _kIntentActionRe.allMatches(dump)) {
       final action = match.group(1) ?? '';
       if (action.isNotEmpty) {
         intentFilters.add({'action': action});

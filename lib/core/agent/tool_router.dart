@@ -95,29 +95,56 @@ class ToolRouter {
     }
   }
 
-  /// Execute multiple tool calls in parallel, deduplicating identical calls
+  /// Execute multiple tool calls in parallel, deduplicating identical calls.
+  ///
+  /// Fast-path the common case (every tool call is unique — collisions
+  /// only happen when a model emits two identical tool calls in one
+  /// turn, which is rare): skip the dedup map + List<int> wrapper
+  /// entirely. Even on the dedup path, store an `int` for the singleton
+  /// case and only promote to `List<int>` on the first actual collision,
+  /// since most "deduped" entries still end up being one-of-one.
   Future<List<ToolResult>> executeToolsParallel({
     required List<ResolvedToolCall> calls,
     required String chatId,
   }) async {
+    // Trivial cases first — no map, no boxing.
+    if (calls.isEmpty) return const [];
+    if (calls.length == 1) {
+      final c = calls.first;
+      final r = await executeTool(
+        toolName: c.name,
+        toolCallId: c.id,
+        argumentsJson: c.arguments,
+        chatId: chatId,
+      );
+      return [r];
+    }
+
     // Dedup: group calls by (name, arguments). Use a record key so we
     // don't allocate a per-call concatenated string just to hash it.
-    // Records compose hashCode/== from their fields automatically, which
-    // matches the previous "${name}:${arguments}" semantics without the
-    // intermediate allocation per call (was up to ~2× argument-size
-    // bytes per call on large JSON tool args).
-    final dedupMap = <(String, String), List<int>>{};
+    // Records compose hashCode/== from their fields automatically.
+    // Value is `Object`: holds a boxed `int` for the singleton case
+    // (the common one) and only gets promoted to `List<int>` on a real
+    // duplicate, which avoids the per-key List allocation.
+    final dedupMap = <(String, String), Object>{};
     for (var i = 0; i < calls.length; i++) {
       final key = (calls[i].name, calls[i].arguments);
-      (dedupMap[key] ??= []).add(i);
+      final existing = dedupMap[key];
+      if (existing == null) {
+        dedupMap[key] = i;
+      } else if (existing is List<int>) {
+        existing.add(i);
+      } else {
+        dedupMap[key] = <int>[existing as int, i];
+      }
     }
 
     final results = List<ToolResult?>.filled(calls.length, null);
     final futures = <Future<void>>[];
 
-    for (final entry in dedupMap.entries) {
-      final indices = entry.value;
-      final call = calls[indices.first];
+    dedupMap.forEach((_, slot) {
+      final firstIdx = slot is int ? slot : (slot as List<int>).first;
+      final call = calls[firstIdx];
       futures.add(
         executeTool(
           toolName: call.name,
@@ -125,12 +152,16 @@ class ToolRouter {
           argumentsJson: call.arguments,
           chatId: chatId,
         ).then((result) {
-          for (final idx in indices) {
-            results[idx] = result;
+          if (slot is int) {
+            results[slot] = result;
+          } else {
+            for (final idx in slot as List<int>) {
+              results[idx] = result;
+            }
           }
         }),
       );
-    }
+    });
 
     await Future.wait(futures);
     return results.cast<ToolResult>();

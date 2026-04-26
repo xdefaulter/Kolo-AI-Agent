@@ -290,35 +290,50 @@ class WebSearchTool extends KoloTool {
         .join('\n\n');
   }
 
+  // Hot-path patterns: previously these were rebuilt on every search
+  // call (and `_uddgRe` was rebuilt _per result link_ in the loop). Each
+  // RegExp construction parses + compiles an automaton — moving them to
+  // statics drops 3 RegExp allocations per query plus one extra per
+  // matching result, which dominated the parser's cost on warm caches.
+  static final _linkRe = RegExp(
+    r'<a[^>]*class="result-link"[^>]*href="([^"]*)"[^>]*>(.*?)</a>',
+    multiLine: true,
+  );
+  static final _snippetRe = RegExp(
+    r'<td[^>]*class="result-snippet"[^>]*>(.*?)</td>',
+    multiLine: true,
+  );
+  static final _uddgRe = RegExp(r'uddg=([^&]+)');
+
   List<Map<String, String>> _parseDuckDuckGoLite(String html, int maxResults) {
     final results = <Map<String, String>>[];
-    final linkPattern = RegExp(
-      r'<a[^>]*class="result-link"[^>]*href="([^"]*)"[^>]*>(.*?)</a>',
-      multiLine: true,
-    );
-    final snippetPattern = RegExp(
-      r'<td[^>]*class="result-snippet"[^>]*>(.*?)</td>',
-      multiLine: true,
-    );
-    final links = linkPattern.allMatches(html).toList();
-    final snippets = snippetPattern.allMatches(html).toList();
-    for (int i = 0; i < links.length && results.length < maxResults; i++) {
-      final url = _decodeHtml(links[i].group(1) ?? '');
-      final title = _decodeHtml(links[i].group(2) ?? '');
-      if (url.isEmpty || url.contains('duckduckgo.com') || title.isEmpty)
+    // Snippets are pulled by index; we still need a List for `[i]` access.
+    // Links can stream — iterate once and break early when we hit
+    // `maxResults` instead of materialising the whole match list. On
+    // pages with hundreds of links this saves the trailing N-maxResults
+    // Match objects.
+    final snippets = _snippetRe.allMatches(html).toList(growable: false);
+    int i = 0;
+    for (final linkMatch in _linkRe.allMatches(html)) {
+      if (results.length >= maxResults) break;
+      final url = _decodeHtml(linkMatch.group(1) ?? '');
+      final title = _decodeHtml(linkMatch.group(2) ?? '');
+      if (url.isEmpty || url.contains('duckduckgo.com') || title.isEmpty) {
+        i++;
         continue;
+      }
       String cleanUrl = url;
       if (url.contains('uddg=')) {
-        final uddgMatch = RegExp(r'uddg=([^&]+)').firstMatch(url);
+        final uddgMatch = _uddgRe.firstMatch(url);
         if (uddgMatch != null) {
           cleanUrl = Uri.decodeComponent(uddgMatch.group(1) ?? url);
         }
       }
-      String snippet = '';
-      if (i < snippets.length) {
-        snippet = _decodeHtml(snippets[i].group(1) ?? '');
-      }
+      final snippet = i < snippets.length
+          ? _decodeHtml(snippets[i].group(1) ?? '')
+          : '';
       results.add({'title': title, 'url': cleanUrl, 'snippet': snippet});
+      i++;
     }
     return results;
   }
