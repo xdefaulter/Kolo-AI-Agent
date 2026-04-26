@@ -112,7 +112,14 @@ class ConversationManager {
       usedTokens += tokens;
     }
 
-    return [...result, ...reversed.reversed];
+    // Append in reverse-of-reverse (i.e. chronological) order directly
+    // into `result`. Previous `[...result, ...reversed.reversed]` form
+    // allocated a fresh list and copied both source iterables; addAll
+    // grows `result` in-place so we pay one copy total.
+    for (int i = reversed.length - 1; i >= 0; i--) {
+      result.add(reversed[i]);
+    }
+    return result;
   }
 
   void clear() => _messages.clear();

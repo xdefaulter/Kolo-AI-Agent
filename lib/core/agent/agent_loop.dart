@@ -60,18 +60,10 @@ class AgentLoop {
           contentBuffer.write(chunk.content);
 
           if (chunk.toolCalls != null) {
-            parser.processChunk(
-              content: chunk.content,
-              toolCallDeltas: chunk.toolCalls
-                  ?.map(
-                    (tc) => {
-                      'index': tc.index,
-                      'id': tc.id,
-                      'function': {'name': tc.name, 'arguments': tc.arguments},
-                    },
-                  )
-                  .toList(),
-            );
+            // Typed fast-path — avoids allocating a wrapper Map + nested
+            // function Map per delta per SSE chunk just to feed the parser
+            // strings it can read directly off ToolCallDelta.
+            parser.processToolCallDeltas(chunk.toolCalls!);
           }
 
           if (chunk.reasoningContent != null &&

@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'openai_client.dart' show ToolCallDelta;
+
 /// Parses streaming SSE data to reconstruct complete tool calls
 class StreamingParser {
   final Map<int, _ToolCallBuilder> _builders = {};
@@ -36,6 +38,27 @@ class StreamingParser {
           if (args != null) builder.argumentsBuffer.write(args);
         }
       }
+    }
+  }
+
+  /// Typed fast-path that avoids the Map<->ToolCallDelta round-trip.
+  ///
+  /// agent_loop receives `List<ToolCallDelta>` from `ChatStreamChunk` and
+  /// previously rebuilt a `List<Map<String, dynamic>>` per chunk just to
+  /// hand it back to [processChunk] (which then read the fields off the
+  /// Map). For a long tool-calling turn that's one wrapper Map + one
+  /// nested function Map allocated per delta per SSE chunk for nothing.
+  /// This overload reads the typed fields directly.
+  void processToolCallDeltas(Iterable<ToolCallDelta> deltas) {
+    for (final tc in deltas) {
+      final index = tc.index ?? 0;
+      final builder = _builders.putIfAbsent(index, _ToolCallBuilder.new);
+      final id = tc.id;
+      if (id != null) builder.id = id;
+      final name = tc.name;
+      if (name != null) builder.name = name;
+      final args = tc.arguments;
+      if (args != null) builder.argumentsBuffer.write(args);
     }
   }
 

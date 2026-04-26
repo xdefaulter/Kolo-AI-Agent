@@ -1051,9 +1051,14 @@ class AppDatabase {
         : (r['tool_success'] as int) != 0,
     toolCalls: r['tool_calls_json'] == null
         ? null
+        // jsonDecode always emits Map<String, dynamic> for objects, so the
+        // previous Map<String, dynamic>.from(e as Map) defensive copy was a
+        // wasted allocation per tool-call per message. cast() avoids the
+        // per-entry copy; toList materialises so downstream readers don't
+        // pay lazy type checks on every access.
         : (jsonDecode(r['tool_calls_json'] as String) as List)
-              .map((e) => Map<String, dynamic>.from(e as Map))
-              .toList(),
+              .cast<Map<String, dynamic>>()
+              .toList(growable: false),
     status: r['status'] as String?,
     error: r['error'] as String?,
     createdAt: DateTime.fromMillisecondsSinceEpoch(r['created_at'] as int),
