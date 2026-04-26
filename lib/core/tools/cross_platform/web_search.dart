@@ -323,17 +323,30 @@ class WebSearchTool extends KoloTool {
     return results;
   }
 
-  static final _htmlTagRegExp = RegExp(r'<[^>]*>');
+  // Single regex matches every entity we care about + any HTML tag, so
+  // _decodeHtml does one O(n) pass instead of seven sequential
+  // replaceAll calls (six entities + tag strip). Hot when the
+  // DuckDuckGo fallback parses ~15 result snippets per query.
+  static final _htmlEntityOrTagRe =
+      RegExp(r'<[^>]*>|&(?:amp|lt|gt|quot|#39|apos);');
+  static const Map<String, String> _entityMap = {
+    '&amp;': '&',
+    '&lt;': '<',
+    '&gt;': '>',
+    '&quot;': '"',
+    '&#39;': "'",
+    '&apos;': "'",
+  };
 
-  String _decodeHtml(String s) => s
-      .replaceAll('&amp;', '&')
-      .replaceAll('&lt;', '<')
-      .replaceAll('&gt;', '>')
-      .replaceAll('&quot;', '"')
-      .replaceAll('&#39;', "'")
-      .replaceAll('&apos;', "'")
-      .replaceAll(_htmlTagRegExp, '')
-      .trim();
+  String _decodeHtml(String s) {
+    if (s.isEmpty) return s;
+    final out = s.replaceAllMapped(_htmlEntityOrTagRe, (m) {
+      final src = m.group(0)!;
+      if (src.startsWith('<')) return '';
+      return _entityMap[src] ?? src;
+    });
+    return out.trim();
+  }
 
   String _truncate(String s, int max) =>
       s.length <= max ? s : '${s.substring(0, max)}...';

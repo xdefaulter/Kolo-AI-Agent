@@ -112,9 +112,13 @@ class ResolvedToolCall {
   Map<String, dynamic> parseArguments() {
     if (arguments.isEmpty) return {};
     try {
-      return Map<String, dynamic>.from(
-        jsonDecode(arguments) as Map,
-      );
+      // jsonDecode already emits a fresh Map<String, dynamic> for objects;
+      // the previous Map.from() was a wasted full-Map copy on every tool
+      // dispatch. Cast directly and fall through on the off-chance the
+      // payload is non-object (legacy/buggy provider).
+      final decoded = jsonDecode(arguments);
+      if (decoded is Map<String, dynamic>) return decoded;
+      return {};
     } catch (_) {
       return {};
     }

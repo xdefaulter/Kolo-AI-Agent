@@ -26,7 +26,21 @@ final RegExp _kPromptInjectionRe = RegExp(
   r'(ignore|disregard|forget)\s+(all\s+)?(previous|prior|above)\s+(instructions|prompts|context)',
   caseSensitive: false,
 );
-final RegExp _kNumericEntityRe = RegExp(r'&#(\d+);');
+// Combined named + numeric entity matcher. Replaces the previous
+// chain of six sequential .replaceAll() calls in _decodeEntities, which
+// each walked the entire scraped document — six O(n) passes + six new
+// String allocations on every page. Now a single pass picks the named
+// entity from the table or decodes the numeric form via the captured
+// digits.
+final RegExp _kEntityRe = RegExp(r'&(?:amp|lt|gt|quot|nbsp|#39|#(\d+));');
+const Map<String, String> _kNamedEntities = {
+  '&amp;': '&',
+  '&lt;': '<',
+  '&gt;': '>',
+  '&quot;': '"',
+  '&#39;': "'",
+  '&nbsp;': ' ',
+};
 
 /// Fetch a URL and extract clean readable text, stripping HTML/JS/CSS noise.
 class WebScrapeTool extends KoloTool {
@@ -110,16 +124,14 @@ class WebScrapeTool extends KoloTool {
   }
 
   String _decodeEntities(String s) {
-    return s
-        .replaceAll('&amp;', '&')
-        .replaceAll('&lt;', '<')
-        .replaceAll('&gt;', '>')
-        .replaceAll('&quot;', '"')
-        .replaceAll('&#39;', "'")
-        .replaceAll('&nbsp;', ' ')
-        .replaceAllMapped(_kNumericEntityRe, (Match m) {
-          final code = int.tryParse(m.group(1) ?? '');
-          return code != null ? String.fromCharCode(code) : m.group(0)!;
-        });
+    if (!s.contains('&')) return s; // fast bail — no entities present
+    return s.replaceAllMapped(_kEntityRe, (Match m) {
+      final digits = m.group(1);
+      if (digits != null) {
+        final code = int.tryParse(digits);
+        return code != null ? String.fromCharCode(code) : m.group(0)!;
+      }
+      return _kNamedEntities[m.group(0)!] ?? m.group(0)!;
+    });
   }
 }
