@@ -158,16 +158,30 @@ class AgentSession {
     return _cachedClient!;
   }
 
-  /// Get the active API provider from settings (reads from same provider UI uses)
-  ApiProvider? get _activeProvider {
+  /// Resolve the currently-selected provider config in one linear pass.
+  /// Returns null only when the user hasn't configured any provider yet.
+  ///
+  /// Both [_activeProvider] and [_toolDefinitions] used to do this lookup
+  /// independently via `.firstWhere(...)` on every send — meaning each
+  /// turn paid two O(n) scans + an extra Riverpod read for the same
+  /// answer. Calling this once and reusing the result is cheaper and
+  /// also avoids the case where the two getters could see different
+  /// states if the user switched providers between them.
+  ProviderConfig? _resolveActiveProviderConfig() {
     final providers = _ref.read(providersProvider);
-
     if (providers.isEmpty) return null;
-    final providerConfig = providers.firstWhere(
-      (p) => p.isActive,
-      orElse: () => providers.first,
-    );
+    for (final p in providers) {
+      if (p.isActive) return p;
+    }
+    return providers.first;
+  }
 
+  /// Get the active API provider from settings (reads from same provider UI uses)
+  ApiProvider? get _activeProvider =>
+      _activeProviderFromConfig(_resolveActiveProviderConfig());
+
+  ApiProvider? _activeProviderFromConfig(ProviderConfig? providerConfig) {
+    if (providerConfig == null) return null;
     final model = providerConfig.activeModel;
     if (model == null) return null;
     return ApiProvider(
@@ -198,14 +212,7 @@ class AgentSession {
   ///      "small model mode" which auto-hides every `dangerous` tool.
   ///      Lets the user pick a 3B local model and still stay safe
   ///      without globally disabling anything.
-  List<Map<String, dynamic>> get _toolDefinitions {
-    final providers = _ref.read(providersProvider);
-    final activeConfig = providers.isEmpty
-        ? null
-        : providers.firstWhere(
-            (p) => p.isActive,
-            orElse: () => providers.first,
-          );
+  List<Map<String, dynamic>> _toolDefinitionsFor(ProviderConfig? activeConfig) {
     final blocked = activeConfig?.disabledTools ?? const <String>{};
     final smallModel = activeConfig?.smallModelMode ?? false;
     return registry.getFunctionDefinitions(
@@ -248,7 +255,11 @@ class AgentSession {
     String text, {
     List<ChatAttachment>? imageAttachments,
   }) async* {
-    final provider = _activeProvider;
+    // One linear scan for the active config — reused for the ApiProvider
+    // build AND the tool-definitions filter below. Used to be two
+    // independent `.firstWhere` calls per send.
+    final activeConfig = _resolveActiveProviderConfig();
+    final provider = _activeProviderFromConfig(activeConfig);
     if (provider == null) {
       yield AgentError(
         error: 'No API provider configured. Go to Settings to add one.',
@@ -256,7 +267,7 @@ class AgentSession {
       return;
     }
 
-    if (registry.all.isEmpty) {
+    if (registry.isEmpty) {
       yield AgentError(error: 'No tools registered.');
       return;
     }
@@ -344,7 +355,7 @@ class AgentSession {
     await for (final event in agentLoop.run(
       messages: _messagesForApi,
       chatId: _ref.read(activeChatIdProvider),
-      toolDefinitions: _toolDefinitions,
+      toolDefinitions: _toolDefinitionsFor(activeConfig),
     )) {
       // Sync conversation manager with what the loop produces
       if (event is AgentTextComplete) {
@@ -393,7 +404,8 @@ class AgentSession {
       yield AgentError(error: 'Nothing to retry.');
       return;
     }
-    final provider = _activeProvider;
+    final activeConfig = _resolveActiveProviderConfig();
+    final provider = _activeProviderFromConfig(activeConfig);
     if (provider == null) {
       yield AgentError(error: 'No API provider configured.');
       return;
@@ -414,7 +426,7 @@ class AgentSession {
     await for (final event in loop.run(
       messages: _messagesForApi,
       chatId: _ref.read(activeChatIdProvider),
-      toolDefinitions: _toolDefinitions,
+      toolDefinitions: _toolDefinitionsFor(activeConfig),
     )) {
       if (event is AgentTextComplete) {
         conversationManager.addAssistantMessage(event.content);

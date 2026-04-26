@@ -38,6 +38,14 @@ class ToolRegistry {
 
   KoloTool? get(String name) => _tools[name];
 
+  /// Direct map check — avoids materialising the `_allCache` list
+  /// (and the unmodifiable wrapper around it) just to ask `isEmpty`.
+  bool get isEmpty => _tools.isEmpty;
+
+  /// Number of registered tools without forcing the `_allCache`
+  /// materialisation.
+  int get length => _tools.length;
+
   List<KoloTool> get all =>
       _allCache ??= List<KoloTool>.unmodifiable(_tools.values);
 
