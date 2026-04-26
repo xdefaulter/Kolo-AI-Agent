@@ -75,6 +75,19 @@ class AppDatabase {
   /// [_onOpen]; read by [searchMessages] + [recallMemories].
   bool _ftsEnabled = false;
 
+  /// In-memory cache for the decrypted provider list. Populated on first
+  /// [getAllProviders] call; invalidated on any write path. Avoids the
+  /// per-call cost of decrypting N API keys via EncryptedSharedPreferences,
+  /// which dominates at session start when several call sites
+  /// (saveProvider, deleteProvider, getActiveProvider, agent_session,
+  /// settings UI) all read providers in quick succession.
+  List<ProviderConfig>? _providersCache;
+
+  /// In-memory cache for the parsed custom-tools list. Same idea —
+  /// saveCustomTool / deleteCustomTool used to decode the entire list
+  /// on every mutation.
+  List<CustomToolDef>? _customToolsCache;
+
   /// Idempotent + safe to call from multiple places (main() does it
   /// eagerly, every getter awaits it). First call does the work; all
   /// concurrent callers wait on the same completer.
@@ -581,22 +594,27 @@ class AppDatabase {
   }
 
   Future<void> _trimChatIfNeeded(Database db, String chatId) async {
-    final countRes = Sqflite.firstIntValue(
-      await db.rawQuery(
-        'SELECT COUNT(*) FROM messages WHERE chat_id = ?',
-        [chatId],
-      ),
+    // Fast-path probe: an indexed seek to the row at position
+    // kMaxMessagesPerChat. If there's nothing there, we're under cap
+    // and avoid the full COUNT(*) range-scan entirely. This fires on
+    // every message insert, so cutting the common-case round-trip from
+    // a full index scan to a single OFFSET seek matters.
+    final probe = await db.rawQuery(
+      'SELECT 1 FROM messages WHERE chat_id = ? '
+      'ORDER BY created_at ASC, rowid ASC LIMIT 1 OFFSET ?',
+      [chatId, kMaxMessagesPerChat],
     );
-    final count = countRes ?? 0;
-    if (count <= kMaxMessagesPerChat) return;
-    final overflow = count - kMaxMessagesPerChat;
-    // Delete the oldest `overflow` messages by created_at.
+    if (probe.isEmpty) return;
+    // Over cap — delete oldest rows. Single DELETE; the inner subquery
+    // computes the overflow inline so we don't pay a separate COUNT
+    // round-trip.
     await db.rawDelete(
       'DELETE FROM messages WHERE id IN ('
       ' SELECT id FROM messages WHERE chat_id = ? '
-      ' ORDER BY created_at ASC LIMIT ?'
+      ' ORDER BY created_at ASC, rowid ASC '
+      ' LIMIT MAX(0, (SELECT COUNT(*) FROM messages WHERE chat_id = ?) - ?)'
       ')',
-      [chatId, overflow],
+      [chatId, chatId, kMaxMessagesPerChat],
     );
   }
 
@@ -749,9 +767,18 @@ class AppDatabase {
   // ---------------- Providers (SharedPreferences) ----------------
 
   Future<List<ProviderConfig>> getAllProviders() async {
+    final cached = _providersCache;
+    if (cached != null) {
+      // Defensive copy: callers (e.g. saveProvider) mutate the returned
+      // list, but the cache must stay pristine.
+      return cached.map((p) => p.copyWith()).toList();
+    }
     final prefs = await SharedPreferences.getInstance();
     final json = prefs.getString('kolo_providers_v2');
-    if (json == null) return [];
+    if (json == null) {
+      _providersCache = const [];
+      return [];
+    }
     final list = jsonDecode(json) as List;
     final providers = list
         .map((e) => ProviderConfig.fromMap(e as Map<String, dynamic>))
@@ -764,6 +791,7 @@ class AppDatabase {
         p.apiKey = secureKey;
       }
     }));
+    _providersCache = providers.map((p) => p.copyWith()).toList();
     return providers;
   }
 
@@ -836,6 +864,10 @@ class AppDatabase {
       'kolo_providers_v2',
       jsonEncode(providers.map((p) => p.toMapWithoutApiKey()).toList()),
     );
+    // Refresh the cache from the now-canonical list so the next reader
+    // doesn't pay another decryption pass. Defensive-copy each entry so
+    // caller-side mutations to `providers` can't bleed into the cache.
+    _providersCache = providers.map((p) => p.copyWith()).toList();
   }
 
   Future<ProviderConfig?> getActiveProvider() async {
@@ -879,15 +911,23 @@ class AppDatabase {
   static const int kMaxCustomTools = 50;
 
   Future<List<CustomToolDef>> getAllCustomTools() async {
+    final cached = _customToolsCache;
+    if (cached != null) return List.of(cached);
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString(_kCustomToolsKey);
-    if (raw == null || raw.isEmpty) return [];
+    if (raw == null || raw.isEmpty) {
+      _customToolsCache = const [];
+      return [];
+    }
     try {
       final list = jsonDecode(raw) as List;
-      return list
+      final parsed = list
           .map((e) => CustomToolDef.fromMap(e as Map<String, dynamic>))
           .toList();
+      _customToolsCache = List.unmodifiable(parsed);
+      return parsed;
     } catch (_) {
+      _customToolsCache = const [];
       return [];
     }
   }
@@ -921,6 +961,7 @@ class AppDatabase {
       _kCustomToolsKey,
       jsonEncode(tools.map((t) => t.toMap()).toList()),
     );
+    _customToolsCache = List.unmodifiable(List.of(tools));
   }
 
   // ---------------- Drafts ----------------

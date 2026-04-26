@@ -1,6 +1,33 @@
 /// Default max context tokens for conversation budgeting
 const int kDefaultMaxContextTokens = 32000;
 
+/// Token-count heuristic. Uses the larger of a word-based estimate
+/// (~1.3 tokens/word, good for prose) and a byte-based floor
+/// (~3.5 bytes/token, catches dense JSON/base64). Allocation-free —
+/// walks code units in place; no `split()` / `List<String>`.
+///
+/// Exposed at top-level so [ChatMessage.estimatedContentTokens] can
+/// memoise its result (the message content is final, so the answer
+/// can never go stale).
+int estimateTextTokens(String text) {
+  if (text.isEmpty) return 0;
+  int words = 0;
+  bool inWord = false;
+  for (int i = 0; i < text.length; i++) {
+    final c = text.codeUnitAt(i);
+    final isWs = c == 32 || c == 9 || c == 10 || c == 13;
+    if (!isWs && !inWord) {
+      words++;
+      inWord = true;
+    } else if (isWs) {
+      inWord = false;
+    }
+  }
+  final wordEstimate = ((words * 1.3) + 4).ceil();
+  final byteEstimate = (text.length / 3.5).ceil();
+  return wordEstimate > byteEstimate ? wordEstimate : byteEstimate;
+}
+
 /// Manages conversation history with token budgeting
 class ConversationManager {
   final List<ChatMessage> _messages = [];
@@ -56,34 +83,6 @@ class ConversationManager {
     }
   }
 
-  /// Estimate tokens for a chunk of text. Uses the higher of:
-  ///   - word-based (~1.3 tokens/word) — good for English prose
-  ///   - byte-based (~3.5 bytes/token) — kicks in for minified JSON, base64,
-  ///     or tool payloads where whitespace-split gives almost no words.
-  /// Using max() protects against the prose heuristic silently undercounting
-  /// dense JSON and letting us blow past the provider's context limit.
-  ///
-  /// Allocation-free: counts whitespace transitions via codeUnitAt so no
-  /// intermediate List<String> is created (previously O(n) alloc per call).
-  int _estimateTokens(String text) {
-    if (text.isEmpty) return 0;
-    int words = 0;
-    bool inWord = false;
-    for (int i = 0; i < text.length; i++) {
-      final c = text.codeUnitAt(i);
-      final isWs = c == 32 || c == 9 || c == 10 || c == 13;
-      if (!isWs && !inWord) {
-        words++;
-        inWord = true;
-      } else if (isWs) {
-        inWord = false;
-      }
-    }
-    final wordEstimate = ((words * 1.3) + 4).ceil();
-    final byteEstimate = (text.length / 3.5).ceil();
-    return wordEstimate > byteEstimate ? wordEstimate : byteEstimate;
-  }
-
   /// Get messages that fit within token budget, keeping system prompt + recent messages
   List<Map<String, dynamic>> getMessagesForApi({String? systemPrompt}) {
     final result = <Map<String, dynamic>>[];
@@ -93,7 +92,7 @@ class ConversationManager {
     }
 
     final systemTokens = systemPrompt != null
-        ? _estimateTokens(systemPrompt)
+        ? estimateTextTokens(systemPrompt)
         : 0;
     final budget = maxContextTokens - systemTokens;
 
@@ -103,7 +102,11 @@ class ConversationManager {
     int usedTokens = 0;
 
     for (final msg in _messages.reversed) {
-      final tokens = _estimateTokens(msg.content) + 50;
+      // ChatMessage memoises its token estimate (content is final), so a
+      // 200-message conversation pays the codeUnitAt walk exactly once
+      // per message across the lifetime of the session — not once per
+      // turn as the prior `_estimateTokens(msg.content)` call did.
+      final tokens = msg.estimatedContentTokens + 50;
       if (usedTokens + tokens > budget) break;
       reversed.add(msg.toApiFormat());
       usedTokens += tokens;
@@ -147,6 +150,15 @@ class ChatMessage {
     this.toolCalls,
     this.multimodalContent,
   });
+
+  /// Lazy memoised token estimate over [content]. Safe to cache because
+  /// [content] is final — value never goes stale. Call sites in the
+  /// conversation budgeter previously re-walked the string on every
+  /// `getMessagesForApi` invocation; with N=200 messages and multi-KB
+  /// payloads that was MBs of redundant work per turn.
+  int? _cachedTokens;
+  int get estimatedContentTokens =>
+      _cachedTokens ??= estimateTextTokens(content);
 
   Map<String, dynamic> toApiFormat() {
     final map = <String, dynamic>{'role': role};
