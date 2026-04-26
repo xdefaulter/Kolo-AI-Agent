@@ -95,6 +95,20 @@ class ResolvedToolCall {
     required this.arguments,
   });
 
+  /// OpenAI-shape `{id, type, function: {name, arguments}}` map.
+  /// Built lazily and cached: the same map is needed by `agent_loop`
+  /// (to append the assistant-with-tool-calls turn to the API message
+  /// list) AND by `agent_session` (to mirror that turn into the
+  /// conversation manager). Without memoisation a single tool call
+  /// pays for two outer + two inner Map allocations every turn — and
+  /// retryLastTurn re-pays them again.
+  Map<String, dynamic>? _apiFormat;
+  Map<String, dynamic> toApiFormat() => _apiFormat ??= {
+        'id': id,
+        'type': 'function',
+        'function': {'name': name, 'arguments': arguments},
+      };
+
   Map<String, dynamic> parseArguments() {
     if (arguments.isEmpty) return {};
     try {

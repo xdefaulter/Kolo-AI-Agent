@@ -217,12 +217,15 @@ class OpenAIClient {
                   reasoningContent: reasoningContent.isNotEmpty
                       ? reasoningContent
                       : null,
-                  toolCalls: toolCalls
-                      ?.map(
-                        (tc) =>
-                            ToolCallDelta.fromJson(tc as Map<String, dynamic>),
-                      )
-                      .toList(),
+                  // Stay lazy: the only consumer (`StreamingParser
+                  // .processToolCallDeltas`) iterates exactly once.
+                  // Materialising via `.toList()` here would allocate
+                  // a List wrapper per SSE chunk during tool calls
+                  // for nothing.
+                  toolCalls: toolCalls?.map(
+                    (tc) =>
+                        ToolCallDelta.fromJson(tc as Map<String, dynamic>),
+                  ),
                   finishReason: finishReason,
                   // Rare case: some providers attach usage to the final
                   // delta chunk instead of a separate choices=[] chunk.
@@ -376,7 +379,11 @@ class OpenAIClient {
 class ChatStreamChunk {
   final String content;
   final String? reasoningContent;
-  final List<ToolCallDelta>? toolCalls;
+  /// Lazy iterable of tool-call deltas for this chunk. Consumers must
+  /// iterate exactly once (which `StreamingParser.processToolCallDeltas`
+  /// does) — re-iterating a `MappedIterable` re-runs the JSON-decode
+  /// closure and would re-allocate every `ToolCallDelta`.
+  final Iterable<ToolCallDelta>? toolCalls;
   final String? finishReason;
   final String? error;
 

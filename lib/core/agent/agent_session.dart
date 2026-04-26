@@ -182,7 +182,10 @@ class AgentSession {
       isActive: true,
       kind: providerConfig.kind,
       modelPath: providerConfig.modelPath,
-      disabledTools: {...providerConfig.disabledTools},
+      // ApiProvider only reads from disabledTools; the source Set is
+      // already final on ProviderConfig + replaced wholesale on edits,
+      // so a defensive copy here was just per-send heap churn.
+      disabledTools: providerConfig.disabledTools,
     );
   }
 
@@ -356,15 +359,7 @@ class AgentSession {
       } else if (event is AgentToolCallsStart) {
         conversationManager.addAssistantToolCallMessage(
           '',
-          event.calls
-              .map(
-                (tc) => {
-                  'id': tc.id,
-                  'type': 'function',
-                  'function': {'name': tc.name, 'arguments': tc.arguments},
-                },
-              )
-              .toList(),
+          [for (final tc in event.calls) tc.toApiFormat()],
         );
       } else if (event is AgentCancelled) {
         // Preserve partial content
@@ -433,15 +428,7 @@ class AgentSession {
       } else if (event is AgentToolCallsStart) {
         conversationManager.addAssistantToolCallMessage(
           '',
-          event.calls
-              .map(
-                (tc) => {
-                  'id': tc.id,
-                  'type': 'function',
-                  'function': {'name': tc.name, 'arguments': tc.arguments},
-                },
-              )
-              .toList(),
+          [for (final tc in event.calls) tc.toApiFormat()],
         );
       }
       yield event;

@@ -125,15 +125,7 @@ class AgentLoop {
       currentMessages.add({
         'role': 'assistant',
         'content': fullContent.isNotEmpty ? fullContent : null,
-        'tool_calls': toolCalls
-            .map(
-              (tc) => {
-                'id': tc.id,
-                'type': 'function',
-                'function': {'name': tc.name, 'arguments': tc.arguments},
-              },
-            )
-            .toList(),
+        'tool_calls': [for (final tc in toolCalls) tc.toApiFormat()],
       });
 
       yield AgentToolCallsStart(calls: toolCalls);
