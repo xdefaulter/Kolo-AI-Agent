@@ -4,9 +4,8 @@ import 'tool_base.dart';
 
 /// Kinds of user/agent-defined tools supported by the runtime.
 ///
-/// - [shell]: renders a command template with sanitised arg values, then
-///   runs it via the platform shell (Android only; iOS has no exec
-///   primitive). Most flexible — can call any Termux-bootstrapped binary.
+/// - [shell]: legacy persisted kind. New shell tools cannot be created and
+///   legacy shell tools are not registered in the chat tool runtime.
 /// - [prompt]: delegates to a sub-LLM call with a custom system prompt
 ///   and a user-message template. Works everywhere. No code execution.
 /// - [composed]: expands into a sequence of existing tool calls with
@@ -45,7 +44,7 @@ class CustomToolDef {
   final ToolPermission permission;
   final CustomToolKind kind;
 
-  /// Kind-specific config. For [CustomToolKind.shell]:
+  /// Kind-specific config. For legacy [CustomToolKind.shell]:
   ///   `{ 'command': String, 'timeoutSec': int? }`
   /// For [CustomToolKind.prompt]:
   ///   `{ 'systemPrompt': String, 'userTemplate': String }`

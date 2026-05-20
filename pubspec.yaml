@@ -21,6 +21,8 @@ dependencies:
   flutter_secure_storage: ^9.0.0
   path_provider: ^2.1.0
   path: ^1.9.0
+  sqflite: ^2.3.3
+  sqflite_common_ffi: ^2.3.3
 
   # UI
   flutter_markdown: ^0.7.0
@@ -36,6 +38,13 @@ dependencies:
   # Utility
   uuid: ^4.3.0
   qr_flutter: ^4.1.0
+  archive: ^3.6.0
+  # Note: on-device llama.cpp is NOT an in-process FFI binding. Instead
+  # we spawn the Termux-packaged `llama-server` binary (installed via
+  # our bootstrap's `apt install llama-cpp`) and talk to it over loopback
+  # HTTP using the existing OpenAIClient. That gives us HEAD-of-main
+  # llama.cpp + native tool-calling with zero native-build maintenance.
+  # Handled by lib/core/llm/llama_server_service.dart.
 
   # Local server
   shelf: ^1.4.0

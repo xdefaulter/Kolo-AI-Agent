@@ -2,10 +2,15 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 import 'package:dio/dio.dart';
+import 'chat_client.dart';
 import 'provider.dart';
 
-/// OpenAI-compatible API client with streaming support
-class OpenAIClient {
+/// OpenAI-compatible API client with streaming support.
+///
+/// Implements [ChatClient] so callers (agent session, custom `prompt`
+/// tools, future sub-LLM paths) can be written against the interface
+/// and swap in `LlamaCppClient` with zero code changes.
+class OpenAIClient implements ChatClient {
   final Dio _dio;
   final ApiProvider provider;
 
@@ -52,6 +57,7 @@ class OpenAIClient {
   }
 
   /// Cancel any active stream
+  @override
   void cancel() {
     _cancelToken?.cancel('User cancelled');
     _cancelToken = null;
@@ -59,6 +65,7 @@ class OpenAIClient {
 
   /// Evict stale idle connections from the Dio connection pool.
   /// Safe to call on app resume — does NOT destroy the adapter.
+  @override
   void closeConnections() {
     // close(force:true) permanently kills the adapter, causing all subsequent
     // requests to fail. Instead, just create a new adapter to discard stale
@@ -67,6 +74,7 @@ class OpenAIClient {
   }
 
   /// Send a streaming chat completion request
+  @override
   Stream<ChatStreamChunk> chatStream({
     required List<Map<String, dynamic>> messages,
     required List<Map<String, dynamic>> tools,
@@ -164,14 +172,16 @@ class OpenAIClient {
           }
 
           // Success — process the SSE stream.
-          // sseBuf accumulates partial lines across network chunks using
-          // StringBuffer (O(1) amortized) instead of String += (O(n²)).
-          // indexOf with a start offset scans each line once, not twice.
-          final sseBuf = StringBuffer();
+          // `pending` holds any partial trailing line carried over from
+          // the previous network chunk. The vast majority of chunks end
+          // on a `\n` boundary, so `pending` is empty and we operate
+          // directly on the freshly-decoded piece — no StringBuffer
+          // materialise-and-clear cycle per chunk, no intermediate copy
+          // of the full accumulator on each iteration.
+          String pending = '';
           await for (final chunk in response.data!.stream) {
-            sseBuf.write(utf8.decode(chunk, allowMalformed: true));
-            var raw = sseBuf.toString();
-            sseBuf.clear();
+            final piece = utf8.decode(chunk, allowMalformed: true);
+            final raw = pending.isEmpty ? piece : (pending + piece);
 
             int start = 0;
             while (true) {
@@ -236,7 +246,7 @@ class OpenAIClient {
               }
             }
             // Preserve any partial line (no trailing \n) for the next chunk.
-            if (start < raw.length) sseBuf.write(raw.substring(start));
+            pending = (start < raw.length) ? raw.substring(start) : '';
           }
           // Stream ended naturally
           return;

@@ -6,7 +6,6 @@ import '../tools/tool_registry.dart';
 import '../tools/skills.dart';
 import '../tools/custom_tools_state.dart';
 import '../memory/memory_service.dart';
-import '../environment/environment_probe.dart';
 import 'agent_metrics.dart';
 import '../tools/android/scan_phone_apps.dart';
 import '../permissions/permission_manager.dart';
@@ -96,18 +95,13 @@ class AgentSession {
 
   /// Cached skills manifest — rebuilt once per session. Skills added
   /// mid-session won't appear until a new chat or app relaunch, which
-  /// is fine (the agent can still read them with list_skills + read_file).
+  /// is fine (the agent can still read them with list_skills + read_skill).
   String? _skillsManifest;
 
   /// Rebuilt per-turn inside [sendMessage]. Empty when memory recall is
   /// disabled or no memories match. Kept as a field so the `messages` getter
   /// can stay a pure transform without taking args.
   String _memoriesBlock = '';
-
-  /// Cached shell-environment snapshot (python/node/git availability etc).
-  /// Probed once on first send — the state doesn't change during a chat
-  /// session, so we don't pay the cost on every turn.
-  String? _environmentBlock;
 
   AgentSession._({
     required this.registry,
@@ -246,7 +240,6 @@ class AgentSession {
           appIntentsSummary: _appIntentsSummary,
           skillsManifest: _skillsManifest,
           memoriesBlock: _memoriesBlock,
-          environmentBlock: _environmentBlock,
         ),
       );
 
@@ -292,8 +285,6 @@ class AgentSession {
     String? intentsResult = _appIntentsSummary;
     String? skillsResult = _skillsManifest;
     String memoriesResult = '';
-    String envResult = '';
-
     final pendingFutures = <Future<void>>[
       if (_appIntentsSummary == null)
         loadAppIntentsSummary()
@@ -310,18 +301,12 @@ class AgentSession {
           .buildRecallBlock(text, enabled: memRecallEnabled)
           .then<void>((v) => memoriesResult = v)
           .catchError((_) {}),
-      if (_environmentBlock == null)
-        EnvironmentProbe.probe()
-            .then((s) => s.toPromptBlock())
-            .then<void>((v) => envResult = v)
-            .catchError((_) {}),
     ];
     await Future.wait(pendingFutures);
 
     _appIntentsSummary = intentsResult;
     _skillsManifest = skillsResult;
     _memoriesBlock = memoriesResult;
-    _environmentBlock ??= envResult;
 
     // Add user message to conversation — support vision (images)
     if (imageAttachments != null && imageAttachments.isNotEmpty) {
@@ -368,10 +353,9 @@ class AgentSession {
               : 'Error: ${event.result.error}',
         );
       } else if (event is AgentToolCallsStart) {
-        conversationManager.addAssistantToolCallMessage(
-          '',
-          [for (final tc in event.calls) tc.toApiFormat()],
-        );
+        conversationManager.addAssistantToolCallMessage('', [
+          for (final tc in event.calls) tc.toApiFormat(),
+        ]);
       } else if (event is AgentCancelled) {
         // Preserve partial content
         if (event.partialContent.isNotEmpty) {
@@ -438,10 +422,9 @@ class AgentSession {
               : 'Error: ${event.result.error}',
         );
       } else if (event is AgentToolCallsStart) {
-        conversationManager.addAssistantToolCallMessage(
-          '',
-          [for (final tc in event.calls) tc.toApiFormat()],
-        );
+        conversationManager.addAssistantToolCallMessage('', [
+          for (final tc in event.calls) tc.toApiFormat(),
+        ]);
       }
       yield event;
     }
@@ -581,12 +564,14 @@ class AgentSessionNotifier extends StateNotifier<AgentSessionState> {
       contentStrLen = contentStr.length;
       return contentStr;
     }
+
     String thinkingNow() {
       if (thinkingBuffer.length == thinkingStrLen) return thinkingStr;
       thinkingStr = thinkingBuffer.toString();
       thinkingStrLen = thinkingStr.length;
       return thinkingStr;
     }
+
     final toolCalls = <AgentToolCallsStart>[];
     final toolResults = <AgentToolResult>[];
     try {

@@ -5,8 +5,10 @@ import '../storage/database.dart';
 enum ToolPermissionMode {
   /// Always allow, no prompt
   alwaysAllow,
+
   /// Ask every time
   askEveryTime,
+
   /// Always deny
   neverAllow,
 }
@@ -17,21 +19,37 @@ class PermissionManager {
   bool autoApprove = false;
 
   // Callbacks set by UI layer
-  Future<bool> Function(String toolName, Map<String, dynamic> params, ToolPermission permission)? promptUser;
-  Future<bool> Function(String toolName, Map<String, dynamic> params, ToolPermission permission)? biometricPrompt;
+  Future<bool> Function(
+    String toolName,
+    Map<String, dynamic> params,
+    ToolPermission permission,
+  )?
+  promptUser;
+  Future<bool> Function(
+    String toolName,
+    Map<String, dynamic> params,
+    ToolPermission permission,
+  )?
+  biometricPrompt;
 
-  /// Get the permission mode for a tool
+  /// Get the permission mode for a tool.
+  /// A tool that hasn't been registered yet defaults to [askEveryTime] —
+  /// never silently auto-allow an unknown tool even if its `ToolPermission`
+  /// would normally be `safe`. `initDefaults` should be called on startup to
+  /// populate real modes; this fallback is defense-in-depth for tools added
+  /// at runtime or after an install upgrade.
   ToolPermissionMode getMode(String toolName) {
-    return _toolModes[toolName] ?? _defaultModeForPermission(
-      // This is a fallback — callers should use the tool's actual permission
-      ToolPermission.safe,
-    );
+    return _toolModes[toolName] ?? ToolPermissionMode.askEveryTime;
   }
 
   /// Set the permission mode for a tool.
   /// [persist] controls whether to save to DB — false when called from
   /// ToolPermissionModesNotifier which handles its own persistence.
-  void setMode(String toolName, ToolPermissionMode mode, {bool persist = true}) {
+  void setMode(
+    String toolName,
+    ToolPermissionMode mode, {
+    bool persist = true,
+  }) {
     _toolModes[toolName] = mode;
     if (persist) _persistSettings();
   }
@@ -58,16 +76,23 @@ class PermissionManager {
   /// Initialize default modes for all tools
   void initDefaults(List<KoloTool> tools) {
     for (final tool in tools) {
-      _toolModes.putIfAbsent(tool.name, () => _defaultModeForPermission(tool.permission));
+      _toolModes.putIfAbsent(
+        tool.name,
+        () => _defaultModeForPermission(tool.permission),
+      );
     }
     _persistSettings();
   }
 
   /// Load persisted permission settings from DB
   Future<void> loadPersistedSettings() async {
-    final alwaysStr = await AppDatabase.instance.getSetting('always_allow_tools');
+    final alwaysStr = await AppDatabase.instance.getSetting(
+      'always_allow_tools',
+    );
     final neverStr = await AppDatabase.instance.getSetting('never_allow_tools');
-    final modesStr = await AppDatabase.instance.getSetting('tool_permission_modes');
+    final modesStr = await AppDatabase.instance.getSetting(
+      'tool_permission_modes',
+    );
 
     // Legacy support: old always/never strings
     if (alwaysStr != null && alwaysStr.isNotEmpty) {
@@ -132,6 +157,9 @@ class PermissionManager {
     required String toolName,
     required Map<String, dynamic> params,
   }) async {
+    // At call-site we know the tool's real permission, so we can use the
+    // tiered default (safe -> alwaysAllow, sensitive/dangerous -> askEveryTime).
+    // This is safe because checkPermission is only called with a real tool.
     final mode = _toolModes[toolName] ?? _defaultModeForPermission(permission);
 
     switch (mode) {

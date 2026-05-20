@@ -1,4 +1,5 @@
 import 'dart:async';
+import '../api/chat_client.dart';
 import '../api/openai_client.dart';
 import '../api/streaming_parser.dart';
 import '../tools/tool_base.dart';
@@ -7,7 +8,7 @@ import 'tool_router.dart';
 /// The core agent think-act-observe loop
 class AgentLoop {
   final ToolRouter toolRouter;
-  final OpenAIClient client;
+  final ChatClient client;
   final Completer<void>? cancelToken;
   final int maxIterations;
 

@@ -1,0 +1,12 @@
+# Copy to `android/key.properties` and fill in. This file is gitignored.
+#
+# To generate a fresh keystore (one-time, keep it safe):
+#   keytool -genkey -v -keystore ~/kolo-release.jks \
+#           -keyalg RSA -keysize 2048 -validity 10000 -alias kolo
+#
+# Then point storeFile at an ABSOLUTE path (resolved relative to the
+# `android/` directory) or keep the keystore under `android/`.
+storeFile=../kolo-release.jks
+storePassword=REPLACE_ME
+keyAlias=kolo
+keyPassword=REPLACE_ME

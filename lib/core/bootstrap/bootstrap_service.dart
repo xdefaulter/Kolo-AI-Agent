@@ -1,14 +1,13 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:archive/archive.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// Manages download & setup of Termux-compiled tools (python3, node, git,
-/// aapt2, openjdk-17, clang) into app-private storage so they are natively
-/// available through [ShellExecTool].
+/// Manages setup for bundled local binaries used by on-device model support.
 ///
 /// Packages are downloaded from the official Termux repository on first launch:
 ///   https://packages.termux.dev/apt/termux-main
@@ -94,8 +93,7 @@ class BootstrapService {
   Map<String, String> get fullEnvironment =>
       _fullEnvCache ??= {...Platform.environment, ...environment};
 
-  /// Full environment map to inject into shell processes. Cached because it's
-  /// read on every shell_exec invocation.
+  /// Full environment map for bundled local binaries.
   Map<String, String> get environment {
     return _envCache ??= {
       'PREFIX': prefixPath,
@@ -373,11 +371,7 @@ class BootstrapService {
   ///
   /// Uses BytesBuilder (dart:io) instead of List<int> to avoid the
   /// repeated O(n) reallocation that add/addAll caused on a growable list.
-  List<int> _replaceBytes(
-    List<int> content,
-    Uint8List from,
-    Uint8List to,
-  ) {
+  List<int> _replaceBytes(List<int> content, Uint8List from, Uint8List to) {
     final out = BytesBuilder(copy: false);
     final fl = from.length;
     final cl = content.length;

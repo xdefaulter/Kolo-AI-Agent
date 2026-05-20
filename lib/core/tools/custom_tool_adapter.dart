@@ -1,17 +1,12 @@
-import 'dart:async';
-import 'dart:io';
-
 import 'custom_tool_def.dart';
 import 'tool_base.dart';
-import '../bootstrap/bootstrap_service.dart';
 
 /// Runtime wrapper that presents a [CustomToolDef] to the agent as a
 /// regular [KoloTool]. Dispatches by [CustomToolDef.kind] to the right
 /// concrete implementation.
 ///
-/// Currently only `shell` kind is supported. `prompt` and `composed`
-/// throw a friendly error when executed, so they can be saved and
-/// surfaced in Settings while the runtime catches up.
+/// Shell custom tools are retained only as a legacy persisted kind; they
+/// are no longer executed or registered by the chat tool bootstrap.
 class CustomToolAdapter extends KoloTool {
   final CustomToolDef def;
   CustomToolAdapter(this.def);
@@ -30,13 +25,7 @@ class CustomToolAdapter extends KoloTool {
 
   @override
   ToolPlatform get platform {
-    // shell tools can only run on Android (we have a bootstrapped shell).
-    // prompt/composed run anywhere.
-    // shell kind is Android-only (needs /system/bin/sh); other kinds run
-    // everywhere. `ToolPlatform.all` is the enum's cross-platform value.
-    return def.kind == CustomToolKind.shell
-        ? ToolPlatform.android
-        : ToolPlatform.all;
+    return ToolPlatform.all;
   }
 
   @override
@@ -47,7 +36,9 @@ class CustomToolAdapter extends KoloTool {
     try {
       switch (def.kind) {
         case CustomToolKind.shell:
-          return await _executeShell(params);
+          return ToolResult.err(
+            'Shell custom tools are disabled in this chat build.',
+          );
         case CustomToolKind.prompt:
           return await _executePrompt(params, context);
         case CustomToolKind.composed:
@@ -150,9 +141,9 @@ class CustomToolAdapter extends KoloTool {
       }
       final res = await run(toolName, resolvedArgs);
       if (!res.success) {
-        return ToolResult.err('Step $i (${toolName}) failed: ${res.error}');
+        return ToolResult.err('Step $i ($toolName) failed: ${res.error}');
       }
-      outputs.add('[step $i ${toolName}]\n${res.output}');
+      outputs.add('[step $i $toolName]\n${res.output}');
       tplCtx['_previous'] = res.output;
     }
 
@@ -164,57 +155,5 @@ class CustomToolAdapter extends KoloTool {
         'stepCount': steps.length,
       },
     );
-  }
-
-  Future<ToolResult> _executeShell(Map<String, dynamic> params) async {
-    if (!Platform.isAndroid) {
-      return ToolResult.err(
-        'Shell-kind custom tools only run on Android (needs the Termux bootstrap).',
-      );
-    }
-    final impl = def.implementation;
-    final template = impl['command'] as String?;
-    if (template == null || template.isEmpty) {
-      return ToolResult.err('Tool definition missing "command" template.');
-    }
-    final timeoutSec = (impl['timeoutSec'] as num?)?.toInt() ?? 60;
-
-    final rendered = renderTemplate(template, params);
-
-    // Inject the Termux bootstrap env (PATH etc.) when available so the
-    // command can resolve python3, node, etc. the same way ShellExecTool
-    // does. Custom tools share that sandbox.
-    Map<String, String>? env;
-    final bootstrap = BootstrapService.instance;
-    if (bootstrap.isReady) {
-      // fullEnvironment is cached — avoids copying ~200 Platform.environment
-      // entries on every tool invocation.
-      env = bootstrap.fullEnvironment;
-    }
-
-    try {
-      final result = await Process.run('/system/bin/sh', [
-        '-c',
-        rendered,
-      ], environment: env).timeout(Duration(seconds: timeoutSec));
-      final buf = StringBuffer();
-      if (result.stdout.toString().isNotEmpty) buf.writeln(result.stdout);
-      if (result.stderr.toString().isNotEmpty) {
-        buf.writeln('STDERR: ${result.stderr}');
-      }
-      final output = buf.toString().trim();
-      return ToolResult.ok(
-        output.isEmpty ? '(no output, exit ${result.exitCode})' : output,
-        metadata: {
-          'exitCode': result.exitCode,
-          'customToolId': def.id,
-          'renderedCommand': rendered,
-        },
-      );
-    } on TimeoutException {
-      return ToolResult.err(
-        'Custom tool "${def.name}" timed out after ${timeoutSec}s',
-      );
-    }
   }
 }

@@ -11,14 +11,19 @@ void main() {
       expect(registry.all.length, greaterThanOrEqualTo(22));
 
       // Check core tools exist
-      expect(registry.get('read_file'), isNotNull);
-      expect(registry.get('write_file'), isNotNull);
       expect(registry.get('calculator'), isNotNull);
       expect(registry.get('web_search'), isNotNull);
+      expect(registry.get('list_skills'), isNotNull);
+      expect(registry.get('read_skill'), isNotNull);
       expect(registry.get('clipboard_read'), isNotNull);
       expect(registry.get('clipboard_write'), isNotNull);
-      expect(registry.get('shell_exec'), isNotNull);
       expect(registry.get('http_get'), isNotNull);
+
+      // Coding tools are intentionally not registered in the chat app.
+      expect(registry.get('read_file'), isNull);
+      expect(registry.get('write_file'), isNull);
+      expect(registry.get('shell_exec'), isNull);
+      expect(registry.get('run_flutter_task'), isNull);
     });
 
     test('getFunctionDefinitions returns valid OpenAI format', () {
@@ -127,7 +132,10 @@ void main() {
         role: 'assistant',
         content: 'Hello',
         toolCalls: [
-          {'type': 'function', 'function': {'name': 'test', 'arguments': '{}'}},
+          {
+            'type': 'function',
+            'function': {'name': 'test', 'arguments': '{}'},
+          },
         ],
       );
       final api = msg.toApiFormat();

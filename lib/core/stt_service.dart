@@ -21,11 +21,13 @@ class SttService {
   bool get isListening => _speech.isListening;
 
   /// Stream of partial (interim) recognition results
-  final StreamController<String> _partialController = StreamController<String>.broadcast();
+  final StreamController<String> _partialController =
+      StreamController<String>.broadcast();
   Stream<String> get partialResults => _partialController.stream;
 
   /// Stream of final recognition results
-  final StreamController<String> _resultController = StreamController<String>.broadcast();
+  final StreamController<String> _resultController =
+      StreamController<String>.broadcast();
   Stream<String> get finalResults => _resultController.stream;
 
   /// Initialize the speech engine. Call once at app startup.
@@ -58,7 +60,7 @@ class SttService {
       partialResults: true,
       cancelOnError: true,
       listenFor: const Duration(seconds: 60), // Max listen duration
-      pauseFor: const Duration(seconds: 3),    // Auto-stop after 3s silence
+      pauseFor: const Duration(seconds: 3), // Auto-stop after 3s silence
     );
   }
 
@@ -108,6 +110,14 @@ class SttService {
     // We handle state transitions via isListening
   }
 
-  // Singleton lives for app lifetime — no dispose needed.
-  // StreamControllers are broadcast and never closed.
+  /// Release resources held by the STT engine. The singleton is designed to
+  /// live for the whole app, but tests / hot-restart / explicit teardown
+  /// should call this to avoid leaking the StreamControllers.
+  Future<void> dispose() async {
+    if (_speech.isListening) {
+      await _speech.cancel();
+    }
+    if (!_partialController.isClosed) await _partialController.close();
+    if (!_resultController.isClosed) await _resultController.close();
+  }
 }

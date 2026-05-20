@@ -1,5 +1,38 @@
 import 'package:uuid/uuid.dart';
 
+/// How a provider delivers completions. Determines which client the
+/// agent session spins up — OpenAI-compatible HTTP vs on-device llama.cpp
+/// FFI — without either side needing to know about the other.
+enum ProviderKind {
+  /// Any HTTP backend that speaks OpenAI's /v1/chat/completions dialect.
+  /// Covers OpenAI, Groq, OpenRouter, Fireworks, Together, Ollama, and
+  /// most self-hosted inference servers.
+  openaiCompat,
+
+  /// On-device inference via a bundled llama.cpp binding. `modelPath`
+  /// points at a .gguf file in app-private storage; no network at all.
+  localLlama;
+
+  String get wire {
+    switch (this) {
+      case ProviderKind.openaiCompat:
+        return 'openai';
+      case ProviderKind.localLlama:
+        return 'local-llama';
+    }
+  }
+
+  static ProviderKind fromWire(String? raw) {
+    switch (raw) {
+      case 'local-llama':
+        return ProviderKind.localLlama;
+      case 'openai':
+      default:
+        return ProviderKind.openaiCompat;
+    }
+  }
+}
+
 /// Lightweight provider config passed to OpenAIClient.
 /// Created from a ProviderConfig + selected ModelConfig.
 class ApiProvider {
@@ -13,6 +46,21 @@ class ApiProvider {
   final double temperature;
   final bool isActive;
 
+  /// Provider kind copied from the parent ProviderConfig. Downstream
+  /// clients dispatch on this so `AgentSession` never hard-codes which
+  /// network client to use.
+  final ProviderKind kind;
+
+  /// Absolute path to a local GGUF file. Required when [kind] is
+  /// `localLlama`; ignored for `openaiCompat`.
+  final String? modelPath;
+
+  /// Tools the agent must NOT call while using this provider. Small
+  /// local models tend to hallucinate into complex tool schemas; this
+  /// list lets the user shrink the tool surface per-provider without
+  /// disabling the tool globally.
+  final Set<String> disabledTools;
+
   ApiProvider({
     required this.id,
     required this.name,
@@ -23,6 +71,9 @@ class ApiProvider {
     this.maxTokens = 4096,
     this.temperature = 0.7,
     this.isActive = true,
+    this.kind = ProviderKind.openaiCompat,
+    this.modelPath,
+    this.disabledTools = const {},
   });
 }
 
@@ -39,6 +90,26 @@ class ProviderConfig {
   DateTime createdAt;
   DateTime updatedAt;
 
+  /// Delivery mechanism (HTTP OAI vs on-device llama.cpp). Drives which
+  /// client `AgentSession` spins up for this provider.
+  ProviderKind kind;
+
+  /// Absolute path to a local GGUF model file. Only meaningful when
+  /// [kind] is [ProviderKind.localLlama]. Settable after creation so
+  /// the HF-download flow can fill it in.
+  String? modelPath;
+
+  /// Tools this provider is NOT allowed to call. Checked in addition to
+  /// the global per-tool permission gate — useful for small local models
+  /// that can't reliably format complex tool schemas.
+  Set<String> disabledTools;
+
+  /// Opt-in "safe-by-default for a small local model" preset. When true,
+  /// the agent session auto-hides any tool whose permission is
+  /// `dangerous` (plus composed / meta tools) on top of [disabledTools].
+  /// User can still toggle individual entries back on.
+  bool smallModelMode;
+
   /// Models available under this provider
   List<ModelConfig> models;
 
@@ -53,10 +124,15 @@ class ProviderConfig {
     DateTime? createdAt,
     DateTime? updatedAt,
     List<ModelConfig>? models,
+    this.kind = ProviderKind.openaiCompat,
+    this.modelPath,
+    Set<String>? disabledTools,
+    this.smallModelMode = false,
   })  : id = id ?? const Uuid().v4(),
         createdAt = createdAt ?? DateTime.now(),
         updatedAt = updatedAt ?? DateTime.now(),
-        models = models ?? [];
+        models = models ?? [],
+        disabledTools = disabledTools ?? <String>{};
 
   /// Whether this is a local/self-hosted provider (no API key needed)
   bool get isLocal => apiKey.isEmpty;
@@ -88,6 +164,10 @@ class ProviderConfig {
     bool? isActive,
     String? modelsEndpoint,
     List<ModelConfig>? models,
+    ProviderKind? kind,
+    String? modelPath,
+    Set<String>? disabledTools,
+    bool? smallModelMode,
   }) {
     return ProviderConfig(
       id: id,
@@ -100,6 +180,10 @@ class ProviderConfig {
       createdAt: createdAt,
       updatedAt: DateTime.now(),
       models: models ?? this.models,
+      kind: kind ?? this.kind,
+      modelPath: modelPath ?? this.modelPath,
+      disabledTools: disabledTools ?? this.disabledTools,
+      smallModelMode: smallModelMode ?? this.smallModelMode,
     );
   }
 
@@ -115,6 +199,10 @@ class ProviderConfig {
         'createdAt': createdAt.toIso8601String(),
         'updatedAt': updatedAt.toIso8601String(),
         'models': models.map((m) => m.toMap()).toList(),
+        'kind': kind.wire,
+        'modelPath': modelPath,
+        'disabledTools': disabledTools.toList(),
+        'smallModelMode': smallModelMode,
       };
 
   /// Serialize without API key — for SharedPreferences persistence.
@@ -130,6 +218,10 @@ class ProviderConfig {
         'createdAt': createdAt.toIso8601String(),
         'updatedAt': updatedAt.toIso8601String(),
         'models': models.map((m) => m.toMap()).toList(),
+        'kind': kind.wire,
+        'modelPath': modelPath,
+        'disabledTools': disabledTools.toList(),
+        'smallModelMode': smallModelMode,
       };
 
   factory ProviderConfig.fromMap(Map<String, dynamic> m) => ProviderConfig(
@@ -146,6 +238,13 @@ class ProviderConfig {
                 ?.map((e) => ModelConfig.fromMap(e as Map<String, dynamic>))
                 .toList() ??
             [],
+        kind: ProviderKind.fromWire(m['kind'] as String?),
+        modelPath: m['modelPath'] as String?,
+        disabledTools: (m['disabledTools'] as List<dynamic>?)
+                ?.map((e) => e.toString())
+                .toSet() ??
+            <String>{},
+        smallModelMode: m['smallModelMode'] as bool? ?? false,
       );
 }
 

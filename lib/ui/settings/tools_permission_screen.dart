@@ -1,23 +1,26 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/tools/tool_base.dart';
-import '../../core/tools/tool_bootstrap.dart';
-import '../../core/tools/tool_registry.dart';
-import '../../core/tools/android/phone_control_mode.dart';
 import '../../core/permissions/permission_manager.dart';
 import '../../core/storage/database.dart';
 import '../../core/agent/agent_session.dart';
 
 // 3.5: Reuse the shared tool registry instead of creating a separate one.
 import '../chat/chat_screen.dart' show toolRegistryProvider;
+
 final toolsScreenRegistryProvider = toolRegistryProvider;
 
 // Permission modes state
-final toolPermissionModesProvider = StateNotifierProvider<ToolPermissionModesNotifier, Map<String, ToolPermissionMode>>((ref) {
-  return ToolPermissionModesNotifier(ref);
-});
+final toolPermissionModesProvider =
+    StateNotifierProvider<
+      ToolPermissionModesNotifier,
+      Map<String, ToolPermissionMode>
+    >((ref) {
+      return ToolPermissionModesNotifier(ref);
+    });
 
-class ToolPermissionModesNotifier extends StateNotifier<Map<String, ToolPermissionMode>> {
+class ToolPermissionModesNotifier
+    extends StateNotifier<Map<String, ToolPermissionMode>> {
   final Ref _ref;
   ToolPermissionModesNotifier(this._ref) : super({}) {
     _loadFromDb();
@@ -84,21 +87,72 @@ class ToolPermissionModesNotifier extends StateNotifier<Map<String, ToolPermissi
   }
 }
 
-class ToolsPermissionScreen extends ConsumerWidget {
+class ToolsPermissionScreen extends ConsumerStatefulWidget {
   const ToolsPermissionScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<ToolsPermissionScreen> createState() =>
+      _ToolsPermissionScreenState();
+}
+
+class _ToolsPermissionScreenState extends ConsumerState<ToolsPermissionScreen> {
+  final _searchController = TextEditingController();
+
+  /// Lowercase cache so we don't `.toLowerCase()` per-keystroke on every tool.
+  /// 50+ tools × every keystroke adds up; caching drops it to a single pass
+  /// per search change.
+  List<_IndexedTool>? _index;
+  String _query = '';
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final registry = ref.watch(toolsScreenRegistryProvider);
     final modes = ref.watch(toolPermissionModesProvider);
     final tools = registry.all;
 
-    // Group tools by permission level
-    final safeTools = tools.where((t) => t.permission == ToolPermission.safe).toList();
-    final sensitiveTools = tools.where((t) => t.permission == ToolPermission.sensitive).toList();
-    final dangerousTools = tools.where((t) => t.permission == ToolPermission.dangerous).toList();
+    // Rebuild lowercase-cached index only when the tool list changes.
+    if (_index == null || _index!.length != tools.length) {
+      _index = [
+        for (final t in tools)
+          _IndexedTool(
+            tool: t,
+            nameLower: t.name.toLowerCase(),
+            descLower: t.description.toLowerCase(),
+          ),
+      ];
+    }
 
-    final enabledCount = tools.where((t) => modes[t.name] != ToolPermissionMode.neverAllow).length;
+    final q = _query.trim().toLowerCase();
+    final filtered = q.isEmpty
+        ? _index!
+        : [
+            for (final idx in _index!)
+              if (idx.nameLower.contains(q) || idx.descLower.contains(q)) idx,
+          ];
+
+    final safe = <_IndexedTool>[];
+    final sensitive = <_IndexedTool>[];
+    final dangerous = <_IndexedTool>[];
+    for (final idx in filtered) {
+      switch (idx.tool.permission) {
+        case ToolPermission.safe:
+          safe.add(idx);
+        case ToolPermission.sensitive:
+          sensitive.add(idx);
+        case ToolPermission.dangerous:
+          dangerous.add(idx);
+      }
+    }
+
+    final enabledCount = tools
+        .where((t) => modes[t.name] != ToolPermissionMode.neverAllow)
+        .length;
 
     return Scaffold(
       appBar: AppBar(
@@ -123,57 +177,164 @@ class ToolsPermissionScreen extends ConsumerWidget {
               }
             },
             itemBuilder: (_) => [
-              const PopupMenuItem(value: 'enable_all', child: Text('Enable All')),
+              const PopupMenuItem(
+                value: 'enable_all',
+                child: Text('Enable All'),
+              ),
               const PopupMenuItem(value: 'ask_all', child: Text('Ask for All')),
-              const PopupMenuItem(value: 'disable_all', child: Text('Disable All')),
-              const PopupMenuItem(value: 'reset', child: Text('Reset to Defaults')),
+              const PopupMenuItem(
+                value: 'disable_all',
+                child: Text('Disable All'),
+              ),
+              const PopupMenuItem(
+                value: 'reset',
+                child: Text('Reset to Defaults'),
+              ),
             ],
           ),
         ],
       ),
-      body: ListView(
-        padding: const EdgeInsets.symmetric(vertical: 8),
+      body: Column(
         children: [
-          _SectionHeader(
-            icon: Icons.check_circle_outline,
-            title: 'Safe',
-            subtitle: 'Auto-approved, no risk',
-            color: Colors.green,
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+            child: TextField(
+              controller: _searchController,
+              onChanged: (v) => setState(() => _query = v),
+              textInputAction: TextInputAction.search,
+              decoration: InputDecoration(
+                hintText: 'Search tools…',
+                prefixIcon: const Icon(Icons.search, size: 20),
+                suffixIcon: _query.isEmpty
+                    ? null
+                    : IconButton(
+                        icon: const Icon(Icons.close, size: 18),
+                        tooltip: 'Clear search',
+                        onPressed: () {
+                          _searchController.clear();
+                          setState(() => _query = '');
+                        },
+                      ),
+                isDense: true,
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 10,
+                ),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(10),
+                ),
+              ),
+            ),
           ),
-          ...safeTools.map((t) => _ToolTile(
-            tool: t,
-            mode: modes[t.name] ?? ToolPermissionMode.alwaysAllow,
-            onChanged: (mode) => ref.read(toolPermissionModesProvider.notifier).setMode(t.name, mode),
-          )),
-          const SizedBox(height: 16),
-          _SectionHeader(
-            icon: Icons.warning_amber_outlined,
-            title: 'Sensitive',
-            subtitle: 'May access personal data or make changes',
-            color: Colors.orange,
+          Expanded(
+            child: filtered.isEmpty
+                ? Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          Icons.search_off,
+                          size: 40,
+                          color: Theme.of(
+                            context,
+                          ).colorScheme.onSurface.withValues(alpha: 0.3),
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          'No tools match "$_query"',
+                          style: Theme.of(context).textTheme.bodyMedium
+                              ?.copyWith(
+                                color: Theme.of(
+                                  context,
+                                ).colorScheme.onSurface.withValues(alpha: 0.5),
+                              ),
+                        ),
+                      ],
+                    ),
+                  )
+                : ListView(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    children: [
+                      if (safe.isNotEmpty) ...[
+                        const _SectionHeader(
+                          icon: Icons.check_circle_outline,
+                          title: 'Safe',
+                          subtitle: 'Auto-approved, no risk',
+                          color: Colors.green,
+                        ),
+                        ...safe.map(
+                          (t) => _ToolTile(
+                            tool: t.tool,
+                            mode:
+                                modes[t.tool.name] ??
+                                ToolPermissionMode.alwaysAllow,
+                            onChanged: (m) => ref
+                                .read(toolPermissionModesProvider.notifier)
+                                .setMode(t.tool.name, m),
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                      ],
+                      if (sensitive.isNotEmpty) ...[
+                        const _SectionHeader(
+                          icon: Icons.warning_amber_outlined,
+                          title: 'Sensitive',
+                          subtitle: 'May access personal data or make changes',
+                          color: Colors.orange,
+                        ),
+                        ...sensitive.map(
+                          (t) => _ToolTile(
+                            tool: t.tool,
+                            mode:
+                                modes[t.tool.name] ??
+                                ToolPermissionMode.askEveryTime,
+                            onChanged: (m) => ref
+                                .read(toolPermissionModesProvider.notifier)
+                                .setMode(t.tool.name, m),
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                      ],
+                      if (dangerous.isNotEmpty) ...[
+                        const _SectionHeader(
+                          icon: Icons.dangerous_outlined,
+                          title: 'Dangerous',
+                          subtitle: 'Destructive or irreversible actions',
+                          color: Colors.red,
+                        ),
+                        ...dangerous.map(
+                          (t) => _ToolTile(
+                            tool: t.tool,
+                            mode:
+                                modes[t.tool.name] ??
+                                ToolPermissionMode.askEveryTime,
+                            onChanged: (m) => ref
+                                .read(toolPermissionModesProvider.notifier)
+                                .setMode(t.tool.name, m),
+                          ),
+                        ),
+                      ],
+                      const SizedBox(height: 32),
+                    ],
+                  ),
           ),
-          ...sensitiveTools.map((t) => _ToolTile(
-            tool: t,
-            mode: modes[t.name] ?? ToolPermissionMode.askEveryTime,
-            onChanged: (mode) => ref.read(toolPermissionModesProvider.notifier).setMode(t.name, mode),
-          )),
-          const SizedBox(height: 16),
-          _SectionHeader(
-            icon: Icons.dangerous_outlined,
-            title: 'Dangerous',
-            subtitle: 'Destructive or irreversible actions',
-            color: Colors.red,
-          ),
-          ...dangerousTools.map((t) => _ToolTile(
-            tool: t,
-            mode: modes[t.name] ?? ToolPermissionMode.askEveryTime,
-            onChanged: (mode) => ref.read(toolPermissionModesProvider.notifier).setMode(t.name, mode),
-          )),
-          const SizedBox(height: 32),
         ],
       ),
     );
   }
+}
+
+/// Pre-lowercased tool index entry. Built once, reused across filter
+/// keystrokes so we don't pay `.toLowerCase()` on every char typed.
+class _IndexedTool {
+  final KoloTool tool;
+  final String nameLower;
+  final String descLower;
+  const _IndexedTool({
+    required this.tool,
+    required this.nameLower,
+    required this.descLower,
+  });
 }
 
 class _SectionHeader extends StatelessWidget {
@@ -201,8 +362,23 @@ class _SectionHeader extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(title, style: TextStyle(fontWeight: FontWeight.w700, color: color, fontSize: 14)),
-                Text(subtitle, style: TextStyle(fontSize: 11, color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.5))),
+                Text(
+                  title,
+                  style: TextStyle(
+                    fontWeight: FontWeight.w700,
+                    color: color,
+                    fontSize: 14,
+                  ),
+                ),
+                Text(
+                  subtitle,
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: Theme.of(
+                      context,
+                    ).colorScheme.onSurface.withValues(alpha: 0.5),
+                  ),
+                ),
               ],
             ),
           ),
@@ -240,15 +416,22 @@ class _ToolTile extends StatelessWidget {
         tool.name,
         style: TextStyle(
           fontWeight: FontWeight.w500,
-          decoration: mode == ToolPermissionMode.neverAllow ? TextDecoration.lineThrough : null,
-          color: mode == ToolPermissionMode.neverAllow ? cs.onSurface.withValues(alpha: 0.4) : null,
+          decoration: mode == ToolPermissionMode.neverAllow
+              ? TextDecoration.lineThrough
+              : null,
+          color: mode == ToolPermissionMode.neverAllow
+              ? cs.onSurface.withValues(alpha: 0.4)
+              : null,
         ),
       ),
       subtitle: Text(
         tool.description,
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
-        style: TextStyle(fontSize: 11, color: cs.onSurface.withValues(alpha: 0.5)),
+        style: TextStyle(
+          fontSize: 11,
+          color: cs.onSurface.withValues(alpha: 0.5),
+        ),
       ),
       trailing: _buildModeSelector(cs),
     );
@@ -258,9 +441,21 @@ class _ToolTile extends StatelessWidget {
     // Three-state segmented toggle: ✓ Always | ? Ask | ✗ Never
     return SegmentedButton<ToolPermissionMode>(
       segments: const [
-        ButtonSegment(value: ToolPermissionMode.alwaysAllow, icon: Icon(Icons.check, size: 16), tooltip: 'Always Allow'),
-        ButtonSegment(value: ToolPermissionMode.askEveryTime, icon: Icon(Icons.help_outline, size: 16), tooltip: 'Ask Every Time'),
-        ButtonSegment(value: ToolPermissionMode.neverAllow, icon: Icon(Icons.block, size: 16), tooltip: 'Never Allow'),
+        ButtonSegment(
+          value: ToolPermissionMode.alwaysAllow,
+          icon: Icon(Icons.check, size: 16),
+          tooltip: 'Always Allow',
+        ),
+        ButtonSegment(
+          value: ToolPermissionMode.askEveryTime,
+          icon: Icon(Icons.help_outline, size: 16),
+          tooltip: 'Ask Every Time',
+        ),
+        ButtonSegment(
+          value: ToolPermissionMode.neverAllow,
+          icon: Icon(Icons.block, size: 16),
+          tooltip: 'Never Allow',
+        ),
       ],
       selected: {mode},
       onSelectionChanged: (s) => onChanged(s.first),
@@ -270,22 +465,15 @@ class _ToolTile extends StatelessWidget {
 
   IconData _toolIcon(String name) {
     return switch (name) {
-      'read_file' || 'list_directory' || 'list_files' || 'file_stat' => Icons.description_outlined,
-      'write_file' || 'append_file' => Icons.edit_outlined,
-      'delete_file' => Icons.delete_outline,
-      'copy_file' || 'move_file' => Icons.drive_file_move_outline,
-      'create_directory' => Icons.create_new_folder_outlined,
       'calculator' => Icons.calculate_outlined,
       'web_search' => Icons.search,
+      'list_skills' || 'read_skill' || 'create_skill' => Icons.auto_stories,
       'clipboard_read' || 'clipboard_write' => Icons.content_paste,
-      'shell_exec' => Icons.terminal,
       'http_get' || 'http_post' => Icons.cloud_outlined,
       'current_datetime' => Icons.access_time,
       'json_parse' => Icons.data_object,
-      'base64' => Icons.code,
+      'base64' => Icons.transform,
       'hash' => Icons.fingerprint,
-      'grep' => Icons.find_in_page,
-      'env_info' => Icons.info_outline,
       _ => Icons.build_outlined,
     };
   }

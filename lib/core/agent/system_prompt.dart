@@ -8,10 +8,6 @@
 /// built per-turn by [MemoryService.buildRecallBlock]. Empty string
 /// when recall is off or nothing matched.
 ///
-/// [environmentBlock] is the rendered shell-environment snapshot from
-/// [EnvironmentProbe.probe()] — tells the agent what binaries are
-/// actually runnable so it doesn't hallucinate `python3`/`git`/etc.
-/// when the Termux bootstrap failed.
 class SystemPromptBuilder {
   /// The fixed instruction block at the top of the system prompt.
   /// It never depends on per-turn data so we assemble it exactly once
@@ -26,7 +22,7 @@ class SystemPromptBuilder {
       'You are Kolo AI Agent, a powerful assistant with access to tools on the user\'s device.',
     );
     buffer.writeln(
-      'You can see, read, write, browse, execute code, and control the device.',
+      'You can chat, use skills, browse, remember useful context, and control the device when asked.',
     );
     buffer.writeln();
     buffer.writeln('## Tool Usage Guidelines');
@@ -44,9 +40,6 @@ class SystemPromptBuilder {
     );
     buffer.writeln(
       '- Never fabricate tool results. Only report what tools actually return.',
-    );
-    buffer.writeln(
-      '- For file operations, prefer safe operations: read before write, check paths exist.',
     );
     buffer.writeln(
       '- For web operations, always scrape/search rather than guessing URLs.',
@@ -119,50 +112,6 @@ class SystemPromptBuilder {
       '- Do NOT use open_app with guessed URL schemes like "starbucks://" — they almost never work.',
     );
     buffer.writeln();
-    buffer.writeln('## Coding Workflow');
-    buffer.writeln(
-      'When editing code or working on a codebase, follow this workflow:',
-    );
-    buffer.writeln();
-    buffer.writeln('### 1. Understand before editing');
-    buffer.writeln(
-      '- Always use `read_file` (with offset/limit for large files) before making changes.',
-    );
-    buffer.writeln(
-      '- Use `search_files` to find class definitions, usages, and imports across the project.',
-    );
-    buffer.writeln(
-      '- Use `set_project_root` at the start of a coding session so relative paths work.',
-    );
-    buffer.writeln();
-    buffer.writeln('### 2. Edit efficiently');
-    buffer.writeln(
-      '- Use `edit_file` instead of `write_file` for modifying existing files — it uses find-and-replace which saves tokens and is faster.',
-    );
-    buffer.writeln(
-      '- Only use `write_file` for creating new files or when the entire file content must change.',
-    );
-    buffer.writeln(
-      '- Provide enough context in `old_string` to uniquely match the target location.',
-    );
-    buffer.writeln();
-    buffer.writeln('### 3. Verify changes');
-    buffer.writeln(
-      '- After editing code, run analysis or tests using `shell_exec` or `run_flutter_task`.',
-    );
-    buffer.writeln(
-      '- Read the file again to confirm the edit was applied correctly.',
-    );
-    buffer.writeln(
-      '- If errors appear, read the error output carefully and fix iteratively.',
-    );
-    buffer.writeln();
-    buffer.writeln('### 4. Communicate');
-    buffer.writeln('- Explain what you changed and why between tool calls.');
-    buffer.writeln(
-      '- If an edit fails (old_string not found), re-read the file to get the current content.',
-    );
-    buffer.writeln();
     buffer.writeln('## Safety');
     buffer.writeln(
       '- Dangerous operations require user confirmation before execution.',
@@ -182,18 +131,16 @@ class SystemPromptBuilder {
     String? appIntentsSummary,
     String? skillsManifest,
     String? memoriesBlock,
-    String? environmentBlock,
   }) {
     // Fast path: nothing dynamic to splice in — return the cached
     // prelude verbatim and skip every StringBuffer op below.
     final hasIntents =
         appIntentsSummary != null && appIntentsSummary.isNotEmpty;
     final hasSkills = skillsManifest != null && skillsManifest.isNotEmpty;
-    final hasEnv = environmentBlock != null && environmentBlock.isNotEmpty;
     final hasMemories = memoriesBlock != null && memoriesBlock.isNotEmpty;
     final hasCustom =
         customInstructions != null && customInstructions.isNotEmpty;
-    if (!hasIntents && !hasSkills && !hasEnv && !hasMemories && !hasCustom) {
+    if (!hasIntents && !hasSkills && !hasMemories && !hasCustom) {
       return _staticPrelude;
     }
 
@@ -212,19 +159,11 @@ class SystemPromptBuilder {
     }
 
     // Skills manifest: pre-authored multi-step playbooks. The agent
-    // reads a skill's SKILL.md via `read_file` and follows the
+    // reads a skill's SKILL.md via `read_skill` and follows the
     // instructions using its existing tools. Injected at session load
     // so the agent knows about skills without having to poll them.
     if (skillsManifest != null && skillsManifest.isNotEmpty) {
       buffer.writeln(skillsManifest);
-      buffer.writeln();
-    }
-
-    // Shell / bootstrap environment — what the agent can actually run.
-    // Placed before memories + custom instructions so the model reads
-    // it while planning tool calls (when to shell out vs ask first).
-    if (environmentBlock != null && environmentBlock.isNotEmpty) {
-      buffer.writeln(environmentBlock);
       buffer.writeln();
     }
 

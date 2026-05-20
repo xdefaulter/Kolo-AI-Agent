@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:file_picker/file_picker.dart';
 import '../../core/haptics.dart';
@@ -23,12 +22,56 @@ class ChatAttachment {
   });
 }
 
+/// A single `@mention` suggestion rendered in the autocomplete popover.
+/// Immutable + const-constructible so the overlay can reuse rows between
+/// keystrokes without allocating.
+class MentionSuggestion {
+  /// Primary text shown in the row (e.g. the filename).
+  final String label;
+
+  /// Optional secondary text (e.g. parent directory), muted.
+  final String? sublabel;
+
+  /// What replaces the `@query` fragment when this row is tapped. Usually
+  /// `@relative/path.dart`.
+  final String insertText;
+
+  /// Optional leading icon (defaults to a generic file icon).
+  final IconData? icon;
+
+  const MentionSuggestion({
+    required this.label,
+    required this.insertText,
+    this.sublabel,
+    this.icon,
+  });
+}
+
+/// Called by [InputBar] when the user types `@<query>`. Implementations
+/// should return at most 10-15 suggestions for a responsive popover.
+/// Return an empty list to hide the popover.
+typedef MentionLookup = Future<List<MentionSuggestion>> Function(String query);
+
 class InputBar extends StatefulWidget {
   final Function(String, {List<ChatAttachment>? attachments}) onSend;
   final bool isLoading;
   final VoidCallback? onCancel;
   final bool enterToSend;
   final ValueChanged<String>? onDraftChanged;
+
+  /// Optional autocomplete source for `@file` mentions. When null, the
+  /// mention UI is fully disabled (no overhead — no listener work either).
+  final MentionLookup? mentionLookup;
+
+  /// When true, disables the IME's autocorrect + smart suggestions so
+  /// tokens like `$ ls`, `@lib/main.dart`, and `/clear` don't get mangled.
+  /// Defaults to false (chat screen wants helpful autocorrect for prose).
+  final bool disableAutocorrect;
+
+  /// Tapping the "library" button opens a saved-prompt picker. When
+  /// null, the button is hidden entirely so apps that don't want the
+  /// feature don't render an extra icon.
+  final VoidCallback? onOpenPromptLibrary;
 
   const InputBar({
     super.key,
@@ -37,6 +80,9 @@ class InputBar extends StatefulWidget {
     this.onCancel,
     this.enterToSend = false,
     this.onDraftChanged,
+    this.mentionLookup,
+    this.disableAutocorrect = false,
+    this.onOpenPromptLibrary,
   });
 
   @override
@@ -55,6 +101,14 @@ class InputBarState extends State<InputBar> {
   StreamSubscription? _sttPartialSub;
   StreamSubscription? _sttFinalSub;
   Timer? _draftTimer;
+
+  // ── @mention state ───────────────────────────────────────────────
+  Timer? _mentionDebounce;
+  List<MentionSuggestion> _mentionResults = const [];
+  int _mentionStart = -1; // cursor index of the `@` that triggered the popover
+  int _mentionEnd = -1; // cursor end of current `@query` fragment
+  String _mentionQuery = '';
+  int _mentionRequestSeq = 0; // dropped-request guard — only latest wins
 
   @override
   void initState() {
@@ -111,11 +165,111 @@ class InputBarState extends State<InputBar> {
     _draftTimer = Timer(const Duration(seconds: 2), () {
       widget.onDraftChanged?.call(_controller.text);
     });
+    // Only compute mention state if a lookup is wired — skip entirely on
+    // chat screen (mentionLookup == null) so the regex/scan isn't paid.
+    if (widget.mentionLookup != null) {
+      _updateMentionState();
+    }
+  }
+
+  /// Word-characters that belong to an `@mention` query — letters, digits,
+  /// and the common path separators so `@lib/ma` is one token.
+  static bool _isMentionChar(int codeUnit) {
+    // 0-9 → 0x30-0x39, A-Z → 0x41-0x5A, a-z → 0x61-0x7A
+    // Plus `_`(0x5F), `.`(0x2E), `-`(0x2D), `/`(0x2F).
+    return (codeUnit >= 0x30 && codeUnit <= 0x39) ||
+        (codeUnit >= 0x41 && codeUnit <= 0x5A) ||
+        (codeUnit >= 0x61 && codeUnit <= 0x7A) ||
+        codeUnit == 0x5F ||
+        codeUnit == 0x2E ||
+        codeUnit == 0x2D ||
+        codeUnit == 0x2F;
+  }
+
+  /// Scan backwards from the cursor for the nearest `@` to extract the
+  /// current mention query. Returns null if the cursor isn't inside a
+  /// mention token.
+  (int start, int end, String query)? _currentMention() {
+    final text = _controller.text;
+    final sel = _controller.selection;
+    if (!sel.isValid || !sel.isCollapsed) return null;
+    final cursor = sel.baseOffset;
+    if (cursor <= 0 || cursor > text.length) return null;
+    // Walk back: allow mention chars, bail at anything else. The `@`
+    // itself ends the scan.
+    int i = cursor - 1;
+    while (i >= 0) {
+      final c = text.codeUnitAt(i);
+      if (c == 0x40) {
+        // '@' — must be at the start of the text or preceded by whitespace.
+        if (i > 0) {
+          final prev = text.codeUnitAt(i - 1);
+          if (prev != 0x20 && prev != 0x0A && prev != 0x09) return null;
+        }
+        return (i, cursor, text.substring(i + 1, cursor));
+      }
+      if (!_isMentionChar(c)) return null;
+      i--;
+    }
+    return null;
+  }
+
+  void _updateMentionState() {
+    final mention = _currentMention();
+    if (mention == null) {
+      if (_mentionResults.isNotEmpty || _mentionStart != -1) {
+        setState(() {
+          _mentionResults = const [];
+          _mentionStart = -1;
+          _mentionEnd = -1;
+          _mentionQuery = '';
+        });
+      }
+      return;
+    }
+    final (start, end, query) = mention;
+    _mentionStart = start;
+    _mentionEnd = end;
+    _mentionQuery = query;
+    // Debounce so rapid typing doesn't thrash the lookup.
+    _mentionDebounce?.cancel();
+    _mentionDebounce = Timer(const Duration(milliseconds: 100), _runLookup);
+  }
+
+  Future<void> _runLookup() async {
+    final lookup = widget.mentionLookup;
+    if (lookup == null) return;
+    final seq = ++_mentionRequestSeq;
+    final results = await lookup(_mentionQuery);
+    // Drop stale responses — user might have typed past the `@` already.
+    if (!mounted || seq != _mentionRequestSeq) return;
+    if (_mentionStart == -1) return;
+    setState(() => _mentionResults = results);
+  }
+
+  void _selectMention(MentionSuggestion s) {
+    if (_mentionStart < 0 || _mentionEnd < 0) return;
+    final text = _controller.text;
+    final replacement = '${s.insertText} ';
+    final newText = text.replaceRange(_mentionStart, _mentionEnd, replacement);
+    _controller.value = TextEditingValue(
+      text: newText,
+      selection: TextSelection.collapsed(
+        offset: _mentionStart + replacement.length,
+      ),
+    );
+    setState(() {
+      _mentionResults = const [];
+      _mentionStart = -1;
+      _mentionEnd = -1;
+      _mentionQuery = '';
+    });
   }
 
   @override
   void dispose() {
     _draftTimer?.cancel();
+    _mentionDebounce?.cancel();
     _sttPartialSub?.cancel();
     _sttFinalSub?.cancel();
     _controller.dispose();
@@ -126,7 +280,9 @@ class InputBarState extends State<InputBar> {
   /// Public method to set the controller text (for draft restoration)
   void setText(String text) {
     _controller.text = text;
-    _controller.selection = TextSelection.fromPosition(TextPosition(offset: text.length));
+    _controller.selection = TextSelection.fromPosition(
+      TextPosition(offset: text.length),
+    );
   }
 
   /// Public method to request focus on the input field
@@ -136,6 +292,16 @@ class InputBarState extends State<InputBar> {
 
   /// Public method to get current text (for draft saving)
   String get currentText => _controller.text;
+
+  /// Replace the composer contents with [text] and request focus. Used
+  /// by the prompt-library + future `/command` inserters. Deliberately
+  /// replaces rather than appends so the user sees the resolved prompt
+  /// exactly as they'll send it.
+  void insertText(String text) {
+    _controller.text = text;
+    _controller.selection = TextSelection.collapsed(offset: text.length);
+    _focusNode.requestFocus();
+  }
 
   void _handleSend() {
     final text = _controller.text.trim();
@@ -199,14 +365,20 @@ class InputBarState extends State<InputBar> {
       );
       if (xFile == null) return;
       final bytes = await xFile.readAsBytes();
+      // Guard against the user navigating away (closing the chat drawer,
+      // switching tab) while the image was being read. `readAsBytes` for
+      // a large photo can take 100-300ms on a slow phone.
+      if (!mounted) return;
       final base64 = _encodeBase64(bytes);
       setState(() {
-        _attachments.add(ChatAttachment(
-          name: xFile.name,
-          mimeType: _mimeTypeForFile(xFile.name),
-          base64Data: base64,
-          filePath: xFile.path,
-        ));
+        _attachments.add(
+          ChatAttachment(
+            name: xFile.name,
+            mimeType: _mimeTypeForFile(xFile.name),
+            base64Data: base64,
+            filePath: xFile.path,
+          ),
+        );
       });
     } catch (e) {
       if (mounted) {
@@ -225,22 +397,44 @@ class InputBarState extends State<InputBar> {
     try {
       final result = await FilePicker.platform.pickFiles(
         type: FileType.custom,
-        allowedExtensions: ['txt', 'md', 'json', 'csv', 'xml', 'html', 'css', 'js', 'py', 'dart', 'yaml', 'yml', 'log', 'pdf'],
+        allowedExtensions: [
+          'txt',
+          'md',
+          'json',
+          'csv',
+          'xml',
+          'html',
+          'css',
+          'js',
+          'py',
+          'dart',
+          'yaml',
+          'yml',
+          'log',
+          'pdf',
+        ],
         allowMultiple: true,
       );
       if (result == null || result.files.isEmpty) return;
       for (final file in result.files) {
         if (file.bytes == null && file.path == null) continue;
-        final bytes = file.bytes ?? (file.path != null ? await File(file.path!).readAsBytes() : null);
+        final bytes =
+            file.bytes ??
+            (file.path != null ? await File(file.path!).readAsBytes() : null);
         if (bytes == null) continue;
+        // Re-check mounted between awaits: multi-file picks can span
+        // seconds, and the user may navigate away mid-loop.
+        if (!mounted) return;
         final base64 = _encodeBase64(bytes);
         setState(() {
-          _attachments.add(ChatAttachment(
-            name: file.name,
-            mimeType: _mimeTypeForFile(file.name),
-            base64Data: base64,
-            filePath: file.path,
-          ));
+          _attachments.add(
+            ChatAttachment(
+              name: file.name,
+              mimeType: _mimeTypeForFile(file.name),
+              base64Data: base64,
+              filePath: file.path,
+            ),
+          );
         });
       }
     } catch (e) {
@@ -272,7 +466,15 @@ class InputBarState extends State<InputBar> {
       'csv' => 'text/csv',
       'xml' => 'application/xml',
       'html' => 'text/html',
-      'txt' || 'md' || 'log' || 'yaml' || 'yml' || 'css' || 'js' || 'py' || 'dart' => 'text/plain',
+      'txt' ||
+      'md' ||
+      'log' ||
+      'yaml' ||
+      'yml' ||
+      'css' ||
+      'js' ||
+      'py' ||
+      'dart' => 'text/plain',
       _ => 'application/octet-stream',
     };
   }
@@ -286,13 +488,19 @@ class InputBarState extends State<InputBar> {
       decoration: BoxDecoration(
         color: cs.surface,
         border: Border(
-          top: BorderSide(color: cs.outlineVariant.withValues(alpha: 0.3), width: 1),
+          top: BorderSide(
+            color: cs.outlineVariant.withValues(alpha: 0.3),
+            width: 1,
+          ),
         ),
       ),
       child: SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            // @mention autocomplete — renders only when a query is active.
+            if (_mentionResults.isNotEmpty)
+              _MentionOverlay(results: _mentionResults, onTap: _selectMention),
             // Attachment previews
             if (_attachments.isNotEmpty)
               Container(
@@ -323,14 +531,21 @@ class InputBarState extends State<InputBar> {
                         bottom: 0,
                         child: Center(
                           child: Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 4,
+                            ),
                             decoration: BoxDecoration(
                               color: cs.primary.withValues(alpha: 0.9),
                               borderRadius: BorderRadius.circular(12),
                             ),
                             child: Text(
                               '+${_attachments.length - 3}',
-                              style: TextStyle(fontSize: 11, color: cs.onPrimary, fontWeight: FontWeight.w600),
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: cs.onPrimary,
+                                fontWeight: FontWeight.w600,
+                              ),
                             ),
                           ),
                         ),
@@ -343,39 +558,81 @@ class InputBarState extends State<InputBar> {
                 // Attach button
                 IconButton(
                   onPressed: widget.isLoading ? null : _showAttachMenu,
-                  icon: Icon(Icons.attach_file, color: widget.isLoading ? cs.onSurface.withValues(alpha: 0.3) : cs.primary),
+                  icon: Icon(
+                    Icons.attach_file,
+                    color: widget.isLoading
+                        ? cs.onSurface.withValues(alpha: 0.3)
+                        : cs.primary,
+                  ),
                   tooltip: 'Attach',
                   padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
+                  constraints: const BoxConstraints(
+                    minWidth: 48,
+                    minHeight: 48,
+                  ),
                 ),
+                // Prompt library — optional, hidden when no callback wired.
+                if (widget.onOpenPromptLibrary != null)
+                  IconButton(
+                    onPressed: widget.isLoading
+                        ? null
+                        : widget.onOpenPromptLibrary,
+                    icon: Icon(
+                      Icons.auto_awesome_outlined,
+                      color: widget.isLoading
+                          ? cs.onSurface.withValues(alpha: 0.3)
+                          : cs.primary,
+                    ),
+                    tooltip: 'Prompt library',
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(
+                      minWidth: 44,
+                      minHeight: 48,
+                    ),
+                  ),
                 Expanded(
                   child: TextField(
                     controller: _controller,
                     focusNode: _focusNode,
                     enabled: !widget.isLoading,
-                    maxLines: 5,
+                    // Auto-grow from single line up to 6 for multi-paragraph
+                    // prompts. Beyond that the TextField scrolls internally.
+                    maxLines: 6,
                     minLines: 1,
-                    textInputAction: widget.enterToSend ? TextInputAction.send : TextInputAction.newline,
+                    autocorrect: !widget.disableAutocorrect,
+                    enableSuggestions: !widget.disableAutocorrect,
+                    textInputAction: widget.enterToSend
+                        ? TextInputAction.send
+                        : TextInputAction.newline,
                     style: TextStyle(color: cs.onSurface),
                     cursorColor: cs.primary,
                     decoration: InputDecoration(
-                      hintText: widget.isLoading ? 'Thinking...' : 'Message Kolo...',
+                      hintText: widget.isLoading
+                          ? 'Thinking...'
+                          : 'Message Kolo...',
                       hintStyle: TextStyle(color: cs.onSurfaceVariant),
                       filled: true,
                       fillColor: cs.surfaceContainerLow.withValues(alpha: 0.7),
                       border: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(24),
-                        borderSide: BorderSide(color: cs.outline.withValues(alpha: 0.2)),
+                        borderSide: BorderSide(
+                          color: cs.outline.withValues(alpha: 0.2),
+                        ),
                       ),
                       enabledBorder: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(24),
-                        borderSide: BorderSide(color: cs.outline.withValues(alpha: 0.2)),
+                        borderSide: BorderSide(
+                          color: cs.outline.withValues(alpha: 0.2),
+                        ),
                       ),
                       focusedBorder: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(24),
                         borderSide: BorderSide(color: cs.primary, width: 1.5),
                       ),
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 20,
+                        vertical: 12,
+                      ),
                       semanticCounterText: 'Message input field',
                     ),
                     onSubmitted: (_) => _handleSend(),
@@ -387,19 +644,28 @@ class InputBarState extends State<InputBar> {
                   AnimatedContainer(
                     duration: const Duration(milliseconds: 200),
                     decoration: BoxDecoration(
-                      color: _isListening ? Colors.red.shade700 : cs.surfaceContainerHighest,
+                      color: _isListening
+                          ? Colors.red.shade700
+                          : cs.surfaceContainerHighest,
                       shape: BoxShape.circle,
                     ),
                     child: IconButton(
                       onPressed: _toggleMic,
                       icon: Icon(
                         _isListening ? Icons.mic : Icons.mic_none,
-                        color: _isListening ? Colors.white : cs.onSurface.withValues(alpha: 0.6),
+                        color: _isListening
+                            ? Colors.white
+                            : cs.onSurface.withValues(alpha: 0.6),
                         size: 20,
                       ),
                       padding: EdgeInsets.zero,
-                      constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
-                      tooltip: _isListening ? 'Stop listening' : 'Voice input',
+                      constraints: const BoxConstraints(
+                        minWidth: 48,
+                        minHeight: 48,
+                      ),
+                      tooltip: _isListening
+                          ? 'Stop dictation'
+                          : 'Dictate message',
                     ),
                   ),
                 // Send / Cancel button
@@ -417,7 +683,10 @@ class InputBarState extends State<InputBar> {
                       icon: const Icon(Icons.stop, color: Colors.white),
                       tooltip: 'Stop',
                       padding: EdgeInsets.zero,
-                      constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
+                      constraints: const BoxConstraints(
+                        minWidth: 48,
+                        minHeight: 48,
+                      ),
                     ),
                   )
                 else if (!widget.isLoading)
@@ -434,7 +703,10 @@ class InputBarState extends State<InputBar> {
                         onPressed: _handleSend,
                         icon: Icon(Icons.send, color: cs.onPrimary, size: 20),
                         padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
+                        constraints: const BoxConstraints(
+                          minWidth: 48,
+                          minHeight: 48,
+                        ),
                         tooltip: 'Send',
                       ),
                     ),
@@ -465,7 +737,9 @@ class InputBarState extends State<InputBar> {
                 height: 4,
                 margin: const EdgeInsets.only(bottom: 16),
                 decoration: BoxDecoration(
-                  color: Theme.of(ctx).colorScheme.onSurface.withValues(alpha: 0.2),
+                  color: Theme.of(
+                    ctx,
+                  ).colorScheme.onSurface.withValues(alpha: 0.2),
                   borderRadius: BorderRadius.circular(2),
                 ),
               ),
@@ -477,21 +751,30 @@ class InputBarState extends State<InputBar> {
                     icon: Icons.camera_alt,
                     label: 'Camera',
                     color: Colors.blue,
-                    onTap: () { Navigator.pop(ctx); _pickImage(ImageSource.camera); },
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      _pickImage(ImageSource.camera);
+                    },
                   ),
                   _attachOption(
                     context: ctx,
                     icon: Icons.photo_library,
                     label: 'Gallery',
                     color: Colors.green,
-                    onTap: () { Navigator.pop(ctx); _pickImage(ImageSource.gallery); },
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      _pickImage(ImageSource.gallery);
+                    },
                   ),
                   _attachOption(
                     context: ctx,
                     icon: Icons.insert_drive_file,
                     label: 'File',
                     color: Colors.orange,
-                    onTap: () { Navigator.pop(ctx); _pickFile(); },
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      _pickFile();
+                    },
                   ),
                 ],
               ),
@@ -525,8 +808,117 @@ class InputBarState extends State<InputBar> {
             child: Icon(icon, color: color, size: 28),
           ),
           const SizedBox(height: 8),
-          Text(label, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
+          Text(
+            label,
+            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500),
+          ),
         ],
+      ),
+    );
+  }
+}
+
+/// `@mention` autocomplete popover — sits directly above the input area.
+/// Stateless; the parent [InputBar] owns all state, so this widget
+/// rebuilds only when the filtered result list actually changes.
+class _MentionOverlay extends StatelessWidget {
+  final List<MentionSuggestion> results;
+  final ValueChanged<MentionSuggestion> onTap;
+
+  const _MentionOverlay({required this.results, required this.onTap});
+
+  /// Cap the visible rows — long lists hurt scrolling and eat screen space.
+  /// The lookup callback already limits results; this is belt-and-braces.
+  static const _maxRows = 8;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final visible = results.length > _maxRows
+        ? results.sublist(0, _maxRows)
+        : results;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 6),
+      constraints: const BoxConstraints(maxHeight: 240),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHigh,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: cs.outlineVariant.withValues(alpha: 0.4)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.15),
+            blurRadius: 8,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(10),
+        child: ListView.builder(
+          shrinkWrap: true,
+          padding: EdgeInsets.zero,
+          itemCount: visible.length,
+          itemBuilder: (context, i) => _MentionRow(
+            suggestion: visible[i],
+            onTap: () => onTap(visible[i]),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _MentionRow extends StatelessWidget {
+  final MentionSuggestion suggestion;
+  final VoidCallback onTap;
+
+  const _MentionRow({required this.suggestion, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        child: Row(
+          children: [
+            Icon(
+              suggestion.icon ?? Icons.insert_drive_file_outlined,
+              size: 16,
+              color: cs.onSurface.withValues(alpha: 0.7),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    suggestion.label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 13,
+                      color: cs.onSurface,
+                      fontFamily: 'monospace',
+                    ),
+                  ),
+                  if (suggestion.sublabel != null &&
+                      suggestion.sublabel!.isNotEmpty)
+                    Text(
+                      suggestion.sublabel!,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: cs.onSurface.withValues(alpha: 0.5),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -557,11 +949,17 @@ class _AttachmentChip extends StatelessWidget {
           child: ClipRRect(
             borderRadius: BorderRadius.circular(11),
             child: isImage && attachment.filePath != null
+                // 68x68 logical px → ~3x DPR cap = 204 physical. Without
+                // this the full-res photo (potentially 4032x3024 → ~48MB
+                // ARGB) would be decoded just to render a tiny thumbnail.
                 ? Image.file(
                     File(attachment.filePath!),
                     width: 68,
                     height: 68,
                     fit: BoxFit.cover,
+                    cacheWidth: 204,
+                    cacheHeight: 204,
+                    filterQuality: FilterQuality.low,
                     errorBuilder: (_, __, ___) => _fileIcon(cs),
                   )
                 : _fileIcon(cs),
@@ -576,11 +974,19 @@ class _AttachmentChip extends StatelessWidget {
             padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 1),
             decoration: BoxDecoration(
               color: cs.scrim.withValues(alpha: 0.7),
-              borderRadius: const BorderRadius.vertical(bottom: Radius.circular(11)),
+              borderRadius: const BorderRadius.vertical(
+                bottom: Radius.circular(11),
+              ),
             ),
             child: Text(
-              attachment.name.length > 8 ? '${attachment.name.substring(0, 5)}...' : attachment.name,
-              style: TextStyle(fontSize: 9, color: cs.onPrimary, fontWeight: FontWeight.w500),
+              attachment.name.length > 8
+                  ? '${attachment.name.substring(0, 5)}...'
+                  : attachment.name,
+              style: TextStyle(
+                fontSize: 9,
+                color: cs.onPrimary,
+                fontWeight: FontWeight.w500,
+              ),
               textAlign: TextAlign.center,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,

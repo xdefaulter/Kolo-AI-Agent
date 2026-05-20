@@ -16,6 +16,7 @@ import 'scroll_to_bottom_fab.dart';
 import 'slide_in_message.dart';
 
 export 'chat_message_ui.dart' show ChatMessageUI;
+import '../../core/agent/agent_loop.dart' show AgentToolResult;
 import '../../core/agent/agent_session.dart';
 import '../../core/agent/conversation_manager.dart';
 import '../../core/storage/database.dart';
@@ -81,6 +82,12 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   bool _showScrollFab = false;
   String _searchQuery = '';
   bool _enterToSend = false;
+
+  // Tool-call ids already shown in the current chat. Maintained
+  // incrementally so the streaming hot path (~10Hz during a tool turn)
+  // doesn't rebuild a Set<String> by scanning the full message list on
+  // every SSE chunk. Reset on chat switch / clear / replay.
+  final Set<String> _seenToolCallIds = <String>{};
   ProviderSubscription<AgentSessionState>? _sessionSub;
   ProviderSubscription<bool>? _connectivitySub;
   // 2.5: Cache interleaved items to avoid recomputation on every build
@@ -201,20 +208,26 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
     ref.read(activeChatIdProvider.notifier).state = chat.id;
     final messages = await AppDatabase.instance.getMessages(chat.id);
-    final uiMessages = messages
-        .map(
-          (m) => ChatMessageUI(
-            role: m.role,
-            content: m.content,
-            toolName: m.toolName,
-            toolSuccess: m.toolSuccess,
-            timestamp: m.createdAt,
-            dbId: m.id,
-            status: m.status,
-            isError: m.role == 'assistant' && m.content.startsWith('Error:'),
-          ),
-        )
-        .toList();
+    final uiMessages = <ChatMessageUI>[];
+    _seenToolCallIds.clear();
+    for (final m in messages) {
+      uiMessages.add(
+        ChatMessageUI(
+          role: m.role,
+          content: m.content,
+          toolName: m.toolName,
+          toolSuccess: m.toolSuccess,
+          toolCallId: m.toolCallId,
+          timestamp: m.createdAt,
+          dbId: m.id,
+          status: m.status,
+          isError: m.role == 'assistant' && m.content.startsWith('Error:'),
+        ),
+      );
+      if (m.role == 'tool' && m.toolCallId != null) {
+        _seenToolCallIds.add(m.toolCallId!);
+      }
+    }
     ref.read(chatMessagesProvider.notifier).state = uiMessages;
 
     // Replay messages into the conversation manager so context is preserved
@@ -251,6 +264,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     await AppDatabase.instance.saveChat(chat);
     ref.read(activeChatIdProvider.notifier).state = chatId;
     ref.read(chatMessagesProvider.notifier).state = [];
+    _seenToolCallIds.clear();
     ref.read(agentSessionProvider.notifier).clearConversation();
     final chats = await AppDatabase.instance.getAllChats();
     ref.read(chatListProvider.notifier).state = chats;
@@ -258,13 +272,28 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
   Future<void> _deleteChat(String chatId) async {
     final chats = ref.read(chatListProvider);
-    final chatToDelete = chats.where((c) => c.id == chatId).firstOrNull;
-    if (chatToDelete == null) return;
+    // Single pass: walk once, capture the deleted entry, build the
+    // remainder. Previously this did `where().firstOrNull` (one full
+    // iteration with closure alloc) followed by `where().toList()`
+    // (a second full iteration + new List). For long chat lists that
+    // doubled the work for what's a one-shot delete.
+    ChatEntry? found;
+    final remainingChats = <ChatEntry>[];
+    for (final c in chats) {
+      if (c.id == chatId) {
+        found = c;
+      } else {
+        remainingChats.add(c);
+      }
+    }
+    if (found == null) return;
+    // Re-bind as final non-null for closure capture below — Dart's flow
+    // promotion doesn't survive closure boundaries on a mutable local.
+    final deletedChat = found;
 
     Haptics.medium();
 
     // Immediately remove from UI
-    final remainingChats = chats.where((c) => c.id != chatId).toList();
     ref.read(chatListProvider.notifier).state = remainingChats;
 
     // If deleting active chat, switch to another
@@ -280,7 +309,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     ScaffoldMessenger.of(context).clearSnackBars();
     final snackbar = ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text('Deleted "${chatToDelete.title}"'),
+        content: Text('Deleted "${deletedChat.title}"'),
         duration: const Duration(seconds: 5),
         behavior: SnackBarBehavior.floating,
         action: SnackBarAction(
@@ -288,7 +317,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           onPressed: () async {
             // Restore the chat
             final restored = List<ChatEntry>.from(ref.read(chatListProvider));
-            restored.insert(0, chatToDelete);
+            restored.insert(0, deletedChat);
             ref.read(chatListProvider.notifier).state = restored;
           },
         ),
@@ -299,7 +328,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     snackbar.closed.then((reason) async {
       if (reason == SnackBarClosedReason.action) {
         // User undid — re-save the chat
-        await AppDatabase.instance.saveChat(chatToDelete);
+        await AppDatabase.instance.saveChat(deletedChat);
       } else {
         // User didn't undo — delete from DB permanently
         await AppDatabase.instance.deleteChat(chatId);
@@ -1019,38 +1048,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
             ),
           );
         }
-        // Add tool results that aren't already shown
-        final existingToolIds = messages
-            .where((m) => m.role == 'tool' && m.toolCallId != null)
-            .map((m) => m.toolCallId)
-            .toSet();
-        for (final tr in toolResults) {
-          if (!existingToolIds.contains(tr.toolCallId)) {
-            messages.add(
-              ChatMessageUI(
-                role: 'tool',
-                content: tr.result.toDisplayString(),
-                toolName: tr.toolName,
-                toolSuccess: tr.result.success,
-                toolCallId: tr.toolCallId,
-                timestamp: DateTime.now(),
-                isNew: true,
-              ),
-            );
-            // Persist tool result
-            _persistMessage(
-              MessageEntry(
-                id: _uuid.v4(),
-                chatId: chatId,
-                role: 'tool',
-                content: tr.result.toDisplayString(),
-                toolName: tr.toolName,
-                toolSuccess: tr.result.success,
-                toolCallId: tr.toolCallId,
-              ),
-            );
-          }
-        }
+        // Append any tool results not yet shown. Fires on every streaming
+        // chunk (~10Hz); the seen-set is maintained incrementally on
+        // `_seenToolCallIds` so we no longer rescan the full message
+        // list per chunk.
+        _appendNewToolResults(messages, toolResults, chatId);
       case AgentSessionCompleted(
         :final content,
         :final thinkingContent,
@@ -1080,37 +1082,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
             ),
           );
         }
-        // Add any remaining tool results not yet shown
-        final existingToolIds = messages
-            .where((m) => m.role == 'tool' && m.toolCallId != null)
-            .map((m) => m.toolCallId)
-            .toSet();
-        for (final tr in toolResults) {
-          if (!existingToolIds.contains(tr.toolCallId)) {
-            messages.add(
-              ChatMessageUI(
-                role: 'tool',
-                content: tr.result.toDisplayString(),
-                toolName: tr.toolName,
-                toolSuccess: tr.result.success,
-                toolCallId: tr.toolCallId,
-                timestamp: DateTime.now(),
-                isNew: true,
-              ),
-            );
-            _persistMessage(
-              MessageEntry(
-                id: _uuid.v4(),
-                chatId: chatId,
-                role: 'tool',
-                content: tr.result.toDisplayString(),
-                toolName: tr.toolName,
-                toolSuccess: tr.result.success,
-                toolCallId: tr.toolCallId,
-              ),
-            );
-          }
-        }
+        // Append any remaining tool results not yet shown.
+        _appendNewToolResults(messages, toolResults, chatId);
         // Update chat metadata
         _updateChatMeta(chatId, messages.length);
         Haptics.light(); // done haptic
@@ -1141,6 +1114,45 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
     ref.read(chatMessagesProvider.notifier).state = messages;
     _scrollToBottom();
+  }
+
+  /// Append tool results that aren't already shown, persisting each new
+  /// one. Uses [_seenToolCallIds] for O(1) dedup; the previous code
+  /// rebuilt the seen-set by scanning the entire message list on every
+  /// streaming chunk, which scaled with chat length × chunk rate.
+  void _appendNewToolResults(
+    List<ChatMessageUI> messages,
+    List<AgentToolResult> toolResults,
+    String chatId,
+  ) {
+    if (toolResults.isEmpty) return;
+    final now = DateTime.now();
+    for (final tr in toolResults) {
+      if (!_seenToolCallIds.add(tr.toolCallId)) continue;
+      final display = tr.result.toDisplayString();
+      messages.add(
+        ChatMessageUI(
+          role: 'tool',
+          content: display,
+          toolName: tr.toolName,
+          toolSuccess: tr.result.success,
+          toolCallId: tr.toolCallId,
+          timestamp: now,
+          isNew: true,
+        ),
+      );
+      _persistMessage(
+        MessageEntry(
+          id: _uuid.v4(),
+          chatId: chatId,
+          role: 'tool',
+          content: display,
+          toolName: tr.toolName,
+          toolSuccess: tr.result.success,
+          toolCallId: tr.toolCallId,
+        ),
+      );
+    }
   }
 
   Future<void> _updateChatMeta(String chatId, int msgCount) async {
@@ -1513,6 +1525,15 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     if (index >= current.length) return;
     final keep = current.sublist(0, index);
     ref.read(chatMessagesProvider.notifier).state = keep;
+
+    // Rebuild the seen tool-call set from the truncated tail so the next
+    // turn's dedup check stays correct after edit-and-resend.
+    _seenToolCallIds.clear();
+    for (final m in keep) {
+      if (m.role == 'tool' && m.toolCallId != null) {
+        _seenToolCallIds.add(m.toolCallId!);
+      }
+    }
 
     // Delete everything in the DB from this message onward. Two-step so
     // same-millisecond neighbours don't get clobbered: drop messages
