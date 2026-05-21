@@ -284,6 +284,76 @@ export ANDROID_NDK_HOME=/Users/gursimranbhullar/Library/Android/sdk/ndk/28.2.136
 
 The Google Tensor dispatch library was built from the same LiteRT revision to avoid ABI mismatch with the embedded LiteRT runtime. A test with the official LiteRT `v2.1.1` runtime zip proved it cannot be mixed with LiteRT-LM 0.12.0.
 
+### 2026-05-20 Tensor G5 runtime resolution
+
+The official LiteRT-LM NPU quick-start flow was rebuilt from a fresh upstream checkout:
+
+```bash
+git clone https://github.com/google-ai-edge/LiteRT-LM.git /tmp/litert-lm-official
+cd /tmp/litert-lm-official
+git rev-parse --short HEAD  # fe0fcbdc
+export ANDROID_NDK_HOME=/Users/gursimranbhullar/Library/Android/sdk/ndk/28.2.13676358
+/tmp/kolo-bazel/bazelisk build --config=android_arm64 \
+  //runtime/engine:litert_lm_main \
+  @litert//litert/vendors/google_tensor/dispatch:dispatch_api_so
+```
+
+Clean official CLI failure:
+
+```text
+NOT_FOUND: Kernel node_0 not found in the tflite binary.; node id: node_0, function_name:
+Node number 0 (DISPATCH_OP) failed to prepare.
+```
+
+Root cause:
+
+- The official Gemma Tensor G5 `.litertlm` contains named SQ functions such as `fn_0_STAND_ALONE_cluster2` and `fn_1_STAND_ALONE_cluster2`.
+- The Google Tensor dispatch layer was dropping non-empty function names when `GoogleTensorSouthBoundFeatureSupported(kTachyonNamedSqFunctions)` returned false.
+- Tachyon then looked for a generic `node_0` kernel, which does not exist in the packaged SQ payload.
+
+Patch applied to the Google Tensor dispatch source in the Bazel external checkout:
+
+```text
+external/litert/litert/vendors/google_tensor/dispatch/litert_dispatch_graph.cc
+```
+
+Change:
+
+- Preserve `function_name` in `LiteRtDispatchGraphT::AssignNodeFunction` instead of overriding it to `nullptr`.
+
+The CLI-side `edgetpu_performance_mode=kBurst` option was also removed for the smoke binary because this Pixel 10 Pro XL Android 16 runtime logs:
+
+```text
+Unsupported directive: edgetpu_performance_mode
+```
+
+That directive failure is not the root cause of `node_0`, but removing it keeps the official CLI run clean. The app AAR already has this option removed.
+
+The repo app now uses the passing dispatch binary:
+
+```text
+android/app/src/main/jniLibs/arm64-v8a/libLiteRtDispatch_GoogleTensor.so
+sha256: 2c526b8e3325dac89113b72a8a20a54c37b5513844e1edfa912fdb77b225333e
+```
+
+Validated results:
+
+- Official CLI with a real `/data/local/tmp/litert_lm_official/model.litertlm` copy: success, `OK`.
+- Official CLI with `/data/local/tmp/litert_lm_official/model.litertlm` symlinked to the app-storage model: success, `OK`.
+- App debug smoke activity after replacing the dispatch `.so`: `SMOKE_INITIALIZED backend=NPU` and `SMOKE_SUCCESS backend=NPU`.
+
+Important packaging note:
+
+- The CLI looks for the dispatch library in the model path directory. A direct model path under `/sdcard/Android/data/.../files/models` fails unless dispatch is also present there.
+- The app path is correct because `Backend.NPU(nativeLibDir)` passes the APK native library directory explicitly as `litert_dispatch_lib_dir`.
+
+Phone cleanup performed:
+
+- Removed Qwen temporary model copies from `/sdcard/Android/data/com.kolo.kolo_ai_agent/files/models`.
+- Removed `/data/local/tmp/kolo_litert_lm`.
+- Removed the duplicate 1.5 GB `/data/local/tmp/litert_lm_official/model.litertlm` copy after validation.
+- Kept a small symlink at `/data/local/tmp/litert_lm_official/model.litertlm` for repeat CLI testing; it points to the single app-storage Gemma model.
+
 ### ADB smoke test loop
 
 Use this after installing a debug build and pushing a `.litertlm` model under the app external files directory:
@@ -300,15 +370,14 @@ adb logcat -d -b main -b system -b crash -v time | \
   rg -i 'LitertLmSmokeTest|SMOKE_|allowlist|signature|Current application|EdgeTPU|DISPATCH_OP|Failed to create|invocation context|Fatal signal'
 ```
 
-Expected current result on a normal adb-installed debug build:
+Expected current result on a normal adb-installed debug build with the patched dispatch:
 
 ```text
-SMOKE_FAILED Tensor G5 NPU access was denied by Android's EdgeTPU service.
-The app must be EdgeTPU-allowlisted and signature-matched, usually through
-Google Play On-device AI / Play AI Pack delivery.
+SMOKE_INITIALIZED backend=NPU
+SMOKE_SUCCESS backend=NPU
 ```
 
-This is a platform authorization gate. It is not a model-conversion error, not a missing `.so`, and not a Dart/Kotlin channel failure.
+The previous adb-installed debug build failure was caused by an incompatible diagnostic dispatch binary that bypassed Tachyon and hit `/dev/edgetpu-soc` permissions directly. The working path uses Tachyon and preserves the named SQ functions from the `.litertlm` package.
 
 ---
 
