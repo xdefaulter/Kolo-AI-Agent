@@ -207,6 +207,12 @@ class AgentSession {
   ///      Lets the user pick a 3B local model and still stay safe
   ///      without globally disabling anything.
   List<Map<String, dynamic>> _toolDefinitionsFor(ProviderConfig? activeConfig) {
+    if (activeConfig?.kind == ProviderKind.localLiteRtLm) {
+      // LiteRT-LM has its own native tool-calling surface. Until that is
+      // bridged into ToolRouter, expose this backend as local chat only.
+      return const [];
+    }
+
     final blocked = activeConfig?.disabledTools ?? const <String>{};
     final smallModel = activeConfig?.smallModelMode ?? false;
     return registry.getFunctionDefinitions(
@@ -265,9 +271,13 @@ class AgentSession {
       return;
     }
 
-    // Check connectivity before making API call
+    // Check connectivity before making API call — skip for local providers
+    // that don't need network (llama.cpp loopback, LiteRT-LM NPU).
     final isOnline = _ref.read(isOnlineProvider);
-    if (!isOnline) {
+    final needsNetwork =
+        activeConfig?.kind != ProviderKind.localLlama &&
+        activeConfig?.kind != ProviderKind.localLiteRtLm;
+    if (!isOnline && needsNetwork) {
       yield AgentError(
         error: 'No internet connection. Check your network and try again.',
       );
@@ -395,7 +405,10 @@ class AgentSession {
       return;
     }
     final isOnline = _ref.read(isOnlineProvider);
-    if (!isOnline) {
+    final needsNetwork =
+        activeConfig?.kind != ProviderKind.localLlama &&
+        activeConfig?.kind != ProviderKind.localLiteRtLm;
+    if (!isOnline && needsNetwork) {
       yield AgentError(error: 'No internet connection.');
       return;
     }

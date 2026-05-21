@@ -21,6 +21,7 @@ import '../../core/memory/memory_service.dart';
 import '../../core/theme_provider.dart';
 import '../shared/page_transitions.dart';
 import 'local_model_section.dart';
+import 'litert_lm_section.dart';
 import 'tools_permission_screen.dart';
 import '../chat/chat_screen.dart' show toolRegistryProvider;
 
@@ -101,6 +102,18 @@ class SettingsScreen extends ConsumerWidget {
           ),
           const SizedBox(height: 8),
           const LocalModelSection(),
+
+          const SizedBox(height: 16),
+
+          // ---- LiteRT-LM (NPU) ----
+          _sectionHeader(
+            context,
+            'LiteRT-LM (NPU)',
+            'Run quantized LLMs on-device via Google\'s Tensor NPU. '
+                'Ultra-fast inference on Pixel 10+ — no cloud required.',
+          ),
+          const SizedBox(height: 8),
+          const LitertLmSection(),
 
           const SizedBox(height: 16),
 

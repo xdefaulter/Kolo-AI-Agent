@@ -35,6 +35,16 @@
         android:usesCleartextTraffic="true"
         android:label="Kolo AI Agent"
         android:icon="@mipmap/ic_launcher">
+
+        <!-- Tensor G5 system runtime libraries. These must be exposed to the
+             app process native-loader namespace before LiteRT dispatch loads. -->
+        <uses-native-library android:name="libedgetpu_litert.so" android:required="true"/>
+        <uses-native-library android:name="libedgetpu_client.google.so" android:required="true"/>
+        <uses-native-library android:name="libedgetpu_util.so" android:required="true"/>
+        <uses-native-library android:name="libedgetpu_tachyon.google.so" android:required="true"/>
+        <uses-native-library android:name="libgxp.so" android:required="true"/>
+        <uses-native-library android:name="libOpenCL-pixel.so" android:required="true"/>
+        <uses-native-library android:name="lib_aion_buffer.so" android:required="true"/>
         <activity
             android:name=".MainActivity"
             android:exported="true"

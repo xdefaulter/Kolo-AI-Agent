@@ -43,3 +43,13 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Local large model/package artifacts. Keep these out of source control and
+# out of Flutter's bundled assets; import or pick them at runtime instead.
+/local_models/
+*.litertlm
+*.task
+*.tflite
+*.safetensors
+Google Tensor SDK - LiteRT _ Artifacts*.zip
+/android/.kotlin/

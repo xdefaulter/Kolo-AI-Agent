@@ -11,7 +11,11 @@ enum ProviderKind {
 
   /// On-device inference via a bundled llama.cpp binding. `modelPath`
   /// points at a .gguf file in app-private storage; no network at all.
-  localLlama;
+  localLlama,
+
+  /// On-device inference via LiteRT-LM. `modelPath` points at a
+  /// .litertlm Tensor G5 package; this app requires the NPU backend.
+  localLiteRtLm;
 
   String get wire {
     switch (this) {
@@ -19,6 +23,8 @@ enum ProviderKind {
         return 'openai';
       case ProviderKind.localLlama:
         return 'local-llama';
+      case ProviderKind.localLiteRtLm:
+        return 'local-litert-lm';
     }
   }
 
@@ -26,6 +32,8 @@ enum ProviderKind {
     switch (raw) {
       case 'local-llama':
         return ProviderKind.localLlama;
+      case 'local-litert-lm':
+        return ProviderKind.localLiteRtLm;
       case 'openai':
       default:
         return ProviderKind.openaiCompat;
@@ -82,11 +90,12 @@ class ApiProvider {
 class ProviderConfig {
   final String id;
   String name;
-  String baseUrl;           // e.g. "https://api.openai.com/v1"
+  String baseUrl; // e.g. "https://api.openai.com/v1"
   String apiKey;
   Map<String, String> customHeaders;
-  bool isActive;            // currently selected provider
-  String? modelsEndpoint;   // e.g. "https://ollama.local:11434/v1/models" — null if not supported
+  bool isActive; // currently selected provider
+  String?
+  modelsEndpoint; // e.g. "https://ollama.local:11434/v1/models" — null if not supported
   DateTime createdAt;
   DateTime updatedAt;
 
@@ -128,24 +137,29 @@ class ProviderConfig {
     this.modelPath,
     Set<String>? disabledTools,
     this.smallModelMode = false,
-  })  : id = id ?? const Uuid().v4(),
-        createdAt = createdAt ?? DateTime.now(),
-        updatedAt = updatedAt ?? DateTime.now(),
-        models = models ?? [],
-        disabledTools = disabledTools ?? <String>{};
+  }) : id = id ?? const Uuid().v4(),
+       createdAt = createdAt ?? DateTime.now(),
+       updatedAt = updatedAt ?? DateTime.now(),
+       models = models ?? [],
+       disabledTools = disabledTools ?? <String>{};
 
   /// Whether this is a local/self-hosted provider (no API key needed)
   bool get isLocal => apiKey.isEmpty;
 
   /// Whether this provider supports fetching models dynamically
-  bool get canFetchModels => modelsEndpoint != null && modelsEndpoint!.isNotEmpty;
+  bool get canFetchModels =>
+      modelsEndpoint != null && modelsEndpoint!.isNotEmpty;
 
   /// Build the models endpoint URL. If modelsEndpoint is set, use it.
   /// Otherwise, derive from baseUrl: baseUrl + "/models"
   String get effectiveModelsUrl {
-    if (modelsEndpoint != null && modelsEndpoint!.isNotEmpty) return modelsEndpoint!;
+    if (modelsEndpoint != null && modelsEndpoint!.isNotEmpty) {
+      return modelsEndpoint!;
+    }
     // Derive from baseUrl — ensure no double slash
-    final base = baseUrl.endsWith('/') ? baseUrl.substring(0, baseUrl.length - 1) : baseUrl;
+    final base = baseUrl.endsWith('/')
+        ? baseUrl.substring(0, baseUrl.length - 1)
+        : baseUrl;
     return '$base/models';
   }
 
@@ -189,77 +203,83 @@ class ProviderConfig {
 
   /// Serialize to map including API key (used for in-memory transport only).
   Map<String, dynamic> toMap() => {
-        'id': id,
-        'name': name,
-        'baseUrl': baseUrl,
-        'apiKey': apiKey,
-        'customHeaders': customHeaders,
-        'isActive': isActive,
-        'modelsEndpoint': modelsEndpoint,
-        'createdAt': createdAt.toIso8601String(),
-        'updatedAt': updatedAt.toIso8601String(),
-        'models': models.map((m) => m.toMap()).toList(),
-        'kind': kind.wire,
-        'modelPath': modelPath,
-        'disabledTools': disabledTools.toList(),
-        'smallModelMode': smallModelMode,
-      };
+    'id': id,
+    'name': name,
+    'baseUrl': baseUrl,
+    'apiKey': apiKey,
+    'customHeaders': customHeaders,
+    'isActive': isActive,
+    'modelsEndpoint': modelsEndpoint,
+    'createdAt': createdAt.toIso8601String(),
+    'updatedAt': updatedAt.toIso8601String(),
+    'models': models.map((m) => m.toMap()).toList(),
+    'kind': kind.wire,
+    'modelPath': modelPath,
+    'disabledTools': disabledTools.toList(),
+    'smallModelMode': smallModelMode,
+  };
 
   /// Serialize without API key — for SharedPreferences persistence.
   /// API keys are stored separately in flutter_secure_storage.
   Map<String, dynamic> toMapWithoutApiKey() => {
-        'id': id,
-        'name': name,
-        'baseUrl': baseUrl,
-        'apiKey': '', // stored in secure storage
-        'customHeaders': customHeaders,
-        'isActive': isActive,
-        'modelsEndpoint': modelsEndpoint,
-        'createdAt': createdAt.toIso8601String(),
-        'updatedAt': updatedAt.toIso8601String(),
-        'models': models.map((m) => m.toMap()).toList(),
-        'kind': kind.wire,
-        'modelPath': modelPath,
-        'disabledTools': disabledTools.toList(),
-        'smallModelMode': smallModelMode,
-      };
+    'id': id,
+    'name': name,
+    'baseUrl': baseUrl,
+    'apiKey': '', // stored in secure storage
+    'customHeaders': customHeaders,
+    'isActive': isActive,
+    'modelsEndpoint': modelsEndpoint,
+    'createdAt': createdAt.toIso8601String(),
+    'updatedAt': updatedAt.toIso8601String(),
+    'models': models.map((m) => m.toMap()).toList(),
+    'kind': kind.wire,
+    'modelPath': modelPath,
+    'disabledTools': disabledTools.toList(),
+    'smallModelMode': smallModelMode,
+  };
 
   factory ProviderConfig.fromMap(Map<String, dynamic> m) => ProviderConfig(
-        id: m['id'] as String,
-        name: m['name'] as String,
-        baseUrl: m['baseUrl'] as String,
-        apiKey: m['apiKey'] as String? ?? '',
-        customHeaders: Map<String, String>.from(m['customHeaders'] ?? {}),
-        isActive: m['isActive'] as bool? ?? false,
-        modelsEndpoint: m['modelsEndpoint'] as String?,
-        createdAt: m['createdAt'] != null ? DateTime.parse(m['createdAt'] as String) : DateTime.now(),
-        updatedAt: m['updatedAt'] != null ? DateTime.parse(m['updatedAt'] as String) : DateTime.now(),
-        models: (m['models'] as List<dynamic>?)
-                ?.map((e) => ModelConfig.fromMap(e as Map<String, dynamic>))
-                .toList() ??
-            [],
-        kind: ProviderKind.fromWire(m['kind'] as String?),
-        modelPath: m['modelPath'] as String?,
-        disabledTools: (m['disabledTools'] as List<dynamic>?)
-                ?.map((e) => e.toString())
-                .toSet() ??
-            <String>{},
-        smallModelMode: m['smallModelMode'] as bool? ?? false,
-      );
+    id: m['id'] as String,
+    name: m['name'] as String,
+    baseUrl: m['baseUrl'] as String,
+    apiKey: m['apiKey'] as String? ?? '',
+    customHeaders: Map<String, String>.from(m['customHeaders'] ?? {}),
+    isActive: m['isActive'] as bool? ?? false,
+    modelsEndpoint: m['modelsEndpoint'] as String?,
+    createdAt: m['createdAt'] != null
+        ? DateTime.parse(m['createdAt'] as String)
+        : DateTime.now(),
+    updatedAt: m['updatedAt'] != null
+        ? DateTime.parse(m['updatedAt'] as String)
+        : DateTime.now(),
+    models:
+        (m['models'] as List<dynamic>?)
+            ?.map((e) => ModelConfig.fromMap(e as Map<String, dynamic>))
+            .toList() ??
+        [],
+    kind: ProviderKind.fromWire(m['kind'] as String?),
+    modelPath: m['modelPath'] as String?,
+    disabledTools:
+        (m['disabledTools'] as List<dynamic>?)
+            ?.map((e) => e.toString())
+            .toSet() ??
+        <String>{},
+    smallModelMode: m['smallModelMode'] as bool? ?? false,
+  );
 }
 
 /// A model within a provider. One provider can have many models.
 /// E.g. OpenAI provider → gpt-4o, gpt-4o-mini, o1, etc.
 class ModelConfig {
   final String id;
-  String modelId;           // The model ID sent in API requests (e.g. "gpt-4o")
-  String? displayName;      // Human-friendly name (e.g. "GPT-4o")
-  int maxTokens;            // Max tokens for completions
-  double temperature;       // Default temperature
-  int? contextWindow;       // Context window size (tokens), if known
-  bool isActive;            // Currently selected model within this provider
-  bool isCustom;            // Manually added (not fetched from /models)
-  String? description;      // E.g. "Most capable model"
+  String modelId; // The model ID sent in API requests (e.g. "gpt-4o")
+  String? displayName; // Human-friendly name (e.g. "GPT-4o")
+  int maxTokens; // Max tokens for completions
+  double temperature; // Default temperature
+  int? contextWindow; // Context window size (tokens), if known
+  bool isActive; // Currently selected model within this provider
+  bool isCustom; // Manually added (not fetched from /models)
+  String? description; // E.g. "Most capable model"
 
   ModelConfig({
     String? id,
@@ -299,101 +319,176 @@ class ModelConfig {
   }
 
   Map<String, dynamic> toMap() => {
-        'id': id,
-        'modelId': modelId,
-        'displayName': displayName,
-        'maxTokens': maxTokens,
-        'temperature': temperature,
-        'contextWindow': contextWindow,
-        'isActive': isActive,
-        'isCustom': isCustom,
-        'description': description,
-      };
+    'id': id,
+    'modelId': modelId,
+    'displayName': displayName,
+    'maxTokens': maxTokens,
+    'temperature': temperature,
+    'contextWindow': contextWindow,
+    'isActive': isActive,
+    'isCustom': isCustom,
+    'description': description,
+  };
 
   factory ModelConfig.fromMap(Map<String, dynamic> m) => ModelConfig(
-        id: m['id'] as String?,
-        modelId: m['modelId'] as String,
-        displayName: m['displayName'] as String?,
-        maxTokens: m['maxTokens'] as int? ?? 4096,
-        temperature: (m['temperature'] as num?)?.toDouble() ?? 0.7,
-        contextWindow: m['contextWindow'] as int?,
-        isActive: m['isActive'] as bool? ?? false,
-        isCustom: m['isCustom'] as bool? ?? false,
-        description: m['description'] as String?,
-      );
+    id: m['id'] as String?,
+    modelId: m['modelId'] as String,
+    displayName: m['displayName'] as String?,
+    maxTokens: m['maxTokens'] as int? ?? 4096,
+    temperature: (m['temperature'] as num?)?.toDouble() ?? 0.7,
+    contextWindow: m['contextWindow'] as int?,
+    isActive: m['isActive'] as bool? ?? false,
+    isCustom: m['isCustom'] as bool? ?? false,
+    description: m['description'] as String?,
+  );
 }
 
 /// Well-known provider presets for quick setup
 class ProviderPresets {
   static List<ProviderConfig> get defaults => [
-        ProviderConfig(
-          name: 'OpenAI',
-          baseUrl: 'https://api.openai.com/v1',
-          modelsEndpoint: 'https://api.openai.com/v1/models',
-          models: [
-            ModelConfig(modelId: 'gpt-4o', displayName: 'GPT-4o', maxTokens: 4096, contextWindow: 128000, description: 'Most capable GPT-4 model'),
-            ModelConfig(modelId: 'gpt-4o-mini', displayName: 'GPT-4o Mini', maxTokens: 4096, contextWindow: 128000, description: 'Fast and affordable'),
-            ModelConfig(modelId: 'o1', displayName: 'o1', maxTokens: 4096, contextWindow: 200000, description: 'Reasoning model'),
-            ModelConfig(modelId: 'o1-mini', displayName: 'o1 Mini', maxTokens: 4096, contextWindow: 128000, description: 'Fast reasoning'),
-          ],
+    ProviderConfig(
+      name: 'OpenAI',
+      baseUrl: 'https://api.openai.com/v1',
+      modelsEndpoint: 'https://api.openai.com/v1/models',
+      models: [
+        ModelConfig(
+          modelId: 'gpt-4o',
+          displayName: 'GPT-4o',
+          maxTokens: 4096,
+          contextWindow: 128000,
+          description: 'Most capable GPT-4 model',
         ),
-        ProviderConfig(
-          name: 'Ollama (Local)',
-          baseUrl: 'http://localhost:11434/v1',
-          modelsEndpoint: 'http://localhost:11434/v1/models',
-          models: [
-            ModelConfig(modelId: 'llama3.2', displayName: 'Llama 3.2', maxTokens: 4096, contextWindow: 128000),
-          ],
+        ModelConfig(
+          modelId: 'gpt-4o-mini',
+          displayName: 'GPT-4o Mini',
+          maxTokens: 4096,
+          contextWindow: 128000,
+          description: 'Fast and affordable',
         ),
-        ProviderConfig(
-          name: 'Groq',
-          baseUrl: 'https://api.groq.com/openai/v1',
-          modelsEndpoint: 'https://api.groq.com/openai/v1/models',
-          models: [
-            ModelConfig(modelId: 'llama-3.3-70b-versatile', displayName: 'Llama 3.3 70B', maxTokens: 4096),
-          ],
+        ModelConfig(
+          modelId: 'o1',
+          displayName: 'o1',
+          maxTokens: 4096,
+          contextWindow: 200000,
+          description: 'Reasoning model',
         ),
-        // NOTE: Anthropic's API is NOT OpenAI-compatible (different message format, auth, streaming).
-        // Use OpenRouter to access Claude/Gemini/etc via OpenAI-compatible API.
-        ProviderConfig(
-          name: 'OpenRouter',
-          baseUrl: 'https://openrouter.ai/api/v1',
-          modelsEndpoint: 'https://openrouter.ai/api/v1/models',
-          models: [
-            ModelConfig(modelId: 'anthropic/claude-sonnet-4-20250514', displayName: 'Claude Sonnet 4', maxTokens: 4096, contextWindow: 200000),
-            ModelConfig(modelId: 'google/gemini-2.5-pro', displayName: 'Gemini 2.5 Pro', maxTokens: 4096, contextWindow: 1000000),
-          ],
+        ModelConfig(
+          modelId: 'o1-mini',
+          displayName: 'o1 Mini',
+          maxTokens: 4096,
+          contextWindow: 128000,
+          description: 'Fast reasoning',
         ),
-        ProviderConfig(
-          name: 'Fireworks AI',
-          baseUrl: 'https://api.fireworks.ai/inference/v1',
-          modelsEndpoint: 'https://api.fireworks.ai/inference/v1/models',
-          models: [
-            ModelConfig(modelId: 'accounts/fireworks/models/llama-v3p3-70b-instruct', displayName: 'Llama 3.3 70B', maxTokens: 4096),
-          ],
+      ],
+    ),
+    ProviderConfig(
+      name: 'Ollama (Local)',
+      baseUrl: 'http://localhost:11434/v1',
+      modelsEndpoint: 'http://localhost:11434/v1/models',
+      models: [
+        ModelConfig(
+          modelId: 'llama3.2',
+          displayName: 'Llama 3.2',
+          maxTokens: 4096,
+          contextWindow: 128000,
         ),
-        ProviderConfig(
-          name: 'Together AI',
-          baseUrl: 'https://api.together.xyz/v1',
-          modelsEndpoint: 'https://api.together.xyz/v1/models',
-          models: [
-            ModelConfig(modelId: 'meta-llama/Llama-3.3-70B-Instruct-Turbo', displayName: 'Llama 3.3 70B', maxTokens: 4096),
-          ],
+      ],
+    ),
+    ProviderConfig(
+      name: 'Groq',
+      baseUrl: 'https://api.groq.com/openai/v1',
+      modelsEndpoint: 'https://api.groq.com/openai/v1/models',
+      models: [
+        ModelConfig(
+          modelId: 'llama-3.3-70b-versatile',
+          displayName: 'Llama 3.3 70B',
+          maxTokens: 4096,
         ),
-        ProviderConfig(
-          name: 'Ollama Cloud',
-          baseUrl: 'https://ollama.com/v1',
-          modelsEndpoint: 'https://ollama.com/v1/models',
-          models: [
-            ModelConfig(modelId: 'glm-5.1:cloud', displayName: 'GLM 5.1 Cloud', maxTokens: 4096, contextWindow: 128000, description: 'Zhipu GLM 5.1 via Ollama Cloud'),
-            ModelConfig(modelId: 'kimi-k2.6', displayName: 'Kimi K2.6', maxTokens: 4096, contextWindow: 128000, description: 'Moonshot Kimi K2.6'),
-            ModelConfig(modelId: 'deepseek-v3.2', displayName: 'DeepSeek V3.2', maxTokens: 4096, contextWindow: 128000, description: 'DeepSeek V3.2 671B'),
-            ModelConfig(modelId: 'qwen3.5:397b', displayName: 'Qwen 3.5 397B', maxTokens: 4096, contextWindow: 128000, description: 'Alibaba Qwen 3.5'),
-          ],
+      ],
+    ),
+    // NOTE: Anthropic's API is NOT OpenAI-compatible (different message format, auth, streaming).
+    // Use OpenRouter to access Claude/Gemini/etc via OpenAI-compatible API.
+    ProviderConfig(
+      name: 'OpenRouter',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      modelsEndpoint: 'https://openrouter.ai/api/v1/models',
+      models: [
+        ModelConfig(
+          modelId: 'anthropic/claude-sonnet-4-20250514',
+          displayName: 'Claude Sonnet 4',
+          maxTokens: 4096,
+          contextWindow: 200000,
         ),
-        ProviderConfig(
-          name: 'Custom / Self-hosted',
-          baseUrl: 'http://localhost:8000/v1',
+        ModelConfig(
+          modelId: 'google/gemini-2.5-pro',
+          displayName: 'Gemini 2.5 Pro',
+          maxTokens: 4096,
+          contextWindow: 1000000,
         ),
-      ];
+      ],
+    ),
+    ProviderConfig(
+      name: 'Fireworks AI',
+      baseUrl: 'https://api.fireworks.ai/inference/v1',
+      modelsEndpoint: 'https://api.fireworks.ai/inference/v1/models',
+      models: [
+        ModelConfig(
+          modelId: 'accounts/fireworks/models/llama-v3p3-70b-instruct',
+          displayName: 'Llama 3.3 70B',
+          maxTokens: 4096,
+        ),
+      ],
+    ),
+    ProviderConfig(
+      name: 'Together AI',
+      baseUrl: 'https://api.together.xyz/v1',
+      modelsEndpoint: 'https://api.together.xyz/v1/models',
+      models: [
+        ModelConfig(
+          modelId: 'meta-llama/Llama-3.3-70B-Instruct-Turbo',
+          displayName: 'Llama 3.3 70B',
+          maxTokens: 4096,
+        ),
+      ],
+    ),
+    ProviderConfig(
+      name: 'Ollama Cloud',
+      baseUrl: 'https://ollama.com/v1',
+      modelsEndpoint: 'https://ollama.com/v1/models',
+      models: [
+        ModelConfig(
+          modelId: 'glm-5.1:cloud',
+          displayName: 'GLM 5.1 Cloud',
+          maxTokens: 4096,
+          contextWindow: 128000,
+          description: 'Zhipu GLM 5.1 via Ollama Cloud',
+        ),
+        ModelConfig(
+          modelId: 'kimi-k2.6',
+          displayName: 'Kimi K2.6',
+          maxTokens: 4096,
+          contextWindow: 128000,
+          description: 'Moonshot Kimi K2.6',
+        ),
+        ModelConfig(
+          modelId: 'deepseek-v3.2',
+          displayName: 'DeepSeek V3.2',
+          maxTokens: 4096,
+          contextWindow: 128000,
+          description: 'DeepSeek V3.2 671B',
+        ),
+        ModelConfig(
+          modelId: 'qwen3.5:397b',
+          displayName: 'Qwen 3.5 397B',
+          maxTokens: 4096,
+          contextWindow: 128000,
+          description: 'Alibaba Qwen 3.5',
+        ),
+      ],
+    ),
+    ProviderConfig(
+      name: 'Custom / Self-hosted',
+      baseUrl: 'http://localhost:8000/v1',
+    ),
+  ];
 }
