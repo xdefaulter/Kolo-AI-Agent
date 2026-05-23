@@ -11,7 +11,6 @@ import android.util.Log
 import android.view.WindowManager
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
-import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.MethodCall
 
@@ -24,23 +23,8 @@ class MainActivity : FlutterActivity() {
 
     private var pendingControllerStart: MethodChannel.Result? = null
 
-    // LiteRT-LM service — manages the on-device inference engine
-    private var litertLmService: LitertLmService? = null
-
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-
-        // Register the LiteRT-LM MethodChannel + EventChannel
-        litertLmService = LitertLmService(this)
-        val litertMethodChannel = MethodChannel(
-            flutterEngine.dartExecutor.binaryMessenger,
-            LitertLmService.METHOD_CHANNEL
-        )
-        val litertEventChannel = EventChannel(
-            flutterEngine.dartExecutor.binaryMessenger,
-            LitertLmService.EVENT_CHANNEL
-        )
-        litertLmService!!.setupMethodChannel(litertMethodChannel, litertEventChannel)
 
         val channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
         KoloAccessibilityService.methodChannel = channel
@@ -467,8 +451,6 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onDestroy() {
-        litertLmService?.destroy()
-        litertLmService = null
         super.onDestroy()
     }
 

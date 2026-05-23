@@ -1,4 +1,3 @@
-import 'litert_lm_client.dart';
 import 'llama_cpp_client.dart';
 import 'openai_client.dart';
 import 'provider.dart';
@@ -41,8 +40,6 @@ ChatClient buildChatClient(ApiProvider provider) {
   switch (provider.kind) {
     case ProviderKind.localLlama:
       return LlamaCppClient(provider);
-    case ProviderKind.localLiteRtLm:
-      return LitertLmClient(provider);
     case ProviderKind.openaiCompat:
       return OpenAIClient(provider);
   }

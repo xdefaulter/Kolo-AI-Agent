@@ -527,7 +527,8 @@ class AppDatabase {
       final ftsQuery = _sanitiseFtsQuery(query);
       if (ftsQuery.isEmpty) return const [];
       args = <Object?>[ftsQuery];
-      sql = 'SELECT m.id, m.chat_id, m.role, m.content, m.created_at, c.title '
+      sql =
+          'SELECT m.id, m.chat_id, m.role, m.content, m.created_at, c.title '
           'FROM messages_fts f '
           'JOIN messages m ON m.id = f.message_id '
           'JOIN chats c ON c.id = m.chat_id '
@@ -539,7 +540,8 @@ class AppDatabase {
     } else {
       final like = '%${query.trim().toLowerCase()}%';
       args = <Object?>[like];
-      sql = 'SELECT m.id, m.chat_id, m.role, m.content, m.created_at, c.title '
+      sql =
+          'SELECT m.id, m.chat_id, m.role, m.content, m.created_at, c.title '
           'FROM messages m '
           'JOIN chats c ON c.id = m.chat_id '
           'WHERE LOWER(m.content) LIKE ?'
@@ -575,8 +577,7 @@ class AppDatabase {
   /// `rm -rf *` doesn't blow up parsing. Wraps each token in quotes so
   /// the matcher treats punctuation as literal text.
   static String _sanitiseFtsQuery(String q) {
-    final cleaned =
-        q.toLowerCase().replaceAll(_ftsNonAlnum, ' ');
+    final cleaned = q.toLowerCase().replaceAll(_ftsNonAlnum, ' ');
     // Single-pass: split + filter + quote + join in one StringBuffer
     // walk to skip the intermediate List<String> alloc that the prior
     // .split().where().toList().map().join() chain produced.
@@ -678,7 +679,10 @@ class AppDatabase {
   /// Best-effort recall: FTS against [query] if non-empty, otherwise
   /// most-recently-used. Capped at [limit] for prompt-size control.
   /// Falls back to LIKE when FTS5 isn't available (see [_ftsEnabled]).
-  Future<List<MemoryEntry>> recallMemories(String query, {int limit = 6}) async {
+  Future<List<MemoryEntry>> recallMemories(
+    String query, {
+    int limit = 6,
+  }) async {
     final db = await _database;
     final trimmed = query.trim();
     if (trimmed.isEmpty) return getAllMemories(limit: limit);
@@ -784,17 +788,45 @@ class AppDatabase {
       return _providersCache!;
     }
     final list = jsonDecode(json) as List;
-    final providers = list
-        .map((e) => ProviderConfig.fromMap(e as Map<String, dynamic>))
-        .toList();
-    await Future.wait(providers.map((p) async {
-      final secureKey = await _secureStorage.read(
-        key: 'provider_apikey_${p.id}',
-      );
-      if (secureKey != null && secureKey.isNotEmpty) {
-        p.apiKey = secureKey;
+    var removedActiveLiteRtProvider = false;
+    final removedLiteRtProviderIds = <String>[];
+    final providerMaps = <Map<String, dynamic>>[];
+    for (final raw in list) {
+      final map = raw as Map<String, dynamic>;
+      if (map['kind'] == 'local-litert-lm') {
+        removedActiveLiteRtProvider =
+            removedActiveLiteRtProvider || map['isActive'] == true;
+        final id = map['id'];
+        if (id is String) removedLiteRtProviderIds.add(id);
+        continue;
       }
-    }));
+      providerMaps.add(map);
+    }
+    final providers = providerMaps.map(ProviderConfig.fromMap).toList();
+    if (removedActiveLiteRtProvider &&
+        providers.isNotEmpty &&
+        !providers.any((p) => p.isActive)) {
+      providers[0] = providers[0].copyWith(isActive: true);
+    }
+    await Future.wait(
+      providers.map((p) async {
+        final secureKey = await _secureStorage.read(
+          key: 'provider_apikey_${p.id}',
+        );
+        if (secureKey != null && secureKey.isNotEmpty) {
+          p.apiKey = secureKey;
+        }
+      }),
+    );
+    if (removedLiteRtProviderIds.isNotEmpty) {
+      await Future.wait(
+        removedLiteRtProviderIds.map(
+          (id) => _secureStorage.delete(key: 'provider_apikey_$id'),
+        ),
+      );
+      await _writeProviders(providers, skipSecureWrites: true);
+      return _providersCache!;
+    }
     _providersCache = List<ProviderConfig>.unmodifiable(providers);
     return _providersCache!;
   }
@@ -859,16 +891,18 @@ class AppDatabase {
           }
         }
       } else {
-        await Future.wait(providers.map((p) {
-          if (p.apiKey.isNotEmpty) {
-            return _secureStorage.write(
-              key: 'provider_apikey_${p.id}',
-              value: p.apiKey,
-            );
-          } else {
-            return _secureStorage.delete(key: 'provider_apikey_${p.id}');
-          }
-        }));
+        await Future.wait(
+          providers.map((p) {
+            if (p.apiKey.isNotEmpty) {
+              return _secureStorage.write(
+                key: 'provider_apikey_${p.id}',
+                value: p.apiKey,
+              );
+            } else {
+              return _secureStorage.delete(key: 'provider_apikey_${p.id}');
+            }
+          }),
+        );
       }
     }
     final prefs = await SharedPreferences.getInstance();
@@ -1119,7 +1153,11 @@ class AppDatabase {
     id: r['id'] as String,
     name: r['name'] as String,
     body: r['body'] as String,
-    tags: (r['tags'] as String?)?.split(',').where((s) => s.isNotEmpty).toList() ??
+    tags:
+        (r['tags'] as String?)
+            ?.split(',')
+            .where((s) => s.isNotEmpty)
+            .toList() ??
         const [],
     useCount: (r['use_count'] as int?) ?? 0,
     createdAt: DateTime.fromMillisecondsSinceEpoch(r['created_at'] as int),

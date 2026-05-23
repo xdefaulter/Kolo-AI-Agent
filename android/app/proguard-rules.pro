@@ -53,22 +53,6 @@
     @kotlin.Metadata <methods>;
 }
 
-# --- LiteRT-LM on-device inference ---------------------------------------
-# The SDK uses JNI native calls and reflection heavily. R8 strips classes
-# that appear unreachable from Java/Kotlin code alone (JNI creates refs
-# the shrinker can't see), causing ClassNotFoundException at runtime.
--keep class com.google.ai.edge.litertlm.** { *; }
--keep class com.google.ai.edge.litert.** { *; }
--keep class com.google.ai.edge.executor.** { *; }
--dontwarn com.google.ai.edge.litertlm.**
--dontwarn com.google.ai.edge.litert.**
--dontwarn com.google.ai.edge.executor.**
-# Keep all native method declarations so JNI can resolve them.
--keepclasseswithmembernames class * {
-    native <methods>;
-}
-# Keep NativeLibraryLoader — it's accessed via JNI and gets stripped by R8.
--keep class com.google.ai.edge.litertlm.NativeLibraryLoader { *; }
 # Firebase pulls javax.lang.model.* through its annotation processors at
 # compile time only. The release shrinker sees unresolved references and
 # complains; silence the ones we know are safe.

@@ -21,7 +21,6 @@ import '../../core/memory/memory_service.dart';
 import '../../core/theme_provider.dart';
 import '../shared/page_transitions.dart';
 import 'local_model_section.dart';
-import 'litert_lm_section.dart';
 import 'tools_permission_screen.dart';
 import '../chat/chat_screen.dart' show toolRegistryProvider;
 
@@ -102,18 +101,6 @@ class SettingsScreen extends ConsumerWidget {
           ),
           const SizedBox(height: 8),
           const LocalModelSection(),
-
-          const SizedBox(height: 16),
-
-          // ---- LiteRT-LM (NPU) ----
-          _sectionHeader(
-            context,
-            'LiteRT-LM (NPU)',
-            'Run quantized LLMs on-device via Google\'s Tensor NPU. '
-                'Ultra-fast inference on Pixel 10+ — no cloud required.',
-          ),
-          const SizedBox(height: 8),
-          const LitertLmSection(),
 
           const SizedBox(height: 16),
 
@@ -507,7 +494,7 @@ class _ProviderCard extends ConsumerWidget {
               Row(
                 children: [
                   Icon(
-                    provider.isActive ? Icons.cloud_done : Icons.cloud_outlined,
+                    _providerIcon(provider),
                     color: provider.isActive
                         ? Colors.green
                         : cs.onSurface.withValues(alpha: 0.5),
@@ -535,11 +522,13 @@ class _ProviderCard extends ConsumerWidget {
               ),
               const SizedBox(height: 4),
               Text(
-                provider.baseUrl,
+                _providerSubtitle(provider),
                 style: TextStyle(
                   fontSize: 12,
                   color: cs.onSurface.withValues(alpha: 0.6),
                 ),
+                overflow: TextOverflow.ellipsis,
+                maxLines: 2,
               ),
               const SizedBox(height: 4),
               if (activeModel != null)
@@ -567,7 +556,8 @@ class _ProviderCard extends ConsumerWidget {
                     ),
                     visualDensity: VisualDensity.compact,
                   ),
-                  if (provider.canFetchModels)
+                  if (provider.kind == ProviderKind.openaiCompat &&
+                      provider.canFetchModels)
                     ActionChip(
                       label: const Text('Fetch'),
                       avatar: const Icon(Icons.refresh, size: 14),
@@ -595,7 +585,8 @@ class _ProviderCard extends ConsumerWidget {
                           .read(providersProvider.notifier)
                           .setActiveProvider(provider.id),
                     ),
-                  _TestConnectionChip(provider: provider),
+                  if (provider.kind == ProviderKind.openaiCompat)
+                    _TestConnectionChip(provider: provider),
                 ],
               ),
             ],
@@ -603,6 +594,29 @@ class _ProviderCard extends ConsumerWidget {
         ),
       ),
     );
+  }
+
+  IconData _providerIcon(ProviderConfig provider) {
+    if (provider.kind == ProviderKind.localLlama) {
+      return provider.isActive
+          ? Icons.developer_board
+          : Icons.developer_board_outlined;
+    }
+    return provider.isActive ? Icons.cloud_done : Icons.cloud_outlined;
+  }
+
+  String _providerSubtitle(ProviderConfig provider) {
+    if (provider.kind == ProviderKind.localLlama) {
+      return provider.modelPath == null
+          ? 'On-device llama.cpp'
+          : 'On-device llama.cpp: ${_shortPath(provider.modelPath!)}';
+    }
+    return provider.baseUrl;
+  }
+
+  String _shortPath(String path) {
+    if (path.length <= 64) return path;
+    return '...${path.substring(path.length - 61)}';
   }
 }
 

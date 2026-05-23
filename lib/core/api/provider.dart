@@ -11,11 +11,7 @@ enum ProviderKind {
 
   /// On-device inference via a bundled llama.cpp binding. `modelPath`
   /// points at a .gguf file in app-private storage; no network at all.
-  localLlama,
-
-  /// On-device inference via LiteRT-LM. `modelPath` points at a
-  /// .litertlm Tensor G5 package; this app requires the NPU backend.
-  localLiteRtLm;
+  localLlama;
 
   String get wire {
     switch (this) {
@@ -23,8 +19,6 @@ enum ProviderKind {
         return 'openai';
       case ProviderKind.localLlama:
         return 'local-llama';
-      case ProviderKind.localLiteRtLm:
-        return 'local-litert-lm';
     }
   }
 
@@ -32,8 +26,6 @@ enum ProviderKind {
     switch (raw) {
       case 'local-llama':
         return ProviderKind.localLlama;
-      case 'local-litert-lm':
-        return ProviderKind.localLiteRtLm;
       case 'openai':
       default:
         return ProviderKind.openaiCompat;

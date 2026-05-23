@@ -41,13 +41,10 @@ android {
 
     defaultConfig {
         applicationId = "com.kolo.kolo_ai_agent"
-        minSdk = maxOf(flutter.minSdkVersion, 31)
+        minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
-        ndk {
-            abiFilters.add("arm64-v8a")
-        }
     }
 
     signingConfigs {
@@ -79,31 +76,10 @@ android {
             )
         }
     }
-
-    // Tensor G5 dispatch libraries need extraction from the APK at runtime.
-    packaging {
-        jniLibs {
-            useLegacyPackaging = true
-            excludes += setOf(
-                "lib/armeabi-v7a/**",
-                "lib/x86/**",
-                "lib/x86_64/**",
-            )
-        }
-    }
 }
 
 flutter {
     source = "../.."
 }
 
-dependencies {
-    // LiteRT-LM on-device inference engine. Local AAR keeps Google's 0.12.0
-    // Kotlin API and uses a patched Android JNI library that avoids the
-    // Tensor G5 runtime's unsupported edgetpu_performance_mode directive.
-    implementation(files("libs/litertlm-android-0.12.0-g5-patched.aar"))
-    // Kotlin coroutines (used by LiteRT-LM streaming API)
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
-    // Gson (used by LiteRT-LM for JSON parsing)
-    implementation("com.google.code.gson:gson:2.11.0")
-}
+dependencies {}

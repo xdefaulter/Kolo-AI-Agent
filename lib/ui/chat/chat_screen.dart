@@ -16,6 +16,7 @@ import 'scroll_to_bottom_fab.dart';
 import 'slide_in_message.dart';
 
 export 'chat_message_ui.dart' show ChatMessageUI;
+import '../../core/api/provider.dart';
 import '../../core/agent/agent_loop.dart' show AgentToolResult;
 import '../../core/agent/agent_session.dart';
 import '../../core/agent/conversation_manager.dart';
@@ -362,13 +363,17 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           try {
             final decoded = String.fromCharCodes(base64Decode(att.base64Data));
             contentBuf.write(
-                '\n\n--- File: ${att.name} ---\n$decoded\n--- End of ${att.name} ---');
+              '\n\n--- File: ${att.name} ---\n$decoded\n--- End of ${att.name} ---',
+            );
           } catch (_) {}
         } else if (att.mimeType == 'application/pdf') {
           contentBuf.write(
-              '\n\n[Attached PDF: ${att.name} (${(att.base64Data.length * 0.75 / 1024).round()}KB)]');
+            '\n\n[Attached PDF: ${att.name} (${(att.base64Data.length * 0.75 / 1024).round()}KB)]',
+          );
         } else {
-          contentBuf.write('\n\n[Attached file: ${att.name} (${att.mimeType})]');
+          contentBuf.write(
+            '\n\n[Attached file: ${att.name} (${att.mimeType})]',
+          );
         }
       }
     }
@@ -398,6 +403,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     // to the outbox; the connectivity listener below drains it on reconnect.
     final chatId = ref.read(activeChatIdProvider);
     final isOnline = ref.read(isOnlineProvider);
+    final activeProvider = _activeProviderConfig();
+    final needsNetwork = activeProvider?.kind != ProviderKind.localLlama;
     await AppDatabase.instance.addMessage(
       chatId,
       MessageEntry(
@@ -405,10 +412,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         chatId: chatId,
         role: 'user',
         content: fullContent,
-        status: isOnline ? null : 'queued',
+        status: !isOnline && needsNetwork ? 'queued' : null,
       ),
     );
-    if (!isOnline) {
+    if (!isOnline && needsNetwork) {
       await OutboxService.instance.enqueue(
         OutboxItem(
           chatId: chatId,
@@ -419,9 +426,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       );
       // Mark the already-added bubble as queued so its indicator renders
       // immediately; the drain path removes it on reconnect.
-      final current = List<ChatMessageUI>.from(
-        ref.read(chatMessagesProvider),
-      );
+      final current = List<ChatMessageUI>.from(ref.read(chatMessagesProvider));
       final i = current.lastIndexWhere((m) => m.dbId == userMsgDbId);
       if (i >= 0) {
         final old = current[i];
@@ -490,6 +495,15 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       final chats = await AppDatabase.instance.getAllChats();
       ref.read(chatListProvider.notifier).state = chats;
     }
+  }
+
+  ProviderConfig? _activeProviderConfig() {
+    final providers = ref.read(providersProvider);
+    if (providers.isEmpty) return null;
+    for (final p in providers) {
+      if (p.isActive) return p;
+    }
+    return providers.first;
   }
 
   /// Edit the last user message in the current transcript. Wired to the
@@ -717,9 +731,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                   width: 320,
                   child: Material(
                     elevation: 1,
-                    color: Theme.of(
-                      context,
-                    ).colorScheme.surfaceContainerLow,
+                    color: Theme.of(context).colorScheme.surfaceContainerLow,
                     child: _buildChatDrawer(isDrawer: false),
                   ),
                 ),
@@ -750,85 +762,95 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     AgentSessionState sessionState,
   ) {
     return Column(
-        children: [
-          // Offline banner
-          Consumer(
-            builder: (context, ref, _) {
-              final isOnline = ref.watch(isOnlineProvider);
-              if (isOnline) return const SizedBox.shrink();
-              // Hoist colorScheme once so Flutter doesn't walk the
-              // InheritedWidget chain for every child access.
-              final cs = Theme.of(context).colorScheme;
-              return MaterialBanner(
-                backgroundColor: cs.errorContainer,
-                content: Text(
-                  'You are offline. Messages will be sent when connection is restored.',
-                  style: TextStyle(color: cs.onErrorContainer),
+      children: [
+        // Offline banner
+        Consumer(
+          builder: (context, ref, _) {
+            final isOnline = ref.watch(isOnlineProvider);
+            if (isOnline) return const SizedBox.shrink();
+            final providers = ref.watch(providersProvider);
+            final activeProvider =
+                providers.where((p) => p.isActive).firstOrNull ??
+                (providers.isNotEmpty ? providers.first : null);
+            final isLocal = activeProvider?.kind == ProviderKind.localLlama;
+            // Hoist colorScheme once so Flutter doesn't walk the
+            // InheritedWidget chain for every child access.
+            final cs = Theme.of(context).colorScheme;
+            return MaterialBanner(
+              backgroundColor: isLocal
+                  ? cs.secondaryContainer
+                  : cs.errorContainer,
+              content: Text(
+                isLocal
+                    ? 'You are offline. The selected local model can still chat.'
+                    : 'You are offline. Messages will be sent when connection is restored.',
+                style: TextStyle(
+                  color: isLocal
+                      ? cs.onSecondaryContainer
+                      : cs.onErrorContainer,
                 ),
-                actions: [const SizedBox.shrink()],
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 16,
-                  vertical: 6,
+              ),
+              actions: [const SizedBox.shrink()],
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+            );
+          },
+        ),
+        Expanded(
+          child: Stack(
+            children: [
+              messages.isEmpty
+                  ? _buildEmptyState(context)
+                  : Builder(
+                      builder: (context) {
+                        final items = _buildInterleavedItems(messages);
+                        return ListView.builder(
+                          controller: _scrollController,
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 8,
+                          ),
+                          itemCount: items.length,
+                          itemBuilder: (context, index) {
+                            final item = items[index];
+                            if (item is _DateSep) {
+                              return DateSeparator(label: item.label);
+                            }
+                            final mi = item as _MsgItem;
+                            return _buildMessageBubble(
+                              mi.msg,
+                              messages,
+                              mi.index,
+                            );
+                          },
+                        );
+                      },
+                    ),
+              // Scroll-to-bottom FAB
+              Positioned(
+                right: 16,
+                bottom: 16,
+                child: ScrollToBottomFab(
+                  visible: _showScrollFab,
+                  onTap: () => _scrollToBottom(force: true),
                 ),
-              );
-            },
+              ),
+            ],
           ),
-          Expanded(
-            child: Stack(
-              children: [
-                messages.isEmpty
-                    ? _buildEmptyState(context)
-                    : Builder(
-                        builder: (context) {
-                          final items = _buildInterleavedItems(messages);
-                          return ListView.builder(
-                            controller: _scrollController,
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 16,
-                              vertical: 8,
-                            ),
-                            itemCount: items.length,
-                            itemBuilder: (context, index) {
-                              final item = items[index];
-                              if (item is _DateSep) {
-                                return DateSeparator(label: item.label);
-                              }
-                              final mi = item as _MsgItem;
-                              return _buildMessageBubble(
-                                mi.msg,
-                                messages,
-                                mi.index,
-                              );
-                            },
-                          );
-                        },
-                      ),
-                // Scroll-to-bottom FAB
-                Positioned(
-                  right: 16,
-                  bottom: 16,
-                  child: ScrollToBottomFab(
-                    visible: _showScrollFab,
-                    onTap: () => _scrollToBottom(force: true),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          InputBar(
-            key: _inputBarKey,
-            onSend: _sendMessage,
-            isLoading: sessionState.isRunning,
-            onCancel: sessionState.isRunning ? _cancelRun : null,
-            enterToSend: _enterToSend,
-            onDraftChanged: (text) {
-              final chatId = ref.read(activeChatIdProvider);
-              AppDatabase.instance.saveDraft(chatId, text);
-            },
-            onOpenPromptLibrary: () => _openPromptLibrary(),
-          ),
-        ],
-      );
+        ),
+        InputBar(
+          key: _inputBarKey,
+          onSend: _sendMessage,
+          isLoading: sessionState.isRunning,
+          onCancel: sessionState.isRunning ? _cancelRun : null,
+          enterToSend: _enterToSend,
+          onDraftChanged: (text) {
+            final chatId = ref.read(activeChatIdProvider);
+            AppDatabase.instance.saveDraft(chatId, text);
+          },
+          onOpenPromptLibrary: () => _openPromptLibrary(),
+        ),
+      ],
+    );
   }
 
   /// Pre-compute the interleaved list of date separators and messages.
@@ -1273,7 +1295,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       ),
     );
     if (picked == null) return;
-    await FolderService.instance.assign(chat.id, picked.isEmpty ? null : picked);
+    await FolderService.instance.assign(
+      chat.id,
+      picked.isEmpty ? null : picked,
+    );
     _refreshChatList();
   }
 
@@ -1381,8 +1406,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       await AppDatabase.instance.deleteMessage(item.messageDbId);
       // Also drop the queued bubble from the UI list so the re-sent
       // message lands in its place.
-      final messages =
-          List<ChatMessageUI>.from(ref.read(chatMessagesProvider));
+      final messages = List<ChatMessageUI>.from(ref.read(chatMessagesProvider));
       messages.removeWhere((m) => m.dbId == item.messageDbId);
       ref.read(chatMessagesProvider.notifier).state = messages;
       await _sendMessage(item.text);
@@ -1542,8 +1566,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     if (msg.dbId != null) {
       final db = AppDatabase.instance;
       final storedMessages = await db.getMessages(chatId);
-      final target =
-          storedMessages.where((m) => m.id == msg.dbId).firstOrNull;
+      final target = storedMessages.where((m) => m.id == msg.dbId).firstOrNull;
       if (target != null) {
         await db.deleteMessagesAfter(chatId, target.createdAt);
       }
@@ -1778,17 +1801,21 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                           _FolderChip(
                             label: 'All',
                             selected: activeFolderId == null,
-                            onTap: () => ref
-                                .read(activeFolderIdProvider.notifier)
-                                .state = null,
+                            onTap: () =>
+                                ref
+                                        .read(activeFolderIdProvider.notifier)
+                                        .state =
+                                    null,
                           ),
                           for (final f in folders)
                             _FolderChip(
                               label: f.name,
                               selected: activeFolderId == f.id,
-                              onTap: () => ref
-                                  .read(activeFolderIdProvider.notifier)
-                                  .state = f.id,
+                              onTap: () =>
+                                  ref
+                                          .read(activeFolderIdProvider.notifier)
+                                          .state =
+                                      f.id,
                               onLongPress: () => _renameOrDeleteFolder(f),
                             ),
                         ],
