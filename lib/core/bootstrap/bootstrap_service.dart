@@ -1,11 +1,12 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 import 'package:archive/archive.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+import 'bootstrap_utils.dart';
 
 /// Manages setup for bundled local binaries used by on-device model support.
 ///
@@ -30,7 +31,15 @@ class BootstrapService {
 
   /// Bump this whenever the bootstrap payload changes (zip version upgrade,
   /// prefix path rewrite rules, etc.) to force a full re-download.
-  static const int _currentVersion = 3;
+  static const int _currentVersion = 8;
+
+  // The Termux bootstrap ships Google DNS defaults. On some Android/Wi-Fi
+  // combinations those fail from the app UID even though Android networking
+  // itself works. Keep Cloudflare first; this is only used by bundled native
+  // tools that read $PREFIX/etc/resolv.conf.
+  static const String _resolverConfig =
+      'nameserver 1.1.1.1\n'
+      'nameserver 8.8.8.8\n';
 
   // Per-package apt-style installs after bootstrap zip landing can use
   // https://packages.termux.dev/apt/termux-main — not wired today, kept
@@ -66,6 +75,9 @@ class BootstrapService {
 
   /// Bin directory under the prefix
   String get binPath => '$prefixPath/bin';
+
+  /// App-private files directory that contains the extracted `usr` prefix.
+  String get filesDir => prefixPath.substring(0, prefixPath.length - 4);
 
   /// Lib directory under the prefix
   String get libPath => '$prefixPath/lib';
@@ -138,6 +150,7 @@ class BootstrapService {
       if (installedVersion >= _currentVersion) {
         if (await Directory(binPath).exists() &&
             await File('$binPath/sh').exists()) {
+          await refreshResolverConfig();
           _ready = true;
           return BootstrapStatus.alreadyReady;
         }
@@ -171,6 +184,7 @@ class BootstrapService {
 
       onProgress?.call('Setting permissions...', 0.95);
       _chmodBinTreesSync();
+      await refreshResolverConfig();
 
       onProgress?.call('Verifying installation...', 0.98);
       final verified = await _verifyBootstrap();
@@ -197,10 +211,7 @@ class BootstrapService {
         'ro.product.cpu.abi',
       ]).timeout(const Duration(seconds: 3));
       final abi = (r.stdout as String).trim();
-      if (abi.startsWith('arm64')) return 'aarch64';
-      if (abi.startsWith('armeabi')) return 'arm';
-      if (abi.startsWith('x86_64')) return 'x86_64';
-      if (abi.startsWith('x86')) return 'i686';
+      return bootstrapArchForAbi(abi);
     } catch (_) {}
     return 'aarch64';
   }
@@ -240,14 +251,6 @@ class BootstrapService {
         Directory(d).createSync(recursive: true);
       }
 
-      // Hardcoded Termux prefix that a lot of shebangs embed. We'll
-      // patch references to it as we extract so no post-pass over the
-      // filesystem is needed. Stored as bytes for fast containsBytes
-      // scans against the raw zip entry content.
-      const termuxPrefix = '/data/data/com.termux/files/usr';
-      final termuxBytes = Uint8List.fromList(utf8.encode(termuxPrefix));
-      final ourPrefixBytes = Uint8List.fromList(utf8.encode(prefixPath));
-
       for (final entry in archive) {
         done++;
         if (done % 400 == 0) {
@@ -268,15 +271,7 @@ class BootstrapService {
         final outPath = '$prefixPath/${entry.name}';
         if (entry.isFile) {
           var content = entry.content as List<int>;
-          // Shebang rewrite: only look at files that start with `#!`
-          // and contain the Termux prefix somewhere. Everything else
-          // skips the byte scan entirely — keeps the hot path tight.
-          if (content.length > 2 &&
-              content[0] == 0x23 && // '#'
-              content[1] == 0x21 && // '!'
-              _containsBytes(content, termuxBytes)) {
-            content = _replaceBytes(content, termuxBytes, ourPrefixBytes);
-          }
+          content = rewriteTermuxPrefix(content, prefixPath);
           File(outPath).writeAsBytesSync(content, flush: false);
         } else {
           Directory(outPath).createSync(recursive: true);
@@ -301,7 +296,6 @@ class BootstrapService {
   /// app frozen mid-extract.
   void _applySymlinksSync(String manifest) {
     const sep = '←';
-    const termuxPrefix = '/data/data/com.termux/files/usr';
     final ourPrefix = prefixPath;
     for (final line in manifest.split('\n')) {
       if (line.isEmpty) continue;
@@ -310,8 +304,8 @@ class BootstrapService {
       var target = line.substring(0, idx);
       final relLink = line.substring(idx + sep.length);
 
-      if (target.startsWith(termuxPrefix)) {
-        target = ourPrefix + target.substring(termuxPrefix.length);
+      if (target.startsWith(termuxBootstrapPrefix)) {
+        target = ourPrefix + target.substring(termuxBootstrapPrefix.length);
       }
 
       final linkAbs = '$prefixPath/$relLink';
@@ -328,12 +322,16 @@ class BootstrapService {
     }
   }
 
-  /// Blanket-chmod the bin + libexec trees to 755 so shebangs fire.
+  /// Blanket-chmod executable trees to 755 so shebangs and apt methods fire.
   /// Synchronous — if we let the event loop turn here, Android's
   /// process freezer can yank the app between extract and chmod and
   /// leave files unexecutable. Single fork per tree is fine.
   void _chmodBinTreesSync() {
-    for (final p in ['$prefixPath/bin', '$prefixPath/libexec']) {
+    for (final p in [
+      '$prefixPath/bin',
+      '$prefixPath/libexec',
+      '$prefixPath/lib/apt/methods',
+    ]) {
       if (!Directory(p).existsSync()) continue;
       try {
         Process.runSync('/system/bin/chmod', ['-R', '755', p]);
@@ -347,54 +345,21 @@ class BootstrapService {
     }
   }
 
-  /// `content.indexOf(needle)` for `List<int>`. Returns true if `needle`
-  /// appears anywhere in `content`. Naive O(n·m) scan — fine because
-  /// needle is ~32 bytes and content is typically < 32 KB.
-  bool _containsBytes(List<int> content, Uint8List needle) {
-    final nl = needle.length;
-    final cl = content.length;
-    if (nl == 0 || cl < nl) return false;
-    final first = needle[0];
-    outer:
-    for (var i = 0; i <= cl - nl; i++) {
-      if (content[i] != first) continue;
-      for (var j = 1; j < nl; j++) {
-        if (content[i + j] != needle[j]) continue outer;
-      }
-      return true;
-    }
-    return false;
-  }
-
-  /// Byte-level string replace. Only called after [_containsBytes]
-  /// confirmed a hit so we don't pay the copy for pure-binary files.
+  /// Keep DNS usable for native Termux tools launched from this app sandbox.
   ///
-  /// Uses BytesBuilder (dart:io) instead of List<int> to avoid the
-  /// repeated O(n) reallocation that add/addAll caused on a growable list.
-  List<int> _replaceBytes(List<int> content, Uint8List from, Uint8List to) {
-    final out = BytesBuilder(copy: false);
-    final fl = from.length;
-    final cl = content.length;
-    var i = 0;
-    while (i < cl) {
-      if (i <= cl - fl && content[i] == from[0]) {
-        var match = true;
-        for (var j = 1; j < fl; j++) {
-          if (content[i + j] != from[j]) {
-            match = false;
-            break;
-          }
-        }
-        if (match) {
-          out.add(to);
-          i += fl;
-          continue;
-        }
-      }
-      out.addByte(content[i]);
-      i++;
+  /// Android itself resolves through netd, but the bundled apt/curl stack reads
+  /// a plain resolv.conf. The bootstrap's default resolver list can fail on
+  /// real devices, leaving `apt update` unable to locate any packages.
+  Future<void> refreshResolverConfig() async {
+    if (_prefixPath == null) return;
+    try {
+      await Directory('$prefixPath/etc').create(recursive: true);
+      await File(
+        '$prefixPath/etc/resolv.conf',
+      ).writeAsString(_resolverConfig, flush: true);
+    } catch (e) {
+      debugPrint('[Bootstrap] failed to refresh resolv.conf: $e');
     }
-    return out.toBytes();
   }
 
   Future<bool> _verifyBootstrap() async {
@@ -412,10 +377,16 @@ class BootstrapService {
       '$prefixPath/include',
       '$prefixPath/share',
       '$prefixPath/etc',
+      '$prefixPath/etc/apt/sources.list.d',
       '$prefixPath/tmp',
       '$prefixPath/home',
       '$prefixPath/libexec',
       '$prefixPath/var',
+      '$prefixPath/var/c/apt/archives/partial',
+      '$prefixPath/var/cache/apt/archives/partial',
+      '$prefixPath/var/lib/apt/lists/partial',
+      '$prefixPath/var/lib/dpkg',
+      '$prefixPath/var/log/apt',
       '$prefixPath/lib/python3.12',
       '$prefixPath/lib/node_modules',
       '$prefixPath/lib/openjdk-17',
@@ -468,10 +439,12 @@ class BootstrapService {
     final cmd = commands[toolName];
     if (cmd == null) return 'Unknown tool: $toolName';
     try {
-      final result = await Process.run('/system/bin/sh', [
-        '-c',
-        cmd,
-      ], environment: environment).timeout(const Duration(seconds: 10));
+      final result = await Process.run(
+        '/system/bin/sh',
+        ['-c', cmd],
+        environment: environment,
+        workingDirectory: filesDir,
+      ).timeout(const Duration(seconds: 10));
       if (result.exitCode == 0) {
         return result.stdout.toString().trim();
       }

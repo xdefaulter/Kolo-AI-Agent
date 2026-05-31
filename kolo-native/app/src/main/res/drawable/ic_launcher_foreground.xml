@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Circular background -->
+    <path
+        android:fillColor="#1565C0"
+        android:pathData="M54,54m-30,0a30,30 0,1 1,60 0a30,30 0,1 1,-60 0"/>
+    <!-- Asterisk/star icon representing AI -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,28 L56.5,46.5 L72,39 L62,52 L78,54 L62,56 L72,69 L56.5,61.5 L54,80 L51.5,61.5 L36,69 L46,56 L30,54 L46,52 L36,39 L51.5,46.5 Z"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="0.5"/>
+</vector>

@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:dio/dio.dart';
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 
 import '../bootstrap/bootstrap_service.dart';
@@ -52,6 +53,12 @@ enum LlamaServerState {
 class LlamaServerService {
   LlamaServerService._();
   static final LlamaServerService instance = LlamaServerService._();
+
+  static const _termuxRepoBase =
+      'https://packages-cf.termux.dev/apt/termux-main';
+  static const _termuxPackagesUrl =
+      '$_termuxRepoBase/dists/stable/main/binary-aarch64/Packages';
+  static const _downloadHeaders = {'User-Agent': 'curl/8.14.1'};
 
   /// Fixed loopback port. High enough to avoid clashing with common
   /// ports (8080, 5000, etc.); low-enough-that-SELinux-is-fine on
@@ -115,17 +122,21 @@ class LlamaServerService {
     _setState(LlamaServerState.installing);
     lastError = null;
 
+    final packages = ['llama-cpp'];
+    if (withVulkan) packages.add('llama-cpp-backend-vulkan');
+
     // Update the package index first — packages.termux.dev rotates
     // versions weekly and a stale index 404s individual downloads.
     final updateOk = await _runApt(['update']);
-    if (!updateOk) {
-      lastError = 'apt update failed — check network connectivity.';
-      _setState(LlamaServerState.notInstalled);
-      return false;
+    var installOk = false;
+    if (updateOk) {
+      installOk = await _runApt(['install', '-y', ...packages]);
+    } else {
+      _logController.add('[apt update failed; trying direct deb install]');
     }
-    final packages = ['llama-cpp'];
-    if (withVulkan) packages.add('llama-cpp-backend-vulkan');
-    final installOk = await _runApt(['install', '-y', ...packages]);
+    if (!installOk) {
+      installOk = await _installDebFallback(packages);
+    }
     if (!installOk) {
       lastError = 'apt install failed — see logs for details.';
       _setState(LlamaServerState.notInstalled);
@@ -140,15 +151,156 @@ class LlamaServerService {
     return true;
   }
 
+  Future<bool> _installDebFallback(List<String> requestedPackages) async {
+    final bs = BootstrapService.instance;
+    try {
+      _logController.add(
+        '[fallback] downloading Termux package index with app networking',
+      );
+      final index = await _loadPackagesIndex();
+      final packageMap = _parsePackagesIndex(index);
+      final names = <String>['libandroid-spawn', ...requestedPackages];
+      final archiveDir = Directory('${bs.prefixPath}/var/cache/apt/archives');
+      await archiveDir.create(recursive: true);
+
+      final debPaths = <String>[];
+      for (final name in names) {
+        final deb = packageMap[name];
+        if (deb == null) {
+          _logController.add('[fallback] package metadata missing: $name');
+          return false;
+        }
+        final path = '${archiveDir.path}/${deb.fileName}';
+        await _downloadDeb(deb, path);
+        debPaths.add(path);
+      }
+
+      return _runBootstrapCommand('dpkg', ['-i', ...debPaths]);
+    } catch (e, st) {
+      debugPrint('[llama.cpp fallback install] failed: $e\n$st');
+      _logController.add('[fallback] failed: $e');
+      return false;
+    }
+  }
+
+  Future<String> _loadPackagesIndex() async {
+    final bs = BootstrapService.instance;
+    final localLists = Directory('${bs.prefixPath}/var/lib/apt/lists');
+    final localPackages = localLists
+        .listSync()
+        .whereType<File>()
+        .where((f) => f.path.endsWith('_Packages'))
+        .toList();
+    localPackages.sort(
+      (a, b) => b.statSync().modified.compareTo(a.statSync().modified),
+    );
+
+    try {
+      final dio = Dio(
+        BaseOptions(
+          connectTimeout: const Duration(seconds: 20),
+          receiveTimeout: const Duration(minutes: 2),
+          headers: _downloadHeaders,
+          responseType: ResponseType.plain,
+        ),
+      );
+      final response = await dio.get<String>(_termuxPackagesUrl);
+      final body = response.data;
+      if (body != null && body.contains('\nPackage: llama-cpp\n')) {
+        return body;
+      }
+      throw StateError('Termux Packages response did not include llama-cpp');
+    } catch (e) {
+      if (localPackages.isNotEmpty) {
+        _logController.add('[fallback] using cached Termux package index');
+        return localPackages.first.readAsString();
+      }
+      rethrow;
+    }
+  }
+
+  Map<String, _DebPackage> _parsePackagesIndex(String index) {
+    final out = <String, _DebPackage>{};
+    for (final paragraph in index.split(RegExp(r'\n\s*\n'))) {
+      final fields = <String, String>{};
+      String? currentKey;
+      for (final line in paragraph.split('\n')) {
+        if (line.isEmpty) continue;
+        if (line.startsWith(' ') && currentKey != null) {
+          fields[currentKey] = '${fields[currentKey]}\n${line.substring(1)}';
+          continue;
+        }
+        final idx = line.indexOf(':');
+        if (idx <= 0) continue;
+        currentKey = line.substring(0, idx);
+        fields[currentKey] = line.substring(idx + 1).trim();
+      }
+      final name = fields['Package'];
+      final filename = fields['Filename'];
+      final sha256Hex = fields['SHA256'];
+      if (name == null || filename == null || sha256Hex == null) continue;
+      out[name] = _DebPackage(
+        name: name,
+        filename: filename,
+        sha256Hex: sha256Hex,
+      );
+    }
+    return out;
+  }
+
+  Future<void> _downloadDeb(_DebPackage deb, String path) async {
+    final file = File(path);
+    if (await file.exists()) {
+      final existingHash = sha256.convert(await file.readAsBytes()).toString();
+      if (existingHash == deb.sha256Hex) {
+        _logController.add('[fallback] cached ${deb.fileName}');
+        return;
+      }
+      await file.delete();
+    }
+
+    final url = '$_termuxRepoBase/${deb.filename}';
+    _logController.add('[fallback] downloading ${deb.fileName}');
+    final dio = Dio(
+      BaseOptions(
+        connectTimeout: const Duration(seconds: 20),
+        receiveTimeout: const Duration(minutes: 5),
+        headers: _downloadHeaders,
+      ),
+    );
+    await dio.download(
+      url,
+      path,
+      onReceiveProgress: (received, total) {
+        if (total > 0 && received == total) {
+          _logController.add('[fallback] downloaded ${deb.fileName}');
+        }
+      },
+    );
+
+    final actualHash = sha256.convert(await file.readAsBytes()).toString();
+    if (actualHash != deb.sha256Hex) {
+      await file.delete();
+      throw StateError('SHA-256 mismatch for ${deb.fileName}: $actualHash');
+    }
+  }
+
   /// Run apt with the full bootstrap environment. Captures stdout/stderr
   /// and tees them to [logStream] so the UI can show live progress.
   Future<bool> _runApt(List<String> args) async {
     final bs = BootstrapService.instance;
+    await bs.refreshResolverConfig();
     _logController.add('\$ apt ${args.join(' ')}');
+    return _runBootstrapCommand('apt', args);
+  }
+
+  Future<bool> _runBootstrapCommand(String command, List<String> args) async {
+    final bs = BootstrapService.instance;
     final proc = await Process.start(
-      '${bs.binPath}/apt',
+      '${bs.binPath}/$command',
       args,
       environment: bs.environment,
+      workingDirectory: bs.filesDir,
       runInShell: false,
     );
     // Non-interactive front-end keeps apt from blocking on config prompts.
@@ -156,16 +308,22 @@ class LlamaServerService {
     await proc.stdin.flush();
     await proc.stdin.close();
 
-    proc.stdout.transform(utf8.decoder).transform(const LineSplitter()).listen(
-          _logController.add,
-          onError: (_) {},
-        );
-    proc.stderr.transform(utf8.decoder).transform(const LineSplitter()).listen(
-          _logController.add,
-          onError: (_) {},
-        );
-    final code = await proc.exitCode;
-    _logController.add('[apt exit $code]');
+    proc.stdout
+        .transform(utf8.decoder)
+        .transform(const LineSplitter())
+        .listen(_logController.add, onError: (_) {});
+    proc.stderr
+        .transform(utf8.decoder)
+        .transform(const LineSplitter())
+        .listen(_logController.add, onError: (_) {});
+    final code = await proc.exitCode.timeout(
+      const Duration(minutes: 5),
+      onTimeout: () {
+        proc.kill();
+        return -1;
+      },
+    );
+    _logController.add('[$command exit $code]');
     return code == 0;
   }
 
@@ -208,6 +366,7 @@ class LlamaServerService {
         '${bs.binPath}/llama-server',
         args,
         environment: bs.environment,
+        workingDirectory: bs.filesDir,
         runInShell: false,
       );
     } catch (e) {
@@ -225,20 +384,23 @@ class LlamaServerService {
         .transform(const LineSplitter())
         .listen(_logController.add, onError: (_) {});
     // Watch for unexpected death so the state reflects reality.
-    unawaited(_process!.exitCode.then((code) {
-      if (_state == LlamaServerState.running ||
-          _state == LlamaServerState.starting) {
-        lastError = 'llama-server exited with code $code';
-        _setState(LlamaServerState.crashed);
-      }
-      _process = null;
-    }));
+    unawaited(
+      _process!.exitCode.then((code) {
+        if (_state == LlamaServerState.running ||
+            _state == LlamaServerState.starting) {
+          lastError = 'llama-server exited with code $code';
+          _setState(LlamaServerState.crashed);
+        }
+        _process = null;
+      }),
+    );
 
     if (await _pollHealth(startupTimeout)) {
       _setState(LlamaServerState.running);
       return true;
     }
-    lastError = 'Server did not become ready within ${startupTimeout.inSeconds}s.';
+    lastError =
+        'Server did not become ready within ${startupTimeout.inSeconds}s.';
     await stop();
     _setState(LlamaServerState.crashed);
     return false;
@@ -250,10 +412,12 @@ class LlamaServerService {
   /// sees a responsive UI via [stateStream].
   Future<bool> _pollHealth(Duration timeout) async {
     final deadline = DateTime.now().add(timeout);
-    final dio = Dio(BaseOptions(
-      connectTimeout: const Duration(seconds: 2),
-      receiveTimeout: const Duration(seconds: 2),
-    ));
+    final dio = Dio(
+      BaseOptions(
+        connectTimeout: const Duration(seconds: 2),
+        receiveTimeout: const Duration(seconds: 2),
+      ),
+    );
     while (DateTime.now().isBefore(deadline)) {
       // Bail early if the process died before the endpoint came up.
       if (_process == null) return false;
@@ -298,4 +462,18 @@ class LlamaServerService {
     _state = next;
     if (!_stateController.isClosed) _stateController.add(next);
   }
+}
+
+class _DebPackage {
+  const _DebPackage({
+    required this.name,
+    required this.filename,
+    required this.sha256Hex,
+  });
+
+  final String name;
+  final String filename;
+  final String sha256Hex;
+
+  String get fileName => filename.split('/').last;
 }

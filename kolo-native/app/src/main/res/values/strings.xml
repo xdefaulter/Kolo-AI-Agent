@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Kolo AI Agent</string>
+    <string name="accessibility_service_description">Kolo AI Agent phone control service. Allows the AI agent to read and interact with your screen.</string>
+
+    <!-- Themes -->
+    <string name="theme_light">Light</string>
+    <string name="theme_dark">Dark</string>
+    <string name="theme_system">System</string>
+
+    <!-- Navigation -->
+    <string name="nav_chat">Chat</string>
+    <string name="nav_settings">Settings</string>
+</resources>

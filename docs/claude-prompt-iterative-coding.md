@@ -126,3 +126,23 @@ Focus on P0 items first, then P1. For each:
 - Tool output is sent back to the LLM as plain text in the conversation, so keep it concise but informative
 - The agent loop itself (`agent_loop.dart`, `tool_router.dart`) should NOT need changes for new tools
 - Build must pass: `flutter analyze` should show zero errors
+
+<!-- SUPPLY_CHAIN_SECURITY_POLICY_V1 -->
+
+## Supply Chain Security Policy
+
+Treat dependency installation, package execution, and build tooling as high-risk operations.
+
+- Prefer pinned lockfile workflows: `npm ci`, `pnpm install --frozen-lockfile`, `yarn install --immutable`, or `bun install --frozen-lockfile`.
+- Do not run `npm install`, `npx`, `pnpm dlx`, `yarn dlx`, `bunx`, `curl | sh`, `wget | sh`, or remote install scripts without explicit user approval.
+- Do not install global packages unless the user explicitly approves the exact package name, version, and purpose.
+- Use `sfw` explicitly when package-manager execution is required and available: `sfw npm ...`, `sfw npx ...`, `sfw pnpm ...`, `sfw yarn ...`, or `sfw bun ...`.
+- Do not rely on shell aliases for safety; non-interactive agent shells may not load `~/.zshrc` or `~/.bashrc`.
+- Assume lifecycle scripts are dangerous. Use `--ignore-scripts` by default unless the project clearly requires scripts, and stop to explain any required lifecycle script before allowing it.
+- Do not add or upgrade dependencies casually. Prefer existing project dependencies and explain why any new package is necessary.
+- Check package names for typosquatting, impersonation, abandoned packages, suspicious maintainers, and unexpected scope changes.
+- Pin exact versions for new direct dependencies unless the repository has a different established policy.
+- Never remove lockfiles or regenerate them unnecessarily. After dependency changes, summarize exactly what changed in `package.json` and lockfiles.
+- Never commit secrets, tokens, `.env` files, npm auth tokens, SSH keys, or registry credentials.
+- If a command would fetch or execute third-party code, state that clearly before running it.
+

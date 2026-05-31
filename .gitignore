@@ -2,6 +2,7 @@
 *.class
 *.log
 *.pyc
+__pycache__/
 *.swp
 .DS_Store
 .atom/
@@ -32,6 +33,7 @@ migrate_working_dir/
 .pub/
 /build/
 /coverage/
+/kolo_screenshot.png
 
 # Symbolication related
 app.*.symbols

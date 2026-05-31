@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="kolo_primary">#FF1565C0</color>
+    <color name="kolo_on_primary">#FFFFFFFF</color>
+    <color name="kolo_primary_container">#FF90CAF9</color>
+    <color name="kolo_on_primary_container">#FF001D3E</color>
+    <color name="kolo_secondary">#FF6A1B9A</color>
+    <color name="kolo_on_secondary">#FFFFFFFF</color>
+    <color name="kolo_secondary_container">#FFEFB4F5</color>
+    <color name="kolo_on_secondary_container">#FF250035</color>
+    <color name="kolo_tertiary">#FF006C4C</color>
+    <color name="kolo_on_tertiary">#FFFFFFFF</color>
+    <color name="kolo_tertiary_container">#FF89F8CB</color>
+    <color name="kolo_on_tertiary_container">#FF002114</color>
+    <color name="kolo_error">#FFBA1A1A</color>
+    <color name="kolo_surface">#FFF8FAFF</color>
+    <color name="kolo_on_surface">#FF1A1C1E</color>
+    <color name="kolo_surface_variant">#FFDFE2EB</color>
+    <color name="kolo_on_surface_variant">#FF43474E</color>
+</resources>
