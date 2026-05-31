@@ -37,5 +37,6 @@ object ToolModule {
         registry.register(PhoneControlStartTool())
         registry.register(PhoneControlStatusTool())
         registry.register(PhoneControlDoneTool())
+        registry.register(ScreenScreenshotTool())
     }
 }

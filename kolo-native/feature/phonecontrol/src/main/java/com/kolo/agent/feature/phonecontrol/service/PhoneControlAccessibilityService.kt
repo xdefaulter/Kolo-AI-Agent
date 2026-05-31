@@ -14,6 +14,7 @@ import android.view.Gravity
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -185,6 +186,16 @@ class PhoneControlAccessibilityService : AccessibilityService() {
         // Reading the screen tree is always allowed even when stopped
         val rootNode = rootInActiveWindow ?: return "No active window"
         return buildString { appendNode(rootNode, 0) }
+    }
+
+    fun takeScreenshot(): ToolExecutionResult {
+        // Accessibility screenshot — returns tree description, not pixel capture.
+        // Pixel-level takeScreenshot() API (API 30+) requires async callback handling
+        // which doesn't integrate seamlessly with our synchronous tool pattern.
+        // For now, return the accessibility tree which gives the agent structural info.
+        val rootNode = rootInActiveWindow ?: return ToolExecutionResult.err("No active window to screenshot")
+        val tree = buildString { appendNode(rootNode, 0) }
+        return ToolExecutionResult.ok("[Screen capture — accessibility tree]\n$tree")
     }
 
     fun findNodeByText(text: String): AccessibilityNodeInfo? {

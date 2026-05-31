@@ -13,18 +13,19 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.kolo.agent.core.model.*
 import com.kolo.agent.feature.chat.ChatUiState
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.font.FontFamily
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -33,13 +34,160 @@ fun ChatScreen(
     onSendMessage: (String) -> Unit,
     onCancel: () -> Unit,
     onClearError: () -> Unit = {},
-    onNavigateBack: () -> Unit = {},
+    onSelectChat: (ChatId) -> Unit = {},
+    onNewChat: () -> Unit = {},
+    onDeleteChat: (ChatId) -> Unit = {},
     onNavigateSettings: () -> Unit = {},
-    onNavigateSearch: () -> Unit = {},
     onAllowOnce: (ToolPermissionApproval) -> Unit = {},
     onAlwaysAllow: (ToolPermissionApproval) -> Unit = {},
     onDenyOnce: (ToolPermissionApproval) -> Unit = {},
     onBlock: (ToolPermissionApproval) -> Unit = {},
+) {
+    val drawerState = rememberDrawerState(DrawerValue.Closed)
+    val scope = rememberCoroutineScope()
+
+    ModalNavigationDrawer(
+        drawerState = drawerState,
+        drawerContent = {
+            ChatDrawer(
+                chats = state.chatList,
+                currentChatId = state.currentChatId,
+                onSelectChat = { chatId ->
+                    onNewChat.let { } // just for scope
+                    onSelectChat(chatId)
+                    scope.launch { drawerState.close() }
+                },
+                onNewChat = {
+                    onNewChat()
+                    scope.launch { drawerState.close() }
+                },
+                onDeleteChat = onDeleteChat,
+                onNavigateSettings = onNavigateSettings,
+                drawerState = drawerState,
+            )
+        },
+    ) {
+        ChatContent(
+            state = state,
+            onSendMessage = onSendMessage,
+            onCancel = onCancel,
+            onClearError = onClearError,
+            onOpenDrawer = { scope.launch { drawerState.open() } },
+            onNavigateSettings = onNavigateSettings,
+            onAllowOnce = onAllowOnce,
+            onAlwaysAllow = onAlwaysAllow,
+            onDenyOnce = onDenyOnce,
+            onBlock = onBlock,
+        )
+    }
+}
+
+@Composable
+private fun ChatDrawer(
+    chats: List<Chat>,
+    currentChatId: ChatId?,
+    onSelectChat: (ChatId) -> Unit,
+    onNewChat: () -> Unit,
+    onDeleteChat: (ChatId) -> Unit,
+    onNavigateSettings: () -> Unit,
+    drawerState: DrawerState,
+) {
+    ModalDrawerSheet(
+        modifier = Modifier.width(280.dp),
+    ) {
+        // Header
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .statusBarsPadding()
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                Icons.Filled.AutoAwesome,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(24.dp),
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text("Kolo AI", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        }
+        HorizontalDivider()
+
+        // New chat button
+        FilledTonalButton(
+            onClick = onNewChat,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+        ) {
+            Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+            Spacer(modifier = Modifier.width(6.dp))
+            Text("New Chat", style = MaterialTheme.typography.bodyMedium)
+        }
+
+        // Chat list
+        LazyColumn(
+            modifier = Modifier.weight(1f).fillMaxWidth(),
+            contentPadding = PaddingValues(vertical = 4.dp),
+        ) {
+            items(chats, key = { it.id.value }) { chat ->
+                val isCurrent = chat.id == currentChatId
+                NavigationDrawerItem(
+                    label = {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = chat.title,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = if (isCurrent) FontWeight.SemiBold else FontWeight.Normal,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                "${chat.messageCount} messages",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    },
+                    icon = {
+                        Icon(
+                            Icons.Filled.ChatBubbleOutline,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                            tint = if (isCurrent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    },
+                    selected = isCurrent,
+                    onClick = { onSelectChat(chat.id) },
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 1.dp),
+                )
+            }
+        }
+
+        HorizontalDivider()
+
+        // Settings button at bottom
+        NavigationDrawerItem(
+            label = { Text("Settings") },
+            icon = { Icon(Icons.Filled.Settings, contentDescription = null, modifier = Modifier.size(18.dp)) },
+            selected = false,
+            onClick = onNavigateSettings,
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp).navigationBarsPadding(),
+        )
+    }
+}
+
+@Composable
+private fun ChatContent(
+    state: ChatUiState,
+    onSendMessage: (String) -> Unit,
+    onCancel: () -> Unit,
+    onClearError: () -> Unit,
+    onOpenDrawer: () -> Unit,
+    onNavigateSettings: () -> Unit,
+    onAllowOnce: (ToolPermissionApproval) -> Unit,
+    onAlwaysAllow: (ToolPermissionApproval) -> Unit,
+    onDenyOnce: (ToolPermissionApproval) -> Unit,
+    onBlock: (ToolPermissionApproval) -> Unit,
 ) {
     var inputText by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
@@ -51,12 +199,12 @@ fun ChatScreen(
         }
     }
 
-    // Single scaffold; no nested scaffolds; deliberate insets
     Scaffold(
         topBar = {
             ChatHeader(
                 provider = state.activeProvider,
                 model = state.activeModel,
+                onOpenDrawer = onOpenDrawer,
                 onSettings = onNavigateSettings,
             )
         },
@@ -145,12 +293,13 @@ fun ChatScreen(
     }
 }
 
-// ──── Compact header (no back arrow on main chat; settings icon instead) ────
+// ──── Chat header with drawer toggle ────
 
 @Composable
 private fun ChatHeader(
     provider: String?,
     model: String?,
+    onOpenDrawer: () -> Unit,
     onSettings: () -> Unit,
 ) {
     Surface(
@@ -160,17 +309,14 @@ private fun ChatHeader(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(start = 12.dp, end = 4.dp, top = 4.dp, bottom = 4.dp)
+                .padding(start = 4.dp, end = 4.dp, top = 4.dp, bottom = 4.dp)
                 .statusBarsPadding(),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Icon(
-                imageVector = Icons.Filled.AutoAwesome,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(20.dp),
-            )
-            Spacer(modifier = Modifier.width(8.dp))
+            IconButton(onClick = onOpenDrawer, modifier = Modifier.size(40.dp)) {
+                Icon(Icons.Filled.Menu, contentDescription = "Chat list", modifier = Modifier.size(22.dp))
+            }
+            Spacer(modifier = Modifier.width(4.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = model ?: "Kolo AI",
@@ -189,18 +335,14 @@ private fun ChatHeader(
                     )
                 }
             }
-            IconButton(onClick = onSettings, modifier = Modifier.size(36.dp)) {
-                Icon(
-                    Icons.Filled.Settings,
-                    contentDescription = "Settings",
-                    modifier = Modifier.size(20.dp),
-                )
+            IconButton(onClick = onSettings, modifier = Modifier.size(40.dp)) {
+                Icon(Icons.Filled.Settings, contentDescription = "Settings", modifier = Modifier.size(22.dp))
             }
         }
     }
 }
 
-// ──── Tool approval banner — dense but clear ────
+// ──── Tool approval banner ────
 
 @Composable
 private fun ToolApprovalBanner(
@@ -303,7 +445,7 @@ private fun ToolApprovalBanner(
     }
 }
 
-// ──── Message bubble — denser ────
+// ──── Message bubble ────
 
 @Composable
 private fun MessageBubble(message: Message) {
@@ -529,7 +671,7 @@ private fun TokenUsageBar(usage: TokenUsage) {
     }
 }
 
-// ──── Compact input bar — no prompt-library button, tighter padding ────
+// ──── Compact input bar ────
 
 @Composable
 private fun ChatInputBar(
@@ -562,7 +704,6 @@ private fun ChatInputBar(
                 textStyle = MaterialTheme.typography.bodyMedium,
             )
 
-            // Send / Cancel button
             if (isStreaming) {
                 FilledIconButton(
                     onClick = onCancel,

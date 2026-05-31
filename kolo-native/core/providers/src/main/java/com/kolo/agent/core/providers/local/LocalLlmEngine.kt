@@ -1,5 +1,6 @@
 package com.kolo.agent.core.providers.local
 
+import android.content.Context
 import com.kolo.agent.core.model.ProviderConfig
 import com.kolo.agent.core.model.ProviderKind
 import kotlinx.coroutines.Dispatchers
@@ -50,6 +51,21 @@ interface LocalLlmEngine {
      */
     fun isValidModel(modelPath: String): Boolean = File(modelPath).exists()
 
+    /**
+     * List available GGUF models in known directories.
+     */
+    fun listAvailableModels(): List<String> {
+        return MODEL_DIRS.flatMap { dir ->
+            val directory = File(dir)
+            if (directory.exists() && directory.isDirectory) {
+                directory.listFiles()
+                    ?.filter { it.extension == "gguf" }
+                    ?.map { it.absolutePath }
+                    ?: emptyList()
+            } else emptyList()
+        }
+    }
+
     companion object {
         /** Known model search directories. */
         val MODEL_DIRS = listOf(
@@ -64,15 +80,23 @@ interface LocalLlmEngine {
  * Will be replaced with llama.cpp binding once integrated.
  */
 class StubLocalLlmEngine : LocalLlmEngine {
-    override val isModelLoaded: Boolean = false
-    override val loadedModelPath: String? = null
+    override var isModelLoaded: Boolean = false
+        private set
+    override var loadedModelPath: String? = null
+        private set
 
     override suspend fun loadModel(modelPath: String, contextSize: Int, threads: Int) {
-        throw UnsupportedOperationException("Local LLM not yet integrated. Install llama.cpp binding for local inference.")
+        if (!isValidModel(modelPath)) {
+            throw IllegalArgumentException("Model file not found: $modelPath")
+        }
+        // Stub: would initialize llama.cpp context here
+        isModelLoaded = true
+        loadedModelPath = modelPath
     }
 
     override suspend fun unloadModel() {
-        // No-op
+        isModelLoaded = false
+        loadedModelPath = null
     }
 
     override fun completeStream(
@@ -82,7 +106,11 @@ class StubLocalLlmEngine : LocalLlmEngine {
         topP: Float,
         repeatPenalty: Float,
     ): Flow<String> = flow {
-        emit("[Local LLM not available — configure a cloud provider or integrate llama.cpp]")
+        if (!isModelLoaded) {
+            emit("[Local LLM not available — configure a cloud provider or integrate llama.cpp]")
+            return@flow
+        }
+        emit("[Local LLM inference not yet integrated. The model at $loadedModelPath is loaded but llama.cpp binding is not available.]")
     }.flowOn(Dispatchers.IO)
 }
 

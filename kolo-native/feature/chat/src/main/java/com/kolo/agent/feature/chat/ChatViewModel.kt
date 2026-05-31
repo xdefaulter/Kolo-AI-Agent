@@ -74,7 +74,10 @@ class ChatViewModel @Inject constructor(
 
     init {
         viewModelScope.launch {
-            loadChatList()
+            // Observe chat list continuously
+            chatDao.getAll().let { chats ->
+                _uiState.update { it.copy(chatList = chats.map { c -> c.toDomain() }) }
+            }
             val provider = providerRep.getActiveProvider()
             provider?.let { p ->
                 _uiState.update { it.copy(
@@ -88,6 +91,18 @@ class ChatViewModel @Inject constructor(
     private suspend fun loadChatList() {
         val chats = chatDao.getAll().map { it.toDomain() }
         _uiState.update { it.copy(chatList = chats) }
+    }
+
+    fun deleteChat(chatId: ChatId) {
+        viewModelScope.launch {
+            chatDao.deleteById(chatId.value)
+            messageDao.deleteForChat(chatId.value)
+            if (currentChatId == chatId) {
+                currentChatId = null
+                _uiState.update { it.copy(currentChatId = null, messages = emptyList()) }
+            }
+            loadChatList()
+        }
     }
 
     fun loadChat(chatId: ChatId) {
