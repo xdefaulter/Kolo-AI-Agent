@@ -28,6 +28,7 @@ fun SettingsScreen(
     onAddProvider: (ProviderConfig, String) -> Unit,
     onDeleteProvider: (ProviderId) -> Unit,
     onSetActiveProvider: (ProviderId) -> Unit,
+    onSetProviderModelPath: (ProviderId, String) -> Unit,
     onSetToolPermission: (String, ToolPermissionMode) -> Unit,
     onAddMemory: (String, String) -> Unit,
     onDeleteMemory: (String) -> Unit,
@@ -75,6 +76,7 @@ fun SettingsScreen(
                     onAddProvider = onAddProvider,
                     onDeleteProvider = onDeleteProvider,
                     onSetActiveProvider = onSetActiveProvider,
+                    onSetProviderModelPath = onSetProviderModelPath,
                 )
                 SettingsSection.Tools -> ToolsSection(
                     toolPermissions = state.toolPermissions,
@@ -100,8 +102,8 @@ fun SettingsScreen(
 private fun SettingsHome(onSectionSelected: (SettingsSection) -> Unit) {
     LazyColumn(
         modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(1.dp),
-        contentPadding = PaddingValues(vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(0.dp),
+        contentPadding = PaddingValues(vertical = 4.dp),
     ) {
         item {
             SectionHeader("Providers & Models")
@@ -128,7 +130,7 @@ private fun SettingsHome(onSectionSelected: (SettingsSection) -> Unit) {
 @Composable
 private fun SettingsItem(icon: androidx.compose.ui.graphics.vector.ImageVector, title: String, subtitle: String, onClick: () -> Unit) {
     Surface(onClick = onClick, shape = MaterialTheme.shapes.small, modifier = Modifier.fillMaxWidth()) {
-        Row(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
             Spacer(modifier = Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
@@ -149,6 +151,7 @@ private fun ProvidersSection(
     onAddProvider: (ProviderConfig, String) -> Unit,
     onDeleteProvider: (ProviderId) -> Unit,
     onSetActiveProvider: (ProviderId) -> Unit,
+    onSetProviderModelPath: (ProviderId, String) -> Unit,
 ) {
     var showAddDialog by remember { mutableStateOf(false) }
     var expandedProvider by remember { mutableStateOf<ProviderId?>(null) }
@@ -162,14 +165,15 @@ private fun ProvidersSection(
             }
         }
         items(providers) { provider ->
-            ProviderCard(provider = provider, isActive = provider.id == activeProviderId, isExpanded = provider.id == expandedProvider, onToggleExpand = { expandedProvider = if (expandedProvider == provider.id) null else provider.id }, onSetActive = { onSetActiveProvider(provider.id) }, onDelete = { onDeleteProvider(provider.id) })
+            ProviderCard(provider = provider, isActive = provider.id == activeProviderId, isExpanded = provider.id == expandedProvider, onToggleExpand = { expandedProvider = if (expandedProvider == provider.id) null else provider.id }, onSetActive = { onSetActiveProvider(provider.id) }, onDelete = { onDeleteProvider(provider.id) }, onSetModelPath = { onSetProviderModelPath(provider.id, it) })
         }
     }
     if (showAddDialog) { AddProviderDialog(onDismiss = { showAddDialog = false }, onConfirm = { config, apiKey -> onAddProvider(config, apiKey); showAddDialog = false }) }
 }
 
 @Composable
-private fun ProviderCard(provider: ProviderConfig, isActive: Boolean, isExpanded: Boolean, onToggleExpand: () -> Unit, onSetActive: () -> Unit, onDelete: () -> Unit) {
+private fun ProviderCard(provider: ProviderConfig, isActive: Boolean, isExpanded: Boolean, onToggleExpand: () -> Unit, onSetActive: () -> Unit, onDelete: () -> Unit, onSetModelPath: (String) -> Unit) {
+    var modelPathDraft by remember(provider.id, provider.modelPath) { mutableStateOf(provider.modelPath.orEmpty()) }
     Card(onClick = onToggleExpand, colors = CardDefaults.cardColors(containerColor = if (isActive) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface), shape = MaterialTheme.shapes.small) {
         Column(modifier = Modifier.padding(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -177,7 +181,7 @@ private fun ProviderCard(provider: ProviderConfig, isActive: Boolean, isExpanded
                 Spacer(modifier = Modifier.width(10.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text(provider.name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, maxLines = 1)
-                    Text(provider.baseUrl, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(if (provider.isLocal) provider.modelPath ?: "No GGUF model selected" else provider.baseUrl, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
                 if (isActive) { Badge { Text("Active") } }
             }
@@ -185,6 +189,23 @@ private fun ProviderCard(provider: ProviderConfig, isActive: Boolean, isExpanded
                 Column(modifier = Modifier.padding(top = 8.dp)) {
                     provider.activeModel?.let { model -> Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Model", style = MaterialTheme.typography.labelSmall); Text(model.label, style = MaterialTheme.typography.bodySmall) } }
                     Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Type", style = MaterialTheme.typography.labelSmall); Text(when (provider.kind) { ProviderKind.openaiCompat -> "OpenAI-Compatible"; ProviderKind.localLlama -> "Local llama.cpp" }, style = MaterialTheme.typography.bodySmall) }
+                    if (provider.isLocal) {
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = modelPathDraft,
+                            onValueChange = { modelPathDraft = it },
+                            label = { Text("GGUF model path") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        OutlinedButton(
+                            onClick = { onSetModelPath(modelPathDraft) },
+                            enabled = modelPathDraft.trim() != provider.modelPath.orEmpty(),
+                            contentPadding = PaddingValues(horizontal = 12.dp),
+                        ) { Text("Save Model Path", style = MaterialTheme.typography.labelSmall) }
+                    }
                     Spacer(Modifier.height(6.dp))
                     Row(Modifier.fillMaxWidth(), Arrangement.spacedBy(6.dp)) {
                         if (!isActive) { OutlinedButton(onClick = onSetActive, contentPadding = PaddingValues(horizontal = 12.dp)) { Text("Set Active", style = MaterialTheme.typography.labelSmall) } }
@@ -201,21 +222,47 @@ private fun AddProviderDialog(onDismiss: () -> Unit, onConfirm: (ProviderConfig,
     var name by remember { mutableStateOf("") }
     var baseUrl by remember { mutableStateOf("") }
     var apiKey by remember { mutableStateOf("") }
+    var modelPath by remember { mutableStateOf("") }
+    var providerKind by remember { mutableStateOf(ProviderKind.openaiCompat) }
     var selectedPreset by remember { mutableStateOf(-1) }
     AlertDialog(onDismissRequest = onDismiss, title = { Text("Add Provider") }, text = {
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                FilterChip(selected = providerKind == ProviderKind.openaiCompat, onClick = { providerKind = ProviderKind.openaiCompat }, label = { Text("Remote API") })
+                FilterChip(selected = providerKind == ProviderKind.localLlama, onClick = { providerKind = ProviderKind.localLlama; name = name.ifBlank { "Local llama.cpp" }; baseUrl = "llama.cpp://local" }, label = { Text("Local GGUF") })
+            }
             Text("Quick Setup", style = MaterialTheme.typography.labelMedium)
-            LazyColumn(modifier = Modifier.heightIn(max = 100.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                items(ProviderPresets.defaults) { preset ->
-                    FilterChip(selected = ProviderPresets.defaults.indexOf(preset) == selectedPreset, onClick = { selectedPreset = ProviderPresets.defaults.indexOf(preset); name = preset.name; baseUrl = preset.baseUrl }, label = { Text(preset.name, style = MaterialTheme.typography.bodySmall) }, modifier = Modifier.fillMaxWidth())
+            if (providerKind == ProviderKind.openaiCompat) {
+                LazyColumn(modifier = Modifier.heightIn(max = 100.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    items(ProviderPresets.defaults) { preset ->
+                        FilterChip(selected = ProviderPresets.defaults.indexOf(preset) == selectedPreset, onClick = { selectedPreset = ProviderPresets.defaults.indexOf(preset); name = preset.name; baseUrl = preset.baseUrl }, label = { Text(preset.name, style = MaterialTheme.typography.bodySmall) }, modifier = Modifier.fillMaxWidth())
+                    }
                 }
             }
             Spacer(Modifier.height(6.dp))
             OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-            OutlinedTextField(value = baseUrl, onValueChange = { baseUrl = it }, label = { Text("Base URL") }, singleLine = true, modifier = Modifier.fillMaxWidth(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri))
-            OutlinedTextField(value = apiKey, onValueChange = { apiKey = it }, label = { Text("API Key") }, singleLine = true, modifier = Modifier.fillMaxWidth(), visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password))
+            if (providerKind == ProviderKind.localLlama) {
+                OutlinedTextField(value = modelPath, onValueChange = { modelPath = it }, label = { Text("GGUF model path") }, singleLine = true, modifier = Modifier.fillMaxWidth(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri))
+            } else {
+                OutlinedTextField(value = baseUrl, onValueChange = { baseUrl = it }, label = { Text("Base URL") }, singleLine = true, modifier = Modifier.fillMaxWidth(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri))
+                OutlinedTextField(value = apiKey, onValueChange = { apiKey = it }, label = { Text("API Key") }, singleLine = true, modifier = Modifier.fillMaxWidth(), visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password))
+            }
         }
-    }, confirmButton = { TextButton(onClick = { val config = ProviderConfig(name = name.ifBlank { "Custom Provider" }, baseUrl = baseUrl.ifBlank { "https://api.openai.com/v1" }, isActive = true, kind = ProviderKind.openaiCompat); onConfirm(config, apiKey) }, enabled = name.isNotBlank() && baseUrl.isNotBlank()) { Text("Add") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
+    }, confirmButton = { TextButton(onClick = {
+        val config = if (providerKind == ProviderKind.localLlama) {
+            ProviderConfig(
+                name = name.ifBlank { "Local llama.cpp" },
+                baseUrl = "llama.cpp://local",
+                isActive = true,
+                kind = ProviderKind.localLlama,
+                modelPath = modelPath.trim().ifBlank { null },
+                models = listOf(ModelConfig(modelId = "local-gguf", displayName = "Local GGUF", maxTokens = 1024, contextWindow = 4096, isActive = true)),
+            )
+        } else {
+            ProviderConfig(name = name.ifBlank { "Custom Provider" }, baseUrl = baseUrl.ifBlank { "https://api.openai.com/v1" }, isActive = true, kind = ProviderKind.openaiCompat)
+        }
+        onConfirm(config, apiKey)
+    }, enabled = name.isNotBlank() && (providerKind == ProviderKind.localLlama || baseUrl.isNotBlank())) { Text("Add") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
 }
 
 // ──── Tools ────
@@ -426,10 +473,11 @@ private fun ThemeOptionButton(label: String, mode: AppThemeMode, current: AppThe
 @Composable
 private fun AboutSection() {
     LazyColumn(modifier = Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        item { Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) { Icon(Icons.Filled.SmartToy, contentDescription = null, modifier = Modifier.size(44.dp), tint = MaterialTheme.colorScheme.primary); Spacer(Modifier.height(6.dp)); Text("Kolo AI Agent", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold); Text("v1.0.0 (Native)", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) } }
+        item { Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) { Icon(Icons.Filled.SmartToy, contentDescription = null, modifier = Modifier.size(36.dp), tint = MaterialTheme.colorScheme.primary); Spacer(Modifier.height(4.dp)); Text("Kolo AI Agent", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold); Text("v1.0.0 (Native)", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) } }
         item { HorizontalDivider() }
         item { Card(shape = MaterialTheme.shapes.small) { Column(Modifier.padding(10.dp)) { Text("What Works", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold); Spacer(Modifier.height(4.dp)); Text("• OpenAI-compatible streaming chat with tool use", style = MaterialTheme.typography.bodySmall); Text("• Tool permission gating (allow once / always / deny / block)", style = MaterialTheme.typography.bodySmall); Text("• Room-backed memory system", style = MaterialTheme.typography.bodySmall); Text("• Phone control with session safety & system overlay", style = MaterialTheme.typography.bodySmall); Text("• Chat list drawer for switching conversations", style = MaterialTheme.typography.bodySmall); Text("• Web search via DuckDuckGo (no API key needed)", style = MaterialTheme.typography.bodySmall); Text("• Theme switching (system / light / dark via DataStore)", style = MaterialTheme.typography.bodySmall) } } }
-        item { Card(shape = MaterialTheme.shapes.small) { Column(Modifier.padding(10.dp)) { Text("Remaining Integration", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.error); Spacer(Modifier.height(4.dp)); Text("• Local LLM — JNI bridge exists; package official libllama.so to enable inference", style = MaterialTheme.typography.bodySmall); Text("• Pixel screenshot — accessibility tree + screen metrics only; no image capture", style = MaterialTheme.typography.bodySmall) } } }
+        item { Card(shape = MaterialTheme.shapes.small) { Column(Modifier.padding(10.dp)) { Text("Partially Integrated", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.tertiary); Spacer(Modifier.height(4.dp)); Text("• Local LLM — JNI/CMake bridge compiles; package official libllama.so + GGUF model to enable inference", style = MaterialTheme.typography.bodySmall); Text("• Pixel screenshot — working on Android 11+ with active phone-control session; needs device verification", style = MaterialTheme.typography.bodySmall) } } }
+        item { Card(shape = MaterialTheme.shapes.small) { Column(Modifier.padding(10.dp)) { Text("Needs Device Verification", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.outline); Spacer(Modifier.height(4.dp)); Text("• Pixel screenshot — code path uses Android 11+ Accessibility screenshot; not verified on device yet", style = MaterialTheme.typography.bodySmall); Text("• System overlay STOP button — overlay layout works but not testable without active session", style = MaterialTheme.typography.bodySmall) } } }
         item { Card(shape = MaterialTheme.shapes.small) { Column(Modifier.padding(10.dp)) { Text("Diagnostics", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold); Spacer(Modifier.height(4.dp)); Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Platform", style = MaterialTheme.typography.bodySmall); Text("Android Native", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary) }; Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Min SDK", style = MaterialTheme.typography.bodySmall); Text("26", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary) } } } }
     }
 }

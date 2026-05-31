@@ -44,7 +44,9 @@ class FullRegistryTest {
         registry.register(StubPhoneTool("phone_control_status", "Check phone control status", """{"type":"object","properties":{},"required":[]}""", ToolPermission.safe))
         registry.register(StubPhoneTool("phone_control_done", "End phone control session", """{"type":"object","properties":{"message":{"type":"string"}},"required":[]}""", ToolPermission.safe))
         registry.register(StubPhoneTool("screen_read", "Read the accessibility tree", """{"type":"object","properties":{},"required":[]}""", ToolPermission.dangerous))
-        registry.register(StubPhoneTool("screen_screenshot", "Capture a structural screenshot of the current screen as an accessibility tree with screen metrics", """{"type":"object","properties":{},"required":[]}""", ToolPermission.dangerous))
+        // Stub mirrors the real ScreenScreenshotTool description from feature:phonecontrol module.
+        // Stubs exist here because unit tests cannot depend on Android AccessibilityService classes.
+        registry.register(StubPhoneTool("screen_screenshot", "Capture a pixel screenshot of the current screen as a PNG file, plus the accessibility tree. Requires Android 11+ and an active phone control session.", """{"type":"object","properties":{},"required":[]}""", ToolPermission.dangerous))
     }
 
     @Test
@@ -222,18 +224,22 @@ class FullRegistryTest {
     }
 
     @Test
-    fun `screen_screenshot describes what it actually captures`() {
+    fun `screen_screenshot describes pixel capture with accessibility tree`() {
         val screenshot = registry.getTool("screen_screenshot")
         assertNotNull("screen_screenshot should be registered", screenshot)
         assertTrue(
-            "screen_screenshot should mention accessibility tree or structural",
-            screenshot!!.description.lowercase().contains("accessibility tree") ||
-                screenshot.description.lowercase().contains("structural"),
+            "screen_screenshot should mention PNG or pixel capture",
+            screenshot!!.description.lowercase().contains("png") ||
+                screenshot.description.lowercase().contains("pixel"),
         )
-        // Must NOT claim to be a pixel/PNG screenshot
-        assertFalse(
-            "screen_screenshot must not claim to capture PNG or pixel image",
-            screenshot.description.lowercase().contains("png"),
+        assertTrue(
+            "screen_screenshot should mention accessibility tree",
+            screenshot.description.lowercase().contains("accessibility tree"),
+        )
+        assertTrue(
+            "screen_screenshot should mention Android 11+ requirement",
+            screenshot.description.lowercase().contains("android 11") ||
+                screenshot.description.contains("API 30"),
         )
     }
 }

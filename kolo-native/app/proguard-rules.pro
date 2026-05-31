@@ -29,6 +29,7 @@
 # Accessibility service and native bridge entry points.
 -keep class com.kolo.agent.feature.phonecontrol.service.PhoneControlAccessibilityService { *; }
 -keep class com.kolo.agent.core.providers.local.LlamaCppEngine { *; }
+-keep class com.kolo.agent.core.providers.local.LlamaTokenCallback { *; }
 -keepclasseswithmembernames class * {
     native <methods>;
 }

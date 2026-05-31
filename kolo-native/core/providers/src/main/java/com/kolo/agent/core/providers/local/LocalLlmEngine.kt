@@ -4,6 +4,7 @@ import com.kolo.agent.core.model.ProviderConfig
 import com.kolo.agent.core.model.ProviderKind
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
@@ -13,8 +14,7 @@ import java.io.File
  * Interface for local LLM inference via llama.cpp.
  *
  * This provides a unified API for running models locally on device.
- * The actual implementation will use the llama.cpp Android binding
- * once integrated.
+ * The JNI implementation links official llama.cpp sources through CMake.
  */
 interface LocalLlmEngine {
     /** Whether a model is currently loaded and ready for inference. */
@@ -113,13 +113,8 @@ data class ModelInfo(
 /**
  * JNI-backed llama.cpp engine.
  *
- * This class is intentionally strict: it validates GGUF files and then asks
- * the native bridge whether an official llama.cpp runtime is present. If the
- * bridge is compiled but `libllama.so` is not packaged, the user gets a clear
- * runtime error instead of a fake local answer.
- *
- * **LOCAL INFERENCE IS NOT FUNCTIONAL YET.** The C++ bridge and CMake config
- * exist but no `.so` is packaged. [LlamaCppBridge.isAvailable()] returns false.
+ * This class is intentionally strict: it validates GGUF files before loading
+ * them and fails clearly when the native bridge is missing.
  */
 class LlamaCppEngine : LocalLlmEngine {
     override var isModelLoaded: Boolean = false
@@ -135,7 +130,7 @@ class LlamaCppEngine : LocalLlmEngine {
         if (!LlamaCppBridge.isAvailable()) {
             throw IllegalStateException(
                 "llama.cpp is not available in this build. " +
-                "Package the official libllama.so and set a model path to enable inference."
+                "Package libkolo_llama_bridge.so and set a model path to enable inference."
             )
         }
         nativeHandle = withContext(Dispatchers.IO) {
@@ -163,19 +158,30 @@ class LlamaCppEngine : LocalLlmEngine {
         temperature: Float,
         topP: Float,
         repeatPenalty: Float,
-    ): Flow<String> = flow {
-        if (!isModelLoaded) {
-            emit("[Local LLM not loaded — configure a provider or place a .gguf model in /sdcard/llm/models/]")
-            return@flow
+    ): Flow<String> = channelFlow {
+        if (!isModelLoaded || nativeHandle == 0L) {
+            send("[Local LLM not loaded — select a provider or place a .gguf model in /sdcard/llm/models/]")
+            return@channelFlow
         }
         if (!LlamaCppBridge.isAvailable()) {
-            emit("[Local LLM bridge unavailable — llama.cpp runtime is not packaged in this build.]")
-            return@flow
+            send("[Local LLM bridge unavailable — llama.cpp runtime is not packaged in this build. Package libkolo_llama_bridge.so and a GGUF model to enable inference.]")
+            return@channelFlow
         }
-        val response = withContext(Dispatchers.IO) {
-            LlamaCppBridge.complete(nativeHandle, prompt, maxTokens, temperature, topP, repeatPenalty)
+        val error = withContext(Dispatchers.IO) {
+            LlamaCppBridge.completeStream(
+                handle = nativeHandle,
+                prompt = prompt,
+                maxTokens = maxTokens,
+                temperature = temperature,
+                topP = topP,
+                repeatPenalty = repeatPenalty,
+            ) { token ->
+                trySend(token).isSuccess
+            }
         }
-        emit(response)
+        if (error.isNotBlank() && error != "ok") {
+            send("[Local LLM inference error: $error]")
+        }
     }.flowOn(Dispatchers.IO)
 }
 

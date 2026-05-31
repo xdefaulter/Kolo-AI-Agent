@@ -2,6 +2,7 @@
 #include <jni.h>
 
 #include <algorithm>
+#include <functional>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -98,6 +99,112 @@ int decode_tokens(
     return 0;
 }
 
+bool is_valid_utf8(const std::string & value) {
+    int expected = 0;
+    for (unsigned char c : value) {
+        if (expected == 0) {
+            if ((c >> 7) == 0) continue;
+            if ((c >> 5) == 0x6) expected = 1;
+            else if ((c >> 4) == 0xE) expected = 2;
+            else if ((c >> 3) == 0x1E) expected = 3;
+            else return false;
+        } else {
+            if ((c >> 6) != 0x2) return false;
+            expected--;
+        }
+    }
+    return expected == 0;
+}
+
+std::string run_completion(
+        KoloLlamaState * state,
+        const std::string & prompt,
+        jint max_tokens,
+        jfloat temperature,
+        jfloat top_p,
+        jfloat repeat_penalty,
+        const std::function<bool(const std::string &)> & on_token) {
+    if (state == nullptr || state->model == nullptr || state->context == nullptr) {
+        return "Local llama.cpp model is not loaded.";
+    }
+
+    if (prompt.empty()) {
+        return "";
+    }
+
+    llama_memory_clear(llama_get_memory(state->context), false);
+
+    llama_tokens prompt_tokens = common_tokenize(state->context, prompt, true, true);
+    if (prompt_tokens.empty()) {
+        return "";
+    }
+
+    const int max_prompt_tokens = state->n_ctx - CONTEXT_HEADROOM - 1;
+    if (static_cast<int>(prompt_tokens.size()) > max_prompt_tokens) {
+        prompt_tokens.erase(
+                prompt_tokens.begin(),
+                prompt_tokens.end() - max_prompt_tokens);
+    }
+
+    const int decode_result = decode_tokens(
+            state->context,
+            state->batch,
+            prompt_tokens,
+            0,
+            state->n_ctx);
+    if (decode_result != 0) {
+        return "llama.cpp prompt decode failed: " + std::to_string(decode_result);
+    }
+
+    common_params_sampling sampling_params;
+    sampling_params.temp = temperature;
+    sampling_params.top_p = top_p;
+    sampling_params.penalty_repeat = repeat_penalty;
+    common_sampler * sampler = common_sampler_init(state->model, sampling_params);
+    if (sampler == nullptr) {
+        return "Failed to initialize llama.cpp sampler.";
+    }
+
+    std::string pending_utf8;
+    llama_pos current_pos = static_cast<llama_pos>(prompt_tokens.size());
+    const int n_predict = std::max(1, static_cast<int>(max_tokens));
+
+    for (int i = 0; i < n_predict; ++i) {
+        if (current_pos >= state->n_ctx - CONTEXT_HEADROOM) {
+            break;
+        }
+
+        const llama_token token = common_sampler_sample(sampler, state->context, -1);
+        common_sampler_accept(sampler, token, true);
+
+        if (llama_vocab_is_eog(llama_model_get_vocab(state->model), token)) {
+            break;
+        }
+
+        pending_utf8 += common_token_to_piece(state->context, token);
+        if (is_valid_utf8(pending_utf8)) {
+            if (!on_token(pending_utf8)) {
+                break;
+            }
+            pending_utf8.clear();
+        }
+
+        common_batch_clear(state->batch);
+        common_batch_add(state->batch, token, current_pos, {0}, true);
+        if (llama_decode(state->context, state->batch) != 0) {
+            break;
+        }
+        current_pos++;
+    }
+
+    if (!pending_utf8.empty()) {
+        on_token(pending_utf8);
+    }
+
+    common_sampler_free(sampler);
+    return "";
+}
+
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
@@ -171,79 +278,67 @@ Java_com_kolo_agent_core_providers_local_LlamaCppBridge_nativeComplete(
         jfloat top_p,
         jfloat repeat_penalty) {
     auto * state = reinterpret_cast<KoloLlamaState *>(handle);
-    if (state == nullptr || state->model == nullptr || state->context == nullptr) {
-        return env->NewStringUTF("Local llama.cpp model is not loaded.");
-    }
-
     const std::string prompt = get_jstring(env, jprompt);
-    if (prompt.empty()) {
-        return env->NewStringUTF("");
-    }
-
-    llama_memory_clear(llama_get_memory(state->context), false);
-
-    llama_tokens prompt_tokens = common_tokenize(state->context, prompt, true, true);
-    if (prompt_tokens.empty()) {
-        return env->NewStringUTF("");
-    }
-
-    const int max_prompt_tokens = state->n_ctx - CONTEXT_HEADROOM - 1;
-    if (static_cast<int>(prompt_tokens.size()) > max_prompt_tokens) {
-        prompt_tokens.erase(
-                prompt_tokens.begin(),
-                prompt_tokens.end() - max_prompt_tokens);
-    }
-
-    const int decode_result = decode_tokens(
-            state->context,
-            state->batch,
-            prompt_tokens,
-            0,
-            state->n_ctx);
-    if (decode_result != 0) {
-        std::string error = "llama.cpp prompt decode failed: " + std::to_string(decode_result);
+    std::ostringstream output;
+    const std::string error = run_completion(
+            state,
+            prompt,
+            max_tokens,
+            temperature,
+            top_p,
+            repeat_penalty,
+            [&output](const std::string & token) {
+                output << token;
+                return true;
+            });
+    if (!error.empty()) {
         return env->NewStringUTF(error.c_str());
     }
-
-    common_params_sampling sampling_params;
-    sampling_params.temp = temperature;
-    sampling_params.top_p = top_p;
-    sampling_params.penalty_repeat = repeat_penalty;
-    common_sampler * sampler = common_sampler_init(state->model, sampling_params);
-    if (sampler == nullptr) {
-        return env->NewStringUTF("Failed to initialize llama.cpp sampler.");
-    }
-
-    std::ostringstream output;
-    std::string cached_utf8;
-    llama_pos current_pos = static_cast<llama_pos>(prompt_tokens.size());
-    const int n_predict = std::max(1, static_cast<int>(max_tokens));
-
-    for (int i = 0; i < n_predict; ++i) {
-        if (current_pos >= state->n_ctx - CONTEXT_HEADROOM) {
-            break;
-        }
-
-        const llama_token token = common_sampler_sample(sampler, state->context, -1);
-        common_sampler_accept(sampler, token, true);
-
-        if (llama_vocab_is_eog(llama_model_get_vocab(state->model), token)) {
-            break;
-        }
-
-        cached_utf8 += common_token_to_piece(state->context, token);
-        output << cached_utf8;
-        cached_utf8.clear();
-
-        common_batch_clear(state->batch);
-        common_batch_add(state->batch, token, current_pos, {0}, true);
-        if (llama_decode(state->context, state->batch) != 0) {
-            break;
-        }
-        current_pos++;
-    }
-
-    common_sampler_free(sampler);
     const std::string result = output.str();
     return env->NewStringUTF(result.c_str());
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_kolo_agent_core_providers_local_LlamaCppBridge_nativeCompleteStream(
+        JNIEnv * env,
+        jobject,
+        jlong handle,
+        jstring jprompt,
+        jint max_tokens,
+        jfloat temperature,
+        jfloat top_p,
+        jfloat repeat_penalty,
+        jobject callback) {
+    auto * state = reinterpret_cast<KoloLlamaState *>(handle);
+    const std::string prompt = get_jstring(env, jprompt);
+
+    if (callback == nullptr) {
+        return env->NewStringUTF("Missing token callback.");
+    }
+
+    jclass callback_class = env->GetObjectClass(callback);
+    jmethodID on_token = env->GetMethodID(callback_class, "onToken", "(Ljava/lang/String;)Z");
+    if (on_token == nullptr) {
+        return env->NewStringUTF("Invalid token callback.");
+    }
+
+    const std::string error = run_completion(
+            state,
+            prompt,
+            max_tokens,
+            temperature,
+            top_p,
+            repeat_penalty,
+            [env, callback, on_token](const std::string & token) {
+                jstring jtoken = env->NewStringUTF(token.c_str());
+                const jboolean keep_going = env->CallBooleanMethod(callback, on_token, jtoken);
+                env->DeleteLocalRef(jtoken);
+                if (env->ExceptionCheck()) {
+                    env->ExceptionClear();
+                    return false;
+                }
+                return keep_going == JNI_TRUE;
+            });
+
+    return env->NewStringUTF(error.c_str());
 }

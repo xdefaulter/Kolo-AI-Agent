@@ -12,6 +12,9 @@ android {
 
     defaultConfig {
         minSdk = libs.versions.minSdk.get().toInt()
+        ndk {
+            abiFilters += listOf("arm64-v8a", "x86_64")
+        }
     }
 
     compileOptions {
@@ -23,14 +26,12 @@ android {
         jvmTarget = "17"
     }
 
-    // CMake/NDK will be enabled when llama.cpp native library is integrated.
-    // Uncomment the block below when libllama.so is ready:
-    // ndkVersion = "27.0.12077973"
-    // externalNativeBuild {
-    //     cmake {
-    //         path = file("src/main/cpp/CMakeLists.txt")
-    //     }
-    // }
+    ndkVersion = "27.0.12077973"
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+        }
+    }
 }
 
 dependencies {

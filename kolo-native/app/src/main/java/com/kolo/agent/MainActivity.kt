@@ -63,6 +63,7 @@ fun KoloNavApp() {
                 onAddProvider = { config, apiKey -> settingsViewModel.addProvider(config, apiKey) },
                 onDeleteProvider = { id -> settingsViewModel.deleteProvider(id) },
                 onSetActiveProvider = { id -> settingsViewModel.setActiveProvider(id) },
+                onSetProviderModelPath = { id, path -> settingsViewModel.setProviderModelPath(id, path) },
                 onSetToolPermission = { name, mode -> settingsViewModel.setToolPermission(name, mode) },
                 onAddMemory = { content, kind -> settingsViewModel.addMemory(content, kind) },
                 onDeleteMemory = { id -> settingsViewModel.deleteMemory(id) },

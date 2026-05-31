@@ -33,6 +33,7 @@ data class SettingsUiState(
     val toolPermissions: List<ToolPermissionUi> = emptyList(),
     val memories: List<Memory> = emptyList(),
     val themeMode: AppThemeMode = AppThemeMode.SYSTEM,
+    val localLlamaModelPath: String = "",
 )
 
 enum class AppThemeMode { SYSTEM, LIGHT, DARK }
@@ -54,6 +55,7 @@ class SettingsViewModel @Inject constructor(
         loadToolPermissions()
         loadMemories()
         loadTheme()
+        loadLocalLlamaModelPath()
     }
 
     private fun loadProviders() {
@@ -108,6 +110,14 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
+    private fun loadLocalLlamaModelPath() {
+        viewModelScope.launch {
+            appSettings.localLlamaModelPath.collect { path ->
+                _uiState.value = _uiState.value.copy(localLlamaModelPath = path.orEmpty())
+            }
+        }
+    }
+
     fun setThemeMode(mode: AppThemeMode) {
         viewModelScope.launch {
             val settingsMode = when (mode) {
@@ -151,6 +161,9 @@ class SettingsViewModel @Inject constructor(
     fun addProvider(config: ProviderConfig, apiKey: String) {
         viewModelScope.launch {
             providerRepository.saveProvider(config, apiKey)
+            if (config.isLocal) {
+                appSettings.setLocalLlamaModelPath(config.modelPath)
+            }
             _uiState.value = _uiState.value.copy(
                 providers = providerRepository.getAllProviders(),
             )
@@ -187,6 +200,25 @@ class SettingsViewModel @Inject constructor(
             _uiState.value = _uiState.value.copy(
                 providers = providerRepository.getAllProviders(),
                 activeProviderId = id,
+            )
+        }
+    }
+
+    fun setProviderModelPath(id: ProviderId, modelPath: String) {
+        viewModelScope.launch {
+            val providers = providerRepository.getAllProviders()
+            val provider = providers.firstOrNull { it.id == id } ?: return@launch
+            val cleanPath = modelPath.trim()
+            val updated = provider.copy(
+                modelPath = cleanPath.ifBlank { null },
+                updatedAt = System.currentTimeMillis(),
+            )
+            providerRepository.saveProvider(updated, providerRepository.getApiKey(id.value))
+            if (updated.isLocal) {
+                appSettings.setLocalLlamaModelPath(updated.modelPath)
+            }
+            _uiState.value = _uiState.value.copy(
+                providers = providerRepository.getAllProviders(),
             )
         }
     }

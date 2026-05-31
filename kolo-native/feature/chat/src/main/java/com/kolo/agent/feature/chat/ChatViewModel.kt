@@ -12,6 +12,7 @@ import com.kolo.agent.core.model.*
 import com.kolo.agent.core.model.api.ApiMessage
 import com.kolo.agent.core.providers.ProviderRepository
 import com.kolo.agent.core.providers.openai.OpenAiStreamClient
+import com.kolo.agent.core.settings.AppSettings
 import com.kolo.agent.core.tools.permissions.ToolPermissionStore
 import com.kolo.agent.core.tools.registry.ToolRegistry
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -61,6 +62,7 @@ class ChatViewModel @Inject constructor(
     private val toolRegistry: ToolRegistry,
     private val streamClient: OpenAiStreamClient,
     private val permStore: ToolPermissionStore,
+    private val appSettings: AppSettings,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(ChatUiState())
@@ -196,10 +198,16 @@ class ChatViewModel @Inject constructor(
             )}
 
             try {
-                val provider = providerRep.getActiveProvider()
+                val rawProvider = providerRep.getActiveProvider()
                     ?: throw IllegalStateException("No active provider configured")
-                val activeModelId = provider.activeModel?.modelId
-                    ?: throw IllegalStateException("No model selected")
+                val provider = if (rawProvider.isLocal && rawProvider.modelPath.isNullOrBlank()) {
+                    rawProvider.copy(modelPath = appSettings.localLlamaModelPath.first())
+                } else {
+                    rawProvider
+                }
+                if (!provider.isLocal && provider.activeModel == null) {
+                    throw IllegalStateException("No model selected")
+                }
 
                 val apiMessages = buildApiMessages(chatId, content)
                 val systemPrompt = SystemPromptComposer.compose(

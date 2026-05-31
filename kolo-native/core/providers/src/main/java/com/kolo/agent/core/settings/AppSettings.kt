@@ -1,6 +1,5 @@
 package com.kolo.agent.core.settings
 
-import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
@@ -22,6 +21,7 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
 
     private val KEY_THEME = stringPreferencesKey("theme_mode")
     private val KEY_DEFAULT_CHAT_FOLDER = stringPreferencesKey("default_chat_folder")
+    private val KEY_LOCAL_LLAMA_MODEL_PATH = stringPreferencesKey("local_llama_model_path")
 
     val themeMode: Flow<ThemeMode> = dataStore.data.map { prefs ->
         prefs[KEY_THEME]?.let { ThemeMode.valueOf(it) } ?: ThemeMode.SYSTEM
@@ -39,6 +39,18 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
         dataStore.edit { prefs ->
             if (folderId != null) prefs[KEY_DEFAULT_CHAT_FOLDER] = folderId
             else prefs.remove(KEY_DEFAULT_CHAT_FOLDER)
+        }
+    }
+
+    val localLlamaModelPath: Flow<String?> = dataStore.data.map { prefs ->
+        prefs[KEY_LOCAL_LLAMA_MODEL_PATH]
+    }
+
+    suspend fun setLocalLlamaModelPath(modelPath: String?) {
+        dataStore.edit { prefs ->
+            val cleanPath = modelPath?.trim().orEmpty()
+            if (cleanPath.isNotEmpty()) prefs[KEY_LOCAL_LLAMA_MODEL_PATH] = cleanPath
+            else prefs.remove(KEY_LOCAL_LLAMA_MODEL_PATH)
         }
     }
 }

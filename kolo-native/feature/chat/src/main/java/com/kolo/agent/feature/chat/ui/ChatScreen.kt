@@ -62,7 +62,6 @@ fun ChatScreen(
                 chats = state.chatList,
                 currentChatId = state.currentChatId,
                 onSelectChat = { chatId ->
-                    onNewChat.let { } // just for scope
                     onSelectChat(chatId)
                     scope.launch { drawerState.close() }
                 },
@@ -318,7 +317,7 @@ private fun ChatHeader(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(start = 4.dp, end = 4.dp, top = 4.dp, bottom = 4.dp)
+                .padding(start = 2.dp, end = 2.dp, top = 0.dp, bottom = 0.dp)
                 .statusBarsPadding(),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -488,7 +487,7 @@ private fun MessageBubble(message: Message) {
                     onLongClick = { copyMessageToClipboard(context, message.content) },
                 ),
         ) {
-            Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)) {
+            Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
                 if (message.role == MessageRole.tool) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -555,7 +554,7 @@ private fun StreamingBubble(content: String) {
         color = MaterialTheme.colorScheme.surfaceVariant,
         modifier = Modifier.widthIn(max = maxWidthDp),
     ) {
-        Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)) {
+        Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
             Text(
                 text = content,
                 style = MaterialTheme.typography.bodyMedium,
@@ -609,7 +608,7 @@ private fun ToolCallsPanel(
         color = MaterialTheme.colorScheme.secondaryContainer,
         modifier = Modifier.widthIn(max = (LocalConfiguration.current.screenWidthDp * 0.88f).dp),
     ) {
-        Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
+        Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Filled.Build, contentDescription = "Tools", modifier = Modifier.size(12.dp), tint = MaterialTheme.colorScheme.secondary)
                 Spacer(modifier = Modifier.width(4.dp))
@@ -640,7 +639,7 @@ private fun LoadingIndicator() {
     Row(horizontalArrangement = Arrangement.Start, modifier = Modifier.fillMaxWidth()) {
         val infiniteTransition = rememberInfiniteTransition(label = "dots")
         Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
-            Row(modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp), horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.CenterVertically) {
                 repeat(3) { index ->
                     val alpha by infiniteTransition.animateFloat(
                         initialValue = 0.3f, targetValue = 1f,
@@ -726,7 +725,7 @@ private fun ChatInputBar(
             modifier = Modifier
                 .fillMaxWidth()
                 .navigationBarsPadding()
-                .padding(horizontal = 8.dp, vertical = 6.dp),
+                .padding(horizontal = 8.dp, vertical = 4.dp),
             verticalAlignment = Alignment.Bottom,
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
@@ -743,7 +742,7 @@ private fun ChatInputBar(
             if (isStreaming) {
                 FilledIconButton(
                     onClick = onCancel,
-                    modifier = Modifier.size(38.dp),
+                    modifier = Modifier.size(36.dp),
                     shape = CircleShape,
                     colors = IconButtonDefaults.filledIconButtonColors(
                         containerColor = MaterialTheme.colorScheme.errorContainer,
@@ -755,7 +754,7 @@ private fun ChatInputBar(
             } else {
                 FilledIconButton(
                     onClick = onSend,
-                    modifier = Modifier.size(38.dp),
+                    modifier = Modifier.size(36.dp),
                     shape = CircleShape,
                     enabled = value.isNotBlank(),
                     colors = IconButtonDefaults.filledIconButtonColors(
