@@ -218,14 +218,11 @@ class PhoneControlDoneTool : KoloTool() {
 
 class ScreenScreenshotTool : KoloTool() {
     override val name = "screen_screenshot"
-    override val description = "Capture a structural screenshot of the current screen as an accessibility tree. Returns all visible UI elements with their text, bounds, and properties. Requires phone control session to be active."
+    override val description = "Capture a structural screenshot of the current screen. Returns all visible UI elements with text, bounds, properties, and screen metrics. Requires phone control session to be active."
     override val parameterSchema = """{"type":"object","properties":{},"required":[]}"""
     override val permission = ToolPermission.dangerous
 
     override suspend fun execute(params: Map<String, String>, context: ToolExecutionContext): ToolExecutionResult {
-        if (PhoneControlAccessibilityService.isBlocked()) {
-            return ToolExecutionResult.err("Phone control session is not active. Start with phone_control_start first.")
-        }
         val service = PhoneControlAccessibilityService.getInstance()
             ?: return ToolExecutionResult.err("Phone control accessibility service is not running. Please enable it in Settings > Accessibility.")
         return service.takeScreenshot()

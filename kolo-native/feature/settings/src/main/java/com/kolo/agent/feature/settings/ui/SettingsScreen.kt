@@ -31,6 +31,7 @@ fun SettingsScreen(
     onSetToolPermission: (String, ToolPermissionMode) -> Unit,
     onAddMemory: (String, String) -> Unit,
     onDeleteMemory: (String) -> Unit,
+    onSetTheme: (AppThemeMode) -> Unit = {},
     onNavigateBack: () -> Unit,
 ) {
     var selectedSection by remember { mutableStateOf<SettingsSection?>(null) }
@@ -85,7 +86,7 @@ fun SettingsScreen(
                     onDelete = onDeleteMemory,
                 )
                 SettingsSection.PhoneControl -> PhoneControlSection()
-                SettingsSection.Appearance -> AppearanceSection()
+                SettingsSection.Appearance -> AppearanceSection(state.themeMode, onSetTheme)
                 SettingsSection.About -> AboutSection()
                 null -> SettingsHome(onSectionSelected = { selectedSection = it })
             }
@@ -366,14 +367,50 @@ private fun PhoneControlSection() {
 // ──── Appearance ────
 
 @Composable
-private fun AppearanceSection() {
+private fun AppearanceSection(themeMode: AppThemeMode, onSetTheme: (AppThemeMode) -> Unit) {
     LazyColumn(modifier = Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        item {
+            SectionHeader("Theme")
+        }
+        item {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                ThemeOptionButton("System", AppThemeMode.SYSTEM, themeMode, onSetTheme, Modifier.weight(1f))
+                ThemeOptionButton("Light", AppThemeMode.LIGHT, themeMode, onSetTheme, Modifier.weight(1f))
+                ThemeOptionButton("Dark", AppThemeMode.DARK, themeMode, onSetTheme, Modifier.weight(1f))
+            }
+        }
         item {
             Card(shape = MaterialTheme.shapes.small, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) { Column(Modifier.padding(12.dp)) { Row(verticalAlignment = Alignment.CenterVertically) { Icon(Icons.Filled.Memory, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("Local Model", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold) }; Spacer(Modifier.height(4.dp)); Text("Local LLM via llama.cpp is not yet available.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) } }
         }
-        item { SectionHeader("Theme (preview)"); Text("Theme switching saves to DataStore but does not yet affect the running app.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-        item { Spacer(Modifier.height(8.dp)) }
-        item { SwitchPreference("Dynamic Colors", "Material You on Android 12+", true, { }, false); SwitchPreference("Show Token Usage", "Token count bar in chat", true, { }, false) }
+        item { SwitchPreference("Show Token Usage", "Token count bar in chat", true, { }, false) }
+    }
+}
+
+@Composable
+private fun ThemeOptionButton(label: String, mode: AppThemeMode, current: AppThemeMode, onSelect: (AppThemeMode) -> Unit, modifier: Modifier = Modifier) {
+    val selected = mode == current
+    FilledTonalButton(
+        onClick = { onSelect(mode) },
+        modifier = modifier,
+        colors = ButtonDefaults.filledTonalButtonColors(
+            containerColor = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+            contentColor = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+        ),
+        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Icon(
+                imageVector = when (mode) {
+                    AppThemeMode.SYSTEM -> Icons.Filled.BrightnessAuto
+                    AppThemeMode.LIGHT -> Icons.Filled.LightMode
+                    AppThemeMode.DARK -> Icons.Filled.DarkMode
+                },
+                contentDescription = null,
+                modifier = Modifier.size(18.dp),
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(label, style = MaterialTheme.typography.labelSmall, fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal)
+        }
     }
 }
 
@@ -391,8 +428,8 @@ private fun AboutSection() {
     LazyColumn(modifier = Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item { Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) { Icon(Icons.Filled.SmartToy, contentDescription = null, modifier = Modifier.size(44.dp), tint = MaterialTheme.colorScheme.primary); Spacer(Modifier.height(6.dp)); Text("Kolo AI Agent", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold); Text("v1.0.0 (Native)", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) } }
         item { HorizontalDivider() }
-        item { Card(shape = MaterialTheme.shapes.small) { Column(Modifier.padding(10.dp)) { Text("What Works", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold); Spacer(Modifier.height(4.dp)); Text("• OpenAI-compatible streaming chat with tool use", style = MaterialTheme.typography.bodySmall); Text("• Tool permission gating (allow once / always / deny / block)", style = MaterialTheme.typography.bodySmall); Text("• Room-backed memory system", style = MaterialTheme.typography.bodySmall); Text("• Phone control with session safety & system overlay", style = MaterialTheme.typography.bodySmall); Text("• Chat list drawer for switching conversations", style = MaterialTheme.typography.bodySmall); Text("• Web search via DuckDuckGo (no API key needed)", style = MaterialTheme.typography.bodySmall) } } }
-        item { Card(shape = MaterialTheme.shapes.small) { Column(Modifier.padding(10.dp)) { Text("Not Yet Available", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.error); Spacer(Modifier.height(4.dp)); Text("• Local LLM (llama.cpp) — scaffolding only, no inference yet", style = MaterialTheme.typography.bodySmall); Text("• Visual screenshot — accessibility tree only, no pixel capture", style = MaterialTheme.typography.bodySmall); Text("• Theme switching — DataStore wired, UI not applied", style = MaterialTheme.typography.bodySmall) } } }
+        item { Card(shape = MaterialTheme.shapes.small) { Column(Modifier.padding(10.dp)) { Text("What Works", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold); Spacer(Modifier.height(4.dp)); Text("• OpenAI-compatible streaming chat with tool use", style = MaterialTheme.typography.bodySmall); Text("• Tool permission gating (allow once / always / deny / block)", style = MaterialTheme.typography.bodySmall); Text("• Room-backed memory system", style = MaterialTheme.typography.bodySmall); Text("• Phone control with session safety & system overlay", style = MaterialTheme.typography.bodySmall); Text("• Chat list drawer for switching conversations", style = MaterialTheme.typography.bodySmall); Text("• Web search via DuckDuckGo (no API key needed)", style = MaterialTheme.typography.bodySmall); Text("• Theme switching (system / light / dark via DataStore)", style = MaterialTheme.typography.bodySmall) } } }
+        item { Card(shape = MaterialTheme.shapes.small) { Column(Modifier.padding(10.dp)) { Text("Not Yet Available", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.error); Spacer(Modifier.height(4.dp)); Text("• Local LLM (llama.cpp) — scaffolding only, no inference yet", style = MaterialTheme.typography.bodySmall); Text("• Pixel-level screenshot — accessibility tree + metrics only, no image capture", style = MaterialTheme.typography.bodySmall) } } }
         item { Card(shape = MaterialTheme.shapes.small) { Column(Modifier.padding(10.dp)) { Text("Diagnostics", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold); Spacer(Modifier.height(4.dp)); Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Platform", style = MaterialTheme.typography.bodySmall); Text("Android Native", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary) }; Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Min SDK", style = MaterialTheme.typography.bodySmall); Text("26", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary) } } } }
     }
 }

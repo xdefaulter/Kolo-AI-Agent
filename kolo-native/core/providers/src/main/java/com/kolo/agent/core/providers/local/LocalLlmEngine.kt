@@ -47,21 +47,41 @@ interface LocalLlmEngine {
     ): Flow<String>
 
     /**
-     * Check if a model file exists and is valid.
+     * Check if a model file exists and appears to be a valid GGUF file.
      */
-    fun isValidModel(modelPath: String): Boolean = File(modelPath).exists()
+    fun isValidModel(modelPath: String): Boolean {
+        val file = File(modelPath)
+        if (!file.exists() || file.length() < 64) return false
+        // GGUF files start with the magic bytes "GGUF" (0x46475547 in little-endian)
+        return try {
+            file.inputStream().use { stream ->
+                val magic = ByteArray(4)
+                stream.read(magic)
+                magic[0] == 'G'.code.toByte() &&
+                magic[1] == 'G'.code.toByte() &&
+                magic[2] == 'U'.code.toByte() &&
+                magic[3] == 'F'.code.toByte()
+            }
+        } catch (_: Exception) { false }
+    }
 
     /**
      * List available GGUF models in known directories.
      */
-    fun listAvailableModels(): List<String> {
+    fun listAvailableModels(): List<ModelInfo> {
         return MODEL_DIRS.flatMap { dir ->
             val directory = File(dir)
             if (directory.exists() && directory.isDirectory) {
-                directory.listFiles()
-                    ?.filter { it.extension == "gguf" }
-                    ?.map { it.absolutePath }
-                    ?: emptyList()
+                directory.walkTopDown()
+                    .filter { it.extension == "gguf" }
+                    .map { file ->
+                        ModelInfo(
+                            path = file.absolutePath,
+                            name = file.nameWithoutExtension,
+                            sizeBytes = file.length(),
+                        )
+                    }
+                    .toList()
             } else emptyList()
         }
     }
@@ -76,8 +96,36 @@ interface LocalLlmEngine {
 }
 
 /**
+ * Information about an available model file.
+ */
+data class ModelInfo(
+    val path: String,
+    val name: String,
+    val sizeBytes: Long,
+) {
+    val sizeFormatted: String
+        get() = when {
+            sizeBytes >= 1_000_000_000 -> "%.1f GB".format(sizeBytes / 1_000_000_000.0)
+            sizeBytes >= 1_000_000 -> "%.1f MB".format(sizeBytes / 1_000_000.0)
+            else -> "%.1f KB".format(sizeBytes / 1_000.0)
+        }
+}
+
+/**
  * Stub implementation of LocalLlmEngine.
- * Will be replaced with llama.cpp binding once integrated.
+ *
+ * When llama.cpp Android binding (libllama.so) is available, replace this
+ * with [LlamaCppEngine] which uses JNI to call llama.cpp for inference.
+ *
+ * To integrate llama.cpp:
+ * 1. Add the llama.cpp Android AAR or build from source with CMake
+ * 2. Create a C++ JNI bridge: llamodel-jni.cpp with functions:
+ *    - Java_com_kolo_agent_core_providers_local_LlamaCppEngine_nativeLoadModel
+ *    - Java_com_kolo_agent_core_providers_local_LlamaCppEngine_nativeComplete
+ *    - Java_com_kolo_agent_core_providers_local_LlamaCppEngine_nativeFreeModel
+ * 3. Replace [StubLocalLlmEngine] with [LlamaCppEngine] in [LlmEngineFactory]
+ * 4. Add CMakeLists.txt pointing to llama.cpp sources
+ * 5. Add NDK build config to core/providers/build.gradle.kts
  */
 class StubLocalLlmEngine : LocalLlmEngine {
     override var isModelLoaded: Boolean = false
@@ -87,14 +135,15 @@ class StubLocalLlmEngine : LocalLlmEngine {
 
     override suspend fun loadModel(modelPath: String, contextSize: Int, threads: Int) {
         if (!isValidModel(modelPath)) {
-            throw IllegalArgumentException("Model file not found: $modelPath")
+            throw IllegalArgumentException("Model file not found or not a valid GGUF file: $modelPath")
         }
-        // Stub: would initialize llama.cpp context here
+        // Stub: would call nativeLoadModel(path, contextSize, threads) here
         isModelLoaded = true
         loadedModelPath = modelPath
     }
 
     override suspend fun unloadModel() {
+        // Stub: would call nativeFreeModel() here
         isModelLoaded = false
         loadedModelPath = null
     }
@@ -107,10 +156,12 @@ class StubLocalLlmEngine : LocalLlmEngine {
         repeatPenalty: Float,
     ): Flow<String> = flow {
         if (!isModelLoaded) {
-            emit("[Local LLM not available — configure a cloud provider or integrate llama.cpp]")
+            emit("[Local LLM not available — configure a cloud provider or place a .gguf model in /sdcard/llm/models/]")
             return@flow
         }
-        emit("[Local LLM inference not yet integrated. The model at $loadedModelPath is loaded but llama.cpp binding is not available.]")
+        val modelFile = loadedModelPath?.let { File(it).name } ?: "unknown"
+        emit("[Local LLM inference not yet integrated. Model '$modelFile' is loaded but llama.cpp binding is not available. " +
+             "To enable local inference, integrate the llama.cpp Android NDK library.]")
     }.flowOn(Dispatchers.IO)
 }
 

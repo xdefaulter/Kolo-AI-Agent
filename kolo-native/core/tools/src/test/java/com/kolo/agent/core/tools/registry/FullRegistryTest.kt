@@ -44,6 +44,7 @@ class FullRegistryTest {
         registry.register(StubPhoneTool("phone_control_status", "Check phone control status", """{"type":"object","properties":{},"required":[]}""", ToolPermission.safe))
         registry.register(StubPhoneTool("phone_control_done", "End phone control session", """{"type":"object","properties":{"message":{"type":"string"}},"required":[]}""", ToolPermission.safe))
         registry.register(StubPhoneTool("screen_read", "Read the accessibility tree", """{"type":"object","properties":{},"required":[]}""", ToolPermission.dangerous))
+        registry.register(StubPhoneTool("screen_screenshot", "Capture a structural screenshot of the current screen as an accessibility tree", """{"type":"object","properties":{},"required":[]}""", ToolPermission.dangerous))
     }
 
     @Test
@@ -51,7 +52,7 @@ class FullRegistryTest {
         val tools = registry.getAllTools()
         // Builtins: calculator, date, json_parse, base64, hash, http_get, http_post, web_search, web_scrape, recall_memories, remember_this, forget_memory
         // Phone: tap, swipe, long_press, click_text, type_text, press_key, scroll, screen_read_full, phone_control_start, phone_control_status, phone_control_done, screen_read
-        assertTrue("Registry should have at least 24 tools, got ${tools.size}", tools.size >= 24)
+        assertTrue("Registry should have at least 25 tools, got ${tools.size}", tools.size >= 25)
 
         // Verify each expected tool exists
         val expectedTools = listOf(
@@ -61,7 +62,7 @@ class FullRegistryTest {
             "tap", "swipe", "long_press", "click_text", "type_text",
             "press_key", "scroll", "screen_read_full",
             "phone_control_start", "phone_control_status", "phone_control_done",
-            "screen_read",
+            "screen_read", "screen_screenshot",
         )
         for (name in expectedTools) {
             assertNotNull("Tool '$name' should be registered", registry.getTool(name))
@@ -171,7 +172,7 @@ class FullRegistryTest {
         val safePhoneTools = listOf("phone_control_status", "phone_control_done", "show_action")
         val dangerousPhoneTools = listOf(
             "tap", "swipe", "long_press", "click_text", "type_text",
-            "press_key", "scroll", "screen_read_full", "screen_read", "phone_control_start",
+            "press_key", "scroll", "screen_read_full", "screen_read", "screen_screenshot", "phone_control_start",
         )
 
         for (name in dangerousPhoneTools) {

@@ -2,6 +2,7 @@ package com.kolo.agent.feature.settings
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.kolo.agent.core.settings.AppSettings
 import com.kolo.agent.core.database.repository.RoomMemoryRepository
 import com.kolo.agent.core.model.Memory
 import com.kolo.agent.core.model.ProviderConfig
@@ -42,6 +43,7 @@ class SettingsViewModel @Inject constructor(
     private val toolRegistry: ToolRegistry,
     private val permissionStore: ToolPermissionStore,
     private val memoryRepository: RoomMemoryRepository,
+    private val appSettings: AppSettings,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(SettingsUiState())
@@ -51,6 +53,7 @@ class SettingsViewModel @Inject constructor(
         loadProviders()
         loadToolPermissions()
         loadMemories()
+        loadTheme()
     }
 
     private fun loadProviders() {
@@ -89,6 +92,30 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch {
             val memories = memoryRepository.getAll()
             _uiState.value = _uiState.value.copy(memories = memories)
+        }
+    }
+
+    private fun loadTheme() {
+        viewModelScope.launch {
+            appSettings.themeMode.collect { mode ->
+                val uiMode = when (mode) {
+                    AppSettings.ThemeMode.SYSTEM -> AppThemeMode.SYSTEM
+                    AppSettings.ThemeMode.LIGHT -> AppThemeMode.LIGHT
+                    AppSettings.ThemeMode.DARK -> AppThemeMode.DARK
+                }
+                _uiState.value = _uiState.value.copy(themeMode = uiMode)
+            }
+        }
+    }
+
+    fun setThemeMode(mode: AppThemeMode) {
+        viewModelScope.launch {
+            val settingsMode = when (mode) {
+                AppThemeMode.SYSTEM -> AppSettings.ThemeMode.SYSTEM
+                AppThemeMode.LIGHT -> AppSettings.ThemeMode.LIGHT
+                AppThemeMode.DARK -> AppSettings.ThemeMode.DARK
+            }
+            appSettings.setThemeMode(settingsMode)
         }
     }
 

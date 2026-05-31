@@ -35,14 +35,6 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun KoloTheme(content: @Composable () -> Unit) {
-    MaterialTheme(
-        colorScheme = MaterialTheme.colorScheme,
-        content = content,
-    )
-}
-
-@Composable
 fun KoloNavApp() {
     val navController = rememberNavController()
     val currentDestination by navController.currentBackStackEntryAsState()
@@ -83,6 +75,7 @@ fun KoloNavApp() {
                 onSetToolPermission = { name, mode -> settingsViewModel.setToolPermission(name, mode) },
                 onAddMemory = { content, kind -> settingsViewModel.addMemory(content, kind) },
                 onDeleteMemory = { id -> settingsViewModel.deleteMemory(id) },
+                onSetTheme = { mode -> settingsViewModel.setThemeMode(mode) },
                 onNavigateBack = { navController.popBackStack() },
             )
         }

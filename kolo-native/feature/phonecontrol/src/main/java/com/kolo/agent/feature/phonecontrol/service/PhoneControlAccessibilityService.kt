@@ -189,13 +189,32 @@ class PhoneControlAccessibilityService : AccessibilityService() {
     }
 
     fun takeScreenshot(): ToolExecutionResult {
-        // Accessibility screenshot — returns tree description, not pixel capture.
-        // Pixel-level takeScreenshot() API (API 30+) requires async callback handling
-        // which doesn't integrate seamlessly with our synchronous tool pattern.
-        // For now, return the accessibility tree which gives the agent structural info.
+        if (isBlocked()) return ToolExecutionResult.err("Phone control session is not active. Start with phone_control_start first.")
         val rootNode = rootInActiveWindow ?: return ToolExecutionResult.err("No active window to screenshot")
-        val tree = buildString { appendNode(rootNode, 0) }
-        return ToolExecutionResult.ok("[Screen capture — accessibility tree]\n$tree")
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            // API 30+: use AccessibilityService.takeScreenshot() for pixel capture
+            // Since takeScreenshot is async, we capture the accessibility tree synchronously
+            // and include dimensions. The pixel screenshot API requires a callback
+            // and returns hardware buffers that are complex to serialize.
+            // Return a rich description combining tree + screen metrics.
+            val displayMetrics = resources.displayMetrics
+            val width = displayMetrics.widthPixels
+            val height = displayMetrics.heightPixels
+            val density = displayMetrics.densityDpi
+            val tree = buildString { appendNode(rootNode, 0) }
+            return ToolExecutionResult.ok(buildString {
+                appendLine("[Screen capture — accessibility tree + metrics]")
+                appendLine("Screen: ${width}x${height} @${density}dpi")
+                appendLine("Window: ${rootNode.className} bounds=${Rect().also { rootNode.getBoundsInScreen(it) }.toShortString()}")
+                appendLine()
+                append(tree)
+            })
+        } else {
+            // Pre-API 30: return accessibility tree description only
+            val tree = buildString { appendNode(rootNode, 0) }
+            return ToolExecutionResult.ok("[Screen capture — accessibility tree]\n$tree")
+        }
     }
 
     fun findNodeByText(text: String): AccessibilityNodeInfo? {
