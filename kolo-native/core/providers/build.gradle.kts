@@ -22,6 +22,15 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+
+    // CMake/NDK will be enabled when llama.cpp native library is integrated.
+    // Uncomment the block below when libllama.so is ready:
+    // ndkVersion = "27.0.12077973"
+    // externalNativeBuild {
+    //     cmake {
+    //         path = file("src/main/cpp/CMakeLists.txt")
+    //     }
+    // }
 }
 
 dependencies {
@@ -35,10 +44,6 @@ dependencies {
 
     implementation(libs.security.crypto)
     implementation(libs.datastore.preferences)
-
-    // Hilt
-    implementation(libs.hilt.android)
-    ksp(libs.hilt.compiler)
 
     // Hilt
     implementation(libs.hilt.android)

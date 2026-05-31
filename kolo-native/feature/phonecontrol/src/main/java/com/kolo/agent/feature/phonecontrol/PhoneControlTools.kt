@@ -218,7 +218,7 @@ class PhoneControlDoneTool : KoloTool() {
 
 class ScreenScreenshotTool : KoloTool() {
     override val name = "screen_screenshot"
-    override val description = "Capture a structural screenshot of the current screen. Returns all visible UI elements with text, bounds, properties, and screen metrics. Requires phone control session to be active."
+    override val description = "Capture a structural screenshot of the current screen as an accessibility tree with screen metrics. Requires phone control session to be active."
     override val parameterSchema = """{"type":"object","properties":{},"required":[]}"""
     override val permission = ToolPermission.dangerous
 

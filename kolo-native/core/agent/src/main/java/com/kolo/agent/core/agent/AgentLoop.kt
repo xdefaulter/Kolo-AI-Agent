@@ -6,6 +6,7 @@ import com.kolo.agent.core.model.api.ApiFunctionCall
 import com.kolo.agent.core.model.api.ApiToolCall
 import com.kolo.agent.core.model.api.ApiToolDefinition
 import com.kolo.agent.core.providers.openai.OpenAiStreamClient
+import com.kolo.agent.core.providers.local.LlmEngineFactory
 import com.kolo.agent.core.agent.parser.StreamingToolCallParser
 import com.kolo.agent.core.tools.registry.ToolRegistry
 import com.kolo.agent.core.tools.registry.ToolPermissionCheckResult
@@ -45,6 +46,41 @@ class AgentLoop(
         additionalSystemPrompt: String = "",
         cancelled: () -> Boolean = { false },
     ): Flow<AgentEvent> = flow {
+        if (config.isLocal) {
+            val modelPath = config.modelPath
+            if (modelPath.isNullOrBlank()) {
+                emit(AgentEvent.Error("Local llama.cpp provider requires a GGUF modelPath."))
+                return@flow
+            }
+
+            val localEngine = LlmEngineFactory.create(config)
+            try {
+                localEngine.loadModel(
+                    modelPath = modelPath,
+                    contextSize = config.activeModel?.contextWindow ?: 4096,
+                    threads = Runtime.getRuntime().availableProcessors().coerceIn(1, 8),
+                )
+                val prompt = messages.joinToString("\n") { msg ->
+                    "${msg.role}: ${msg.content.orEmpty()}"
+                }
+                val content = StringBuilder()
+                localEngine.completeStream(
+                    prompt = prompt,
+                    maxTokens = config.activeModel?.maxTokens ?: 4096,
+                    temperature = (config.activeModel?.temperature ?: 0.7).toFloat(),
+                ).collect { token ->
+                    content.append(token)
+                    emit(AgentEvent.ContentChunk(token))
+                }
+                emit(AgentEvent.TextComplete(content.toString()))
+            } catch (e: Exception) {
+                emit(AgentEvent.Error("Local llama.cpp error: ${e.message}"))
+            } finally {
+                localEngine.unloadModel()
+            }
+            return@flow
+        }
+
         var currentMessages = messages.toMutableList()
         var iterations = 0
 

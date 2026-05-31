@@ -44,7 +44,7 @@ class FullRegistryTest {
         registry.register(StubPhoneTool("phone_control_status", "Check phone control status", """{"type":"object","properties":{},"required":[]}""", ToolPermission.safe))
         registry.register(StubPhoneTool("phone_control_done", "End phone control session", """{"type":"object","properties":{"message":{"type":"string"}},"required":[]}""", ToolPermission.safe))
         registry.register(StubPhoneTool("screen_read", "Read the accessibility tree", """{"type":"object","properties":{},"required":[]}""", ToolPermission.dangerous))
-        registry.register(StubPhoneTool("screen_screenshot", "Capture a structural screenshot of the current screen as an accessibility tree", """{"type":"object","properties":{},"required":[]}""", ToolPermission.dangerous))
+        registry.register(StubPhoneTool("screen_screenshot", "Capture a structural screenshot of the current screen as an accessibility tree with screen metrics", """{"type":"object","properties":{},"required":[]}""", ToolPermission.dangerous))
     }
 
     @Test
@@ -217,7 +217,23 @@ class FullRegistryTest {
         assertTrue(
             "screen_read_full description must mention accessibility tree",
             screenRead.description.lowercase().contains("accessibility tree") ||
-                screenRead.description.lowercase().contains("accessibility"),
+            screenRead.description.lowercase().contains("accessibility"),
+        )
+    }
+
+    @Test
+    fun `screen_screenshot describes what it actually captures`() {
+        val screenshot = registry.getTool("screen_screenshot")
+        assertNotNull("screen_screenshot should be registered", screenshot)
+        assertTrue(
+            "screen_screenshot should mention accessibility tree or structural",
+            screenshot!!.description.lowercase().contains("accessibility tree") ||
+                screenshot.description.lowercase().contains("structural"),
+        )
+        // Must NOT claim to be a pixel/PNG screenshot
+        assertFalse(
+            "screen_screenshot must not claim to capture PNG or pixel image",
+            screenshot.description.lowercase().contains("png"),
         )
     }
 }

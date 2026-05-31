@@ -32,7 +32,7 @@ class WebSearchTool : KoloTool() {
         }
     }
 
-    private fun searchDuckDuckGo(query: String, maxResults: Int): String {
+    internal fun searchDuckDuckGo(query: String, maxResults: Int): String {
         val encodedQuery = URLEncoder.encode(query, "UTF-8")
         val url = "https://html.duckduckgo.com/html/?q=$encodedQuery"
 
@@ -63,7 +63,7 @@ class WebSearchTool : KoloTool() {
         return formatResults(query, results)
     }
 
-    private fun searchDuckDuckGoLite(query: String, maxResults: Int): String {
+    internal fun searchDuckDuckGoLite(query: String, maxResults: Int): String {
         val encodedQuery = URLEncoder.encode(query, "UTF-8")
         val url = "https://lite.duckduckgo.com/lite/?q=$encodedQuery"
 
@@ -92,13 +92,13 @@ class WebSearchTool : KoloTool() {
         }
     }
 
-    private data class SearchResult(val title: String, val url: String, val snippet: String)
+    internal data class SearchResult(val title: String, val url: String, val snippet: String)
 
-    private fun parseDuckDuckGoHtml(html: String, maxResults: Int): List<SearchResult> {
+    internal fun parseDuckDuckGoHtml(html: String, maxResults: Int): List<SearchResult> {
         val results = mutableListOf<SearchResult>()
 
-        // Primary parser: find result blocks with class="result"
-        val resultBlocks = html.split("""class="result"""".toRegex())
+        // Primary parser: find result blocks — DuckDuckGo uses class="result" or class="result ..."
+        val resultBlocks = html.split(Regex("""class="result[\s"]"""))
         for (block in resultBlocks.drop(1)) {
             if (results.size >= maxResults) break
             try {
@@ -134,7 +134,7 @@ class WebSearchTool : KoloTool() {
         return results
     }
 
-    private fun parseDuckDuckGoLiteHtml(html: String, maxResults: Int): List<SearchResult> {
+    internal fun parseDuckDuckGoLiteHtml(html: String, maxResults: Int): List<SearchResult> {
         val results = mutableListOf<SearchResult>()
         // Lite version uses table rows; try to extract links and snippets
         val linkPattern = Regex("""<a[^>]*class="result-link"[^>]*href="([^"]+)"[^>]*>(.*?)</a>""", RegexOption.DOT_MATCHES_ALL)
@@ -170,13 +170,13 @@ class WebSearchTool : KoloTool() {
         return results
     }
 
-    private fun extractUrl(rawUrl: String): String {
+    internal fun extractUrl(rawUrl: String): String {
         // DuckDuckGo wraps URLs via /uddg= parameter
         val uddgMatch = Regex("""uddg=([^&"]+)""").find(rawUrl)
         return uddgMatch?.groupValues?.get(1)?.let { java.net.URLDecoder.decode(it, "UTF-8") } ?: rawUrl
     }
 
-    private fun formatResults(query: String, results: List<SearchResult>): String = buildString {
+    internal fun formatResults(query: String, results: List<SearchResult>): String = buildString {
         appendLine("Web search results for '$query':")
         appendLine()
         results.forEachIndexed { i, r ->

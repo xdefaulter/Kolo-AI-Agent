@@ -1,12 +1,12 @@
 package com.kolo.agent.core.providers.local
 
-import android.content.Context
 import com.kolo.agent.core.model.ProviderConfig
 import com.kolo.agent.core.model.ProviderKind
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.withContext
 import java.io.File
 
 /**
@@ -52,7 +52,6 @@ interface LocalLlmEngine {
     fun isValidModel(modelPath: String): Boolean {
         val file = File(modelPath)
         if (!file.exists() || file.length() < 64) return false
-        // GGUF files start with the magic bytes "GGUF" (0x46475547 in little-endian)
         return try {
             file.inputStream().use { stream ->
                 val magic = ByteArray(4)
@@ -112,38 +111,48 @@ data class ModelInfo(
 }
 
 /**
- * Stub implementation of LocalLlmEngine.
+ * JNI-backed llama.cpp engine.
  *
- * When llama.cpp Android binding (libllama.so) is available, replace this
- * with [LlamaCppEngine] which uses JNI to call llama.cpp for inference.
+ * This class is intentionally strict: it validates GGUF files and then asks
+ * the native bridge whether an official llama.cpp runtime is present. If the
+ * bridge is compiled but `libllama.so` is not packaged, the user gets a clear
+ * runtime error instead of a fake local answer.
  *
- * To integrate llama.cpp:
- * 1. Add the llama.cpp Android AAR or build from source with CMake
- * 2. Create a C++ JNI bridge: llamodel-jni.cpp with functions:
- *    - Java_com_kolo_agent_core_providers_local_LlamaCppEngine_nativeLoadModel
- *    - Java_com_kolo_agent_core_providers_local_LlamaCppEngine_nativeComplete
- *    - Java_com_kolo_agent_core_providers_local_LlamaCppEngine_nativeFreeModel
- * 3. Replace [StubLocalLlmEngine] with [LlamaCppEngine] in [LlmEngineFactory]
- * 4. Add CMakeLists.txt pointing to llama.cpp sources
- * 5. Add NDK build config to core/providers/build.gradle.kts
+ * **LOCAL INFERENCE IS NOT FUNCTIONAL YET.** The C++ bridge and CMake config
+ * exist but no `.so` is packaged. [LlamaCppBridge.isAvailable()] returns false.
  */
-class StubLocalLlmEngine : LocalLlmEngine {
+class LlamaCppEngine : LocalLlmEngine {
     override var isModelLoaded: Boolean = false
         private set
     override var loadedModelPath: String? = null
         private set
+    private var nativeHandle: Long = 0L
 
     override suspend fun loadModel(modelPath: String, contextSize: Int, threads: Int) {
         if (!isValidModel(modelPath)) {
             throw IllegalArgumentException("Model file not found or not a valid GGUF file: $modelPath")
         }
-        // Stub: would call nativeLoadModel(path, contextSize, threads) here
+        if (!LlamaCppBridge.isAvailable()) {
+            throw IllegalStateException(
+                "llama.cpp is not available in this build. " +
+                "Package the official libllama.so and set a model path to enable inference."
+            )
+        }
+        nativeHandle = withContext(Dispatchers.IO) {
+            LlamaCppBridge.loadModel(modelPath, contextSize, threads)
+        }
+        if (nativeHandle == 0L) {
+            throw IllegalStateException("llama.cpp failed to load model: $modelPath")
+        }
         isModelLoaded = true
         loadedModelPath = modelPath
     }
 
     override suspend fun unloadModel() {
-        // Stub: would call nativeFreeModel() here
+        if (nativeHandle != 0L && LlamaCppBridge.isAvailable()) {
+            withContext(Dispatchers.IO) { LlamaCppBridge.unloadModel(nativeHandle) }
+        }
+        nativeHandle = 0L
         isModelLoaded = false
         loadedModelPath = null
     }
@@ -156,12 +165,52 @@ class StubLocalLlmEngine : LocalLlmEngine {
         repeatPenalty: Float,
     ): Flow<String> = flow {
         if (!isModelLoaded) {
-            emit("[Local LLM not available — configure a cloud provider or place a .gguf model in /sdcard/llm/models/]")
+            emit("[Local LLM not loaded — configure a provider or place a .gguf model in /sdcard/llm/models/]")
             return@flow
         }
-        val modelFile = loadedModelPath?.let { File(it).name } ?: "unknown"
-        emit("[Local LLM inference not yet integrated. Model '$modelFile' is loaded but llama.cpp binding is not available. " +
-             "To enable local inference, integrate the llama.cpp Android NDK library.]")
+        if (!LlamaCppBridge.isAvailable()) {
+            emit("[Local LLM bridge unavailable — llama.cpp runtime is not packaged in this build.]")
+            return@flow
+        }
+        val response = withContext(Dispatchers.IO) {
+            LlamaCppBridge.complete(nativeHandle, prompt, maxTokens, temperature, topP, repeatPenalty)
+        }
+        emit(response)
+    }.flowOn(Dispatchers.IO)
+}
+
+/**
+ * Fallback used only when the native bridge is unavailable.
+ * **Local inference is not functional.** This stub exists so the app
+ * doesn't crash when a provider config references localLlama.
+ */
+class StubLocalLlmEngine : LocalLlmEngine {
+    override var isModelLoaded: Boolean = false
+        private set
+    override var loadedModelPath: String? = null
+        private set
+
+    override suspend fun loadModel(modelPath: String, contextSize: Int, threads: Int) {
+        if (!isValidModel(modelPath)) {
+            throw IllegalArgumentException("Model file not found or not a valid GGUF file: $modelPath")
+        }
+        isModelLoaded = true
+        loadedModelPath = modelPath
+    }
+
+    override suspend fun unloadModel() {
+        isModelLoaded = false
+        loadedModelPath = null
+    }
+
+    override fun completeStream(
+        prompt: String,
+        maxTokens: Int,
+        temperature: Float,
+        topP: Float,
+        repeatPenalty: Float,
+    ): Flow<String> = flow {
+        emit("[Local LLM inference is not available in this build. The model at ${loadedModelPath ?: "unknown"} is loaded in stub mode. To enable local inference, integrate the llama.cpp Android NDK library.]")
     }.flowOn(Dispatchers.IO)
 }
 
@@ -171,7 +220,7 @@ class StubLocalLlmEngine : LocalLlmEngine {
 object LlmEngineFactory {
     fun create(config: ProviderConfig): LocalLlmEngine {
         return when (config.kind) {
-            ProviderKind.localLlama -> StubLocalLlmEngine()
+            ProviderKind.localLlama -> if (LlamaCppBridge.isAvailable()) LlamaCppEngine() else StubLocalLlmEngine()
             else -> StubLocalLlmEngine()
         }
     }

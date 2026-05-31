@@ -4,20 +4,15 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.foundation.layout.*
-import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.ui.Modifier
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.compose.*
 import com.kolo.agent.core.model.*
 import com.kolo.agent.feature.chat.ui.ChatScreen
 import com.kolo.agent.feature.chat.ChatViewModel
-import com.kolo.agent.feature.chat.ChatUiState
 import com.kolo.agent.feature.chat.ToolApprovalAction
 import com.kolo.agent.feature.settings.ui.SettingsScreen
 import com.kolo.agent.feature.settings.SettingsViewModel
-import com.kolo.agent.feature.settings.SettingsUiState
 import dagger.hilt.android.AndroidEntryPoint
 
 @AndroidEntryPoint
@@ -37,11 +32,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun KoloNavApp() {
     val navController = rememberNavController()
-    val currentDestination by navController.currentBackStackEntryAsState()
-    val isOnChat = currentDestination?.destination?.route == "chat"
 
-    // Chat is the default; settings accessed from header icon.
-    // No bottom nav — it wastes vertical space on a chat app.
     NavHost(
         navController = navController,
         startDestination = "chat",

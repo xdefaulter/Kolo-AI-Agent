@@ -1,8 +1,14 @@
 package com.kolo.agent.feature.chat.ui
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.widget.Toast
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -18,6 +24,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -26,6 +33,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.kolo.agent.core.model.*
 import com.kolo.agent.feature.chat.ChatUiState
+import java.text.DateFormat
+import java.util.Date
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -447,12 +456,17 @@ private fun ToolApprovalBanner(
 
 // ──── Message bubble ────
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun MessageBubble(message: Message) {
     val isUser = message.role == MessageRole.user
     val maxWidthFraction = 0.88f
     val configuration = LocalConfiguration.current
     val maxWidthDp = (configuration.screenWidthDp * maxWidthFraction).dp
+    val context = LocalContext.current
+    val timeText = remember(message.createdAt) {
+        DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(message.createdAt))
+    }
 
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -467,7 +481,12 @@ private fun MessageBubble(message: Message) {
             ),
             color = if (isUser) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
             tonalElevation = if (!isUser) 0.5.dp else 0.dp,
-            modifier = Modifier.widthIn(max = maxWidthDp),
+            modifier = Modifier
+                .widthIn(max = maxWidthDp)
+                .combinedClickable(
+                    onClick = {},
+                    onLongClick = { copyMessageToClipboard(context, message.content) },
+                ),
         ) {
             Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)) {
                 if (message.role == MessageRole.tool) {
@@ -503,9 +522,26 @@ private fun MessageBubble(message: Message) {
                         color = MaterialTheme.colorScheme.error,
                     )
                 }
+                Spacer(modifier = Modifier.height(3.dp))
+                Text(
+                    text = timeText,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (isUser) {
+                        MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.72f)
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f)
+                    },
+                    modifier = Modifier.align(Alignment.End),
+                )
             }
         }
     }
+}
+
+private fun copyMessageToClipboard(context: Context, text: String) {
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    clipboard.setPrimaryClip(ClipData.newPlainText("Kolo message", text))
+    Toast.makeText(context, "Message copied", Toast.LENGTH_SHORT).show()
 }
 
 @Composable

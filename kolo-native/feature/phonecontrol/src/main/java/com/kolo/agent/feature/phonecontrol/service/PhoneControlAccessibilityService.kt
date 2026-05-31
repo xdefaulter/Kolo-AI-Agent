@@ -4,22 +4,28 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.accessibilityservice.GestureDescription
 import android.accessibilityservice.GestureDescription.StrokeDescription
+import android.graphics.Bitmap
 import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.view.Display
 import android.view.Gravity
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
-import android.view.accessibility.AccessibilityWindowInfo
-import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
+import java.io.File
+import java.io.FileOutputStream
 
 /**
  * Accessibility service for phone control.
@@ -188,33 +194,75 @@ class PhoneControlAccessibilityService : AccessibilityService() {
         return buildString { appendNode(rootNode, 0) }
     }
 
-    fun takeScreenshot(): ToolExecutionResult {
+    suspend fun takeScreenshot(): ToolExecutionResult {
         if (isBlocked()) return ToolExecutionResult.err("Phone control session is not active. Start with phone_control_start first.")
         val rootNode = rootInActiveWindow ?: return ToolExecutionResult.err("No active window to screenshot")
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            // API 30+: use AccessibilityService.takeScreenshot() for pixel capture
-            // Since takeScreenshot is async, we capture the accessibility tree synchronously
-            // and include dimensions. The pixel screenshot API requires a callback
-            // and returns hardware buffers that are complex to serialize.
-            // Return a rich description combining tree + screen metrics.
-            val displayMetrics = resources.displayMetrics
-            val width = displayMetrics.widthPixels
-            val height = displayMetrics.heightPixels
-            val density = displayMetrics.densityDpi
-            val tree = buildString { appendNode(rootNode, 0) }
-            return ToolExecutionResult.ok(buildString {
-                appendLine("[Screen capture — accessibility tree + metrics]")
-                appendLine("Screen: ${width}x${height} @${density}dpi")
-                appendLine("Window: ${rootNode.className} bounds=${Rect().also { rootNode.getBoundsInScreen(it) }.toShortString()}")
-                appendLine()
-                append(tree)
-            })
-        } else {
-            // Pre-API 30: return accessibility tree description only
-            val tree = buildString { appendNode(rootNode, 0) }
-            return ToolExecutionResult.ok("[Screen capture — accessibility tree]\n$tree")
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            return ToolExecutionResult.err("Pixel screenshot requires Android 11/API 30 or newer.")
         }
+
+        return try {
+            val result = captureScreenshotResult()
+            val hardwareBuffer = result.hardwareBuffer
+            val hardwareBitmap = Bitmap.wrapHardwareBuffer(hardwareBuffer, result.colorSpace)
+                ?: return ToolExecutionResult.err("Android returned an empty screenshot buffer.")
+            val bitmap = hardwareBitmap.copy(Bitmap.Config.ARGB_8888, false)
+            hardwareBuffer.close()
+
+            val file = withContext(Dispatchers.IO) {
+                val screenshotsDir = File(cacheDir, "screenshots").apply { mkdirs() }
+                val output = File(screenshotsDir, "kolo_screen_${System.currentTimeMillis()}.png")
+                FileOutputStream(output).use { stream ->
+                    bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)
+                }
+                output
+            }
+            bitmap.recycle()
+
+            val tree = buildString { appendNode(rootNode, 0) }
+            ToolExecutionResult.ok(
+                output = buildString {
+                    appendLine("Pixel screenshot captured.")
+                    appendLine("File: ${file.absolutePath}")
+                    appendLine("Size: ${file.length()} bytes")
+                    appendLine("Dimensions: ${hardwareBitmap.width}x${hardwareBitmap.height}")
+                    appendLine("Timestamp: ${result.timestamp}")
+                    appendLine()
+                    appendLine("Accessibility tree:")
+                    append(tree.take(12000))
+                },
+                metadata = mapOf(
+                    "path" to file.absolutePath,
+                    "mime" to "image/png",
+                    "width" to hardwareBitmap.width.toString(),
+                    "height" to hardwareBitmap.height.toString(),
+                    "timestamp" to result.timestamp.toString(),
+                ),
+            )
+        } catch (e: Exception) {
+            ToolExecutionResult.err("Failed to capture pixel screenshot: ${e.message}")
+        }
+    }
+
+    private suspend fun captureScreenshotResult(): ScreenshotResult {
+        val deferred = CompletableDeferred<ScreenshotResult>()
+        takeScreenshot(
+            Display.DEFAULT_DISPLAY,
+            mainExecutor,
+            object : TakeScreenshotCallback {
+                override fun onSuccess(screenshot: ScreenshotResult) {
+                    deferred.complete(screenshot)
+                }
+
+                override fun onFailure(errorCode: Int) {
+                    deferred.completeExceptionally(
+                        IllegalStateException("Accessibility screenshot failed with code $errorCode")
+                    )
+                }
+            },
+        )
+        return withTimeout(5_000) { deferred.await() }
     }
 
     fun findNodeByText(text: String): AccessibilityNodeInfo? {
