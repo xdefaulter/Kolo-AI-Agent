@@ -27,8 +27,8 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlin.coroutines.resume
 
 private const val LOCAL_CONTEXT_SIZE = 512
-private const val LOCAL_MAX_TOKENS = 16
-private const val LOCAL_PROMPT_MESSAGE_LIMIT = 1
+private const val LOCAL_MAX_TOKENS = 8
+private const val LOCAL_PROMPT_MESSAGE_LIMIT = 12
 private const val LOCAL_MIN_SENTENCE_CHARS = 6
 private val LOCAL_STOP_SEQUENCES = listOf(
     "\nuser:",
@@ -335,7 +335,12 @@ class AgentLoop(
                 }
                 yield()
 
-                val prompt = buildLocalPrompt(currentMessages, toolDefinitions)
+                val prompt = buildLocalPrompt(
+                    chatId = chatId,
+                    modelPath = modelPath,
+                    messages = currentMessages,
+                    toolDefinitions = toolDefinitions,
+                )
                 val completion = collectLocalCompletion(
                     engine = localEngine,
                     prompt = prompt,
@@ -356,6 +361,12 @@ class AgentLoop(
                             emit(AgentEvent.ContentChunk(finalContent))
                         }
                         emit(AgentEvent.TextComplete(finalContent))
+                        LocalPromptSessionCache.update(
+                            chatId = chatId,
+                            modelPath = modelPath,
+                            prompt = prompt,
+                            rawAssistantContent = rawContent,
+                        )
                     }
                     return
                 }
@@ -437,8 +448,6 @@ class AgentLoop(
             throw e
         } catch (e: Exception) {
             emit(AgentEvent.Error("Local llama.cpp error: ${e.message}"))
-        } finally {
-            localEngine.unloadModel()
         }
     }
 
@@ -508,11 +517,20 @@ class AgentLoop(
     }
 
     private fun buildLocalPrompt(
+        chatId: String,
+        modelPath: String,
         messages: List<ApiMessage>,
         toolDefinitions: List<ApiToolDefinition>,
     ): String {
         val builder = StringBuilder()
         if (toolDefinitions.isEmpty()) {
+            LocalPromptSessionCache.tryBuildPrompt(
+                chatId = chatId,
+                modelPath = modelPath,
+                messages = messages,
+            )?.let { return it }
+
+            builder.appendLine("System: Reply in one short sentence.")
             messages.forEach { msg ->
                 val role = if (msg.role == "assistant") "Assistant" else "User"
                 builder.append(role).append(": ").appendLine(msg.content.orEmpty().trim())
@@ -570,7 +588,49 @@ class AgentLoop(
     private fun shouldStopAfterLocalSentence(text: String): Boolean {
         val trimmed = text.trim()
         if (trimmed.length < LOCAL_MIN_SENTENCE_CHARS) return false
-        return trimmed.last() == '.' || trimmed.last() == '!' || trimmed.last() == '?'
+        return trimmed.last() == '.' ||
+            trimmed.last() == '!' ||
+            trimmed.last() == '?' ||
+            text.endsWith('\n')
+    }
+}
+
+private object LocalPromptSessionCache {
+    private var chatId: String? = null
+    private var modelPath: String? = null
+    private var transcript: String? = null
+
+    fun tryBuildPrompt(
+        chatId: String,
+        modelPath: String,
+        messages: List<ApiMessage>,
+    ): String? {
+        if (this.chatId != chatId || this.modelPath != modelPath) return null
+        val cachedTranscript = transcript ?: return null
+        val lastUser = messages.lastOrNull { it.role == "user" }?.content?.trim()
+        if (lastUser.isNullOrBlank()) return null
+        return buildString {
+            append(cachedTranscript)
+            append("User: ")
+            appendLine(lastUser)
+            append("Assistant:")
+        }
+    }
+
+    fun update(
+        chatId: String,
+        modelPath: String,
+        prompt: String,
+        rawAssistantContent: String,
+    ) {
+        if (rawAssistantContent.isBlank()) return
+        this.chatId = chatId
+        this.modelPath = modelPath
+        transcript = buildString {
+            append(prompt)
+            append(rawAssistantContent)
+            appendLine()
+        }
     }
 }
 

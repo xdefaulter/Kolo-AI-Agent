@@ -177,6 +177,7 @@ class ChatViewModel @Inject constructor(
 
     fun sendMessage(content: String) {
         if (content.isBlank()) return
+        if (_uiState.value.isStreaming) return
         val chatId = currentChatId ?: run {
             val newId = newChat()
             currentChatId = newId

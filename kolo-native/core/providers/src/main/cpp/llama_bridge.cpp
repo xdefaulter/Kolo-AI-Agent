@@ -44,6 +44,8 @@ struct KoloLlamaState {
     bool batch_initialized = false;
     int n_ctx = 4096;
     int n_threads = 4;
+    std::mutex mutex;
+    llama_tokens cached_tokens;
 };
 
 std::string get_jstring(JNIEnv * env, jstring value) {
@@ -124,6 +126,15 @@ bool is_valid_utf8(const std::string & value) {
     return expected == 0;
 }
 
+int common_prefix_length(const llama_tokens & a, const llama_tokens & b) {
+    const int count = std::min(static_cast<int>(a.size()), static_cast<int>(b.size()));
+    int i = 0;
+    while (i < count && a[i] == b[i]) {
+        ++i;
+    }
+    return i;
+}
+
 std::string run_completion(
         KoloLlamaState * state,
         const std::string & prompt,
@@ -140,6 +151,8 @@ std::string run_completion(
         return "";
     }
 
+    std::lock_guard<std::mutex> lock(state->mutex);
+
     __android_log_print(
             ANDROID_LOG_INFO,
             LOG_TAG,
@@ -149,8 +162,6 @@ std::string run_completion(
             static_cast<double>(temperature),
             static_cast<double>(top_p),
             static_cast<double>(repeat_penalty));
-
-    llama_memory_clear(llama_get_memory(state->context), false);
 
     llama_tokens prompt_tokens = common_tokenize(state->context, prompt, true, true);
     if (prompt_tokens.empty()) {
@@ -169,6 +180,8 @@ std::string run_completion(
         prompt_tokens.erase(
                 prompt_tokens.begin(),
                 prompt_tokens.end() - max_prompt_tokens);
+        llama_memory_clear(llama_get_memory(state->context), false);
+        state->cached_tokens.clear();
         __android_log_print(
                 ANDROID_LOG_WARN,
                 LOG_TAG,
@@ -177,20 +190,60 @@ std::string run_completion(
                 max_prompt_tokens);
     }
 
+    llama_memory_t memory = llama_get_memory(state->context);
+    const int cached_tokens_before = static_cast<int>(state->cached_tokens.size());
+    int cache_prefix_tokens = common_prefix_length(state->cached_tokens, prompt_tokens);
+    if (cache_prefix_tokens == 0) {
+        llama_memory_clear(memory, false);
+        state->cached_tokens.clear();
+    } else {
+        if (cache_prefix_tokens == static_cast<int>(prompt_tokens.size())) {
+            cache_prefix_tokens = std::max(0, cache_prefix_tokens - 1);
+        }
+        if (cache_prefix_tokens < static_cast<int>(state->cached_tokens.size())) {
+            if (!llama_memory_seq_rm(memory, 0, cache_prefix_tokens, -1)) {
+                llama_memory_clear(memory, false);
+                state->cached_tokens.clear();
+                cache_prefix_tokens = 0;
+            } else {
+                state->cached_tokens.resize(cache_prefix_tokens);
+            }
+        }
+    }
+
+    llama_tokens prompt_suffix(
+            prompt_tokens.begin() + cache_prefix_tokens,
+            prompt_tokens.end());
+
+    __android_log_print(
+            ANDROID_LOG_INFO,
+            LOG_TAG,
+            "completion_prompt_cache: hit_tokens=%d decode_tokens=%zu cached_tokens=%zu",
+            cache_prefix_tokens,
+            prompt_suffix.size(),
+            state->cached_tokens.size());
+    __android_log_print(
+            ANDROID_LOG_INFO,
+            LOG_TAG,
+            "completion_prompt_cache_detail: previous_cached_tokens=%d prompt_tokens=%zu",
+            cached_tokens_before,
+            prompt_tokens.size());
+
     __android_log_print(
             ANDROID_LOG_INFO,
             LOG_TAG,
             "completion_prompt_decode_start: prompt_tokens=%zu",
-            prompt_tokens.size());
+            prompt_suffix.size());
     const int decode_result = decode_tokens(
             state->context,
             state->batch,
-            prompt_tokens,
-            0,
+            prompt_suffix,
+            cache_prefix_tokens,
             state->n_ctx);
     if (decode_result != 0) {
         return "llama.cpp prompt decode failed: " + std::to_string(decode_result);
     }
+    state->cached_tokens = prompt_tokens;
     __android_log_write(ANDROID_LOG_INFO, LOG_TAG, "completion_prompt_decode_done");
 
     common_params_sampling sampling_params;
@@ -225,6 +278,8 @@ std::string run_completion(
         }
 
         pending_utf8 += common_token_to_piece(state->context, token);
+        bool keep_going = true;
+        bool emit_piece = false;
         if (is_valid_utf8(pending_utf8)) {
             if (i == 0) {
                 __android_log_write(ANDROID_LOG_INFO, LOG_TAG, "completion_first_token");
@@ -235,10 +290,8 @@ std::string run_completion(
                         "completion_generated_tokens=%d",
                         i + 1);
             }
-            if (!on_token(pending_utf8)) {
-                break;
-            }
-            pending_utf8.clear();
+            keep_going = on_token(pending_utf8);
+            emit_piece = true;
         }
 
         common_batch_clear(state->batch);
@@ -247,6 +300,7 @@ std::string run_completion(
         if (llama_decode(state->context, state->batch) != 0) {
             break;
         }
+        state->cached_tokens.push_back(token);
         if ((i + 1) % 8 == 0) {
             __android_log_print(
                     ANDROID_LOG_INFO,
@@ -255,6 +309,12 @@ std::string run_completion(
                     static_cast<double>(llama_time_us() - token_decode_start_us) / 1000.0);
         }
         current_pos++;
+        if (emit_piece) {
+            pending_utf8.clear();
+        }
+        if (!keep_going) {
+            break;
+        }
     }
 
     if (!pending_utf8.empty()) {
@@ -262,6 +322,11 @@ std::string run_completion(
     }
 
     common_sampler_free(sampler);
+    __android_log_print(
+            ANDROID_LOG_INFO,
+            LOG_TAG,
+            "completion_cache_committed: cached_tokens=%zu",
+            state->cached_tokens.size());
     __android_log_write(ANDROID_LOG_INFO, LOG_TAG, "completion_done");
     return "";
 }

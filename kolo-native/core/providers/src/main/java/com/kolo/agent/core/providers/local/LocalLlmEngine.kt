@@ -231,8 +231,25 @@ class LlamaCppEngine : LocalLlmEngine {
     override var loadedModelPath: String? = null
         private set
     private var nativeHandle: Long = 0L
+    private var loadedContextSize: Int = 0
+    private var loadedThreads: Int = 0
 
     override suspend fun loadModel(modelPath: String, contextSize: Int, threads: Int) {
+        if (
+            nativeHandle != 0L &&
+            isModelLoaded &&
+            loadedModelPath == modelPath &&
+            loadedContextSize == contextSize &&
+            loadedThreads == threads
+        ) {
+            Log.i(TAG, "Reusing loaded model/context: $modelPath")
+            return
+        }
+
+        if (nativeHandle != 0L) {
+            unloadModel()
+        }
+
         if (!GgufHelpers.isValidModel(modelPath)) {
             Log.e(TAG, "Model file not found or not a valid GGUF: $modelPath")
             throw IllegalArgumentException(
@@ -255,6 +272,8 @@ class LlamaCppEngine : LocalLlmEngine {
         }
         isModelLoaded = true
         loadedModelPath = modelPath
+        loadedContextSize = contextSize
+        loadedThreads = threads
         Log.i(TAG, "Model loaded: $modelPath")
     }
 
@@ -270,6 +289,8 @@ class LlamaCppEngine : LocalLlmEngine {
         nativeHandle = 0L
         isModelLoaded = false
         loadedModelPath = null
+        loadedContextSize = 0
+        loadedThreads = 0
     }
 
     override fun completeStream(
@@ -361,6 +382,7 @@ class StubLocalLlmEngine : LocalLlmEngine {
  */
 object LlmEngineFactory {
     private const val TAG = "LlmEngineFactory"
+    private val sharedLlamaEngine = LlamaCppEngine()
 
     /**
      * Create an engine using a [LocalModelManager], ensuring the bridge
@@ -376,7 +398,7 @@ object LlmEngineFactory {
     suspend fun ensureAndCreate(config: ProviderConfig, localModelManager: LocalModelManager): LocalLlmEngine {
         if (config.kind != ProviderKind.localLlama) return StubLocalLlmEngine()
         val cached = localModelManager.isBridgeAvailableCached()
-        if (cached == true) return LlamaCppEngine()
+        if (cached == true) return sharedLlamaEngine
         if (cached == false) {
             Log.w(TAG, "Bridge cached as unavailable — using StubLocalLlmEngine")
             return StubLocalLlmEngine()
@@ -385,7 +407,7 @@ object LlmEngineFactory {
         Log.i(TAG, "Bridge not yet checked — running checkBridgeAvailability on IO")
         localModelManager.checkBridgeAvailability()
         val result = localModelManager.isBridgeAvailableCached()
-        return if (result == true) LlamaCppEngine() else StubLocalLlmEngine()
+        return if (result == true) sharedLlamaEngine else StubLocalLlmEngine()
     }
 
     /**
@@ -399,7 +421,7 @@ object LlmEngineFactory {
     fun create(config: ProviderConfig, localModelManager: LocalModelManager): LocalLlmEngine {
         if (config.kind != ProviderKind.localLlama) return StubLocalLlmEngine()
         val cached = localModelManager.isBridgeAvailableCached()
-        if (cached == true) return LlamaCppEngine()
+        if (cached == true) return sharedLlamaEngine
         if (cached == false) return StubLocalLlmEngine()
         // Cache is null — bridge not yet checked. Return stub with warning.
         Log.w(TAG, "Bridge availability not yet checked (cache=null). Returning StubLocalLlmEngine. " +
@@ -416,6 +438,6 @@ object LlmEngineFactory {
         val available = try {
             LlamaCppBridge.isAvailable()
         } catch (_: Exception) { false }
-        return if (available) LlamaCppEngine() else StubLocalLlmEngine()
+        return if (available) sharedLlamaEngine else StubLocalLlmEngine()
     }
 }
