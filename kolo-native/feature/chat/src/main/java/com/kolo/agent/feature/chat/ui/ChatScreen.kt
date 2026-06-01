@@ -1289,6 +1289,12 @@ private fun MessageBubble(
                         ) {
                             Icon(Icons.Filled.ContentCopy, contentDescription = "Copy message", modifier = Modifier.size(12.dp))
                         }
+                        IconButton(
+                            onClick = { copyMessageToClipboard(context, message.content, quote = true) },
+                            modifier = Modifier.size(18.dp),
+                        ) {
+                            Icon(Icons.Filled.FormatQuote, contentDescription = "Copy message as quote", modifier = Modifier.size(12.dp))
+                        }
                     }
                     Text(
                         text = timeText,
@@ -1301,10 +1307,15 @@ private fun MessageBubble(
     }
 }
 
-private fun copyMessageToClipboard(context: Context, text: String) {
+private fun copyMessageToClipboard(context: Context, text: String, quote: Boolean = false) {
+    val copiedText = if (quote) {
+        text.lineSequence().joinToString("\n") { "> $it" } + "\n"
+    } else {
+        text
+    }
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-    clipboard.setPrimaryClip(ClipData.newPlainText("Kolo message", text))
-    Toast.makeText(context, "Message copied", Toast.LENGTH_SHORT).show()
+    clipboard.setPrimaryClip(ClipData.newPlainText(if (quote) "Kolo message quote" else "Kolo message", copiedText))
+    Toast.makeText(context, if (quote) "Quoted message copied" else "Message copied", Toast.LENGTH_SHORT).show()
 }
 
 private fun copyTextToClipboard(context: Context, text: String) {
