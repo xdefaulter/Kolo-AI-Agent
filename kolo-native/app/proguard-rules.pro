@@ -19,6 +19,12 @@
 -dontwarn okhttp3.**
 -dontwarn okio.**
 
+# Tink references compile-time Error Prone annotations that are not packaged at runtime.
+-dontwarn com.google.errorprone.annotations.CanIgnoreReturnValue
+-dontwarn com.google.errorprone.annotations.CheckReturnValue
+-dontwarn com.google.errorprone.annotations.Immutable
+-dontwarn com.google.errorprone.annotations.RestrictedApi
+
 # Hilt/Dagger generated code.
 -dontwarn dagger.hilt.**
 -dontwarn javax.annotation.**

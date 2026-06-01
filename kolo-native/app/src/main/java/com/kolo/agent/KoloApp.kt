@@ -1,6 +1,7 @@
 package com.kolo.agent
 
 import android.app.Application
+import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -56,9 +57,12 @@ fun KoloTheme(content: @Composable () -> Unit) {
         AppSettings.ThemeMode.DARK -> true
     }
 
+    val supportsDynamicColor = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
     val colorScheme = when {
-        darkTheme -> dynamicDarkColorScheme(context)
-        else -> dynamicLightColorScheme(context)
+        supportsDynamicColor && darkTheme -> dynamicDarkColorScheme(context)
+        supportsDynamicColor -> dynamicLightColorScheme(context)
+        darkTheme -> darkColorScheme()
+        else -> lightColorScheme()
     }
 
     MaterialTheme(

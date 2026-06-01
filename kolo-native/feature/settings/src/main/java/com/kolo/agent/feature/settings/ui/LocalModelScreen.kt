@@ -9,6 +9,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.HelpOutline
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -259,7 +260,7 @@ private fun BridgeStatusCard(status: LocalModelManager.BridgeStatus) {
                     imageVector = when {
                         isAvailable -> Icons.Filled.CheckCircle
                         isUnavailable -> Icons.Filled.Warning
-                        else -> Icons.Filled.HelpOutline
+                        else -> Icons.AutoMirrored.Filled.HelpOutline
                     },
                     contentDescription = null,
                     tint = when {
@@ -483,7 +484,7 @@ private fun HelpCard() {
     Card(shape = MaterialTheme.shapes.small, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))) {
         Column(modifier = Modifier.padding(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Filled.HelpOutline, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(16.dp))
+                Icon(Icons.AutoMirrored.Filled.HelpOutline, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(16.dp))
                 Spacer(modifier = Modifier.width(6.dp))
                 Text("How to use local models", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
             }

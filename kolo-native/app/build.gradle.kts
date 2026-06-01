@@ -16,6 +16,7 @@ android {
         targetSdk = libs.versions.targetSdk.get().toInt()
         versionCode = 1
         versionName = "1.0.0"
+        manifestPlaceholders["usesCleartextTraffic"] = "false"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -26,6 +27,7 @@ android {
 
     buildTypes {
         release {
+            manifestPlaceholders["usesCleartextTraffic"] = "false"
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(
@@ -34,6 +36,7 @@ android {
             )
         }
         debug {
+            manifestPlaceholders["usesCleartextTraffic"] = "true"
             isDebuggable = true
             applicationIdSuffix = ".debug"
         }
@@ -41,7 +44,11 @@ android {
 
     buildFeatures {
         compose = true
-        buildConfig = true
+    }
+
+    lint {
+        // AGP 8.7/Kotlin 2.0 can crash this lifecycle detector while analyzing this module.
+        disable += "NullSafeMutableLiveData"
     }
 
     compileOptions {
@@ -120,5 +127,6 @@ dependencies {
 
     androidTestImplementation(libs.junit.ext)
     androidTestImplementation(libs.espresso.core)
+    androidTestImplementation(platform(libs.compose.bom))
     androidTestImplementation(libs.compose.ui.test.junit4)
 }

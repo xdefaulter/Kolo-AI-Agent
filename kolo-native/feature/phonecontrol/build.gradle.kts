@@ -26,6 +26,11 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+
+    lint {
+        // AGP 8.7/Kotlin 2.0 can crash this lifecycle detector while analyzing this module.
+        disable += "NullSafeMutableLiveData"
+    }
 }
 
 dependencies {

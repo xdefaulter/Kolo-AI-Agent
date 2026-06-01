@@ -84,11 +84,23 @@ class ConnectivityTool : KoloTool() {
     override val permission = ToolPermission.safe
     override val platform = ToolPlatform.ANDROID
 
+    @Suppress("MissingPermission")
     override suspend fun execute(params: Map<String, String>, context: ToolExecutionContext): ToolExecutionResult {
         val app = context.requireAndroidContext() ?: return ToolExecutionResult.err("Android context unavailable")
+        if (app.checkSelfPermission(Manifest.permission.ACCESS_NETWORK_STATE) != PackageManager.PERMISSION_GRANTED) {
+            return ToolExecutionResult.err("Network state permission is not granted.")
+        }
         val cm = app.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-        val network = cm.activeNetwork ?: return ToolExecutionResult.ok("Offline: no active network.")
-        val caps = cm.getNetworkCapabilities(network) ?: return ToolExecutionResult.ok("Network active, capabilities unknown.")
+        val network = try {
+            cm.activeNetwork
+        } catch (_: SecurityException) {
+            return ToolExecutionResult.err("Network state permission is not available.")
+        } ?: return ToolExecutionResult.ok("Offline: no active network.")
+        val caps = try {
+            cm.getNetworkCapabilities(network)
+        } catch (_: SecurityException) {
+            return ToolExecutionResult.err("Network state permission is not available.")
+        } ?: return ToolExecutionResult.ok("Network active, capabilities unknown.")
         val transports = buildList {
             if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) add("wifi")
             if (caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) add("cellular")
@@ -136,8 +148,12 @@ class VibrateTool : KoloTool() {
     override val permission = ToolPermission.sensitive
     override val platform = ToolPlatform.ANDROID
 
+    @Suppress("MissingPermission")
     override suspend fun execute(params: Map<String, String>, context: ToolExecutionContext): ToolExecutionResult {
         val app = context.requireAndroidContext() ?: return ToolExecutionResult.err("Android context unavailable")
+        if (app.checkSelfPermission(Manifest.permission.VIBRATE) != PackageManager.PERMISSION_GRANTED) {
+            return ToolExecutionResult.err("Vibrate permission is not granted.")
+        }
         val duration = (params["duration_ms"]?.toLongOrNull() ?: 250L).coerceIn(1L, 2000L)
         val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             (app.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager).defaultVibrator
@@ -145,7 +161,11 @@ class VibrateTool : KoloTool() {
             @Suppress("DEPRECATION")
             app.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
         }
-        vibrator.vibrate(VibrationEffect.createOneShot(duration, VibrationEffect.DEFAULT_AMPLITUDE))
+        try {
+            vibrator.vibrate(VibrationEffect.createOneShot(duration, VibrationEffect.DEFAULT_AMPLITUDE))
+        } catch (_: SecurityException) {
+            return ToolExecutionResult.err("Vibrate permission is not available.")
+        }
         return ToolExecutionResult.ok("Vibrated for ${duration}ms.")
     }
 }

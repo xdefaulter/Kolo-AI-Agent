@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.accessibilityservice.GestureDescription
 import android.accessibilityservice.GestureDescription.StrokeDescription
+import android.annotation.TargetApi
 import android.graphics.Bitmap
 import android.graphics.Path
 import android.graphics.PixelFormat
@@ -26,6 +27,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import java.io.File
 import java.io.FileOutputStream
+import java.lang.ref.WeakReference
 
 /**
  * Accessibility service for phone control.
@@ -50,9 +52,9 @@ class PhoneControlAccessibilityService : AccessibilityService() {
         private val _overlayMessage = MutableStateFlow("")
         val overlayMessage: StateFlow<String> = _overlayMessage
 
-        private var instance: PhoneControlAccessibilityService? = null
+        private var instanceRef: WeakReference<PhoneControlAccessibilityService>? = null
 
-        fun getInstance(): PhoneControlAccessibilityService? = instance
+        fun getInstance(): PhoneControlAccessibilityService? = instanceRef?.get()
 
         /** Called by phone_control_start tool to begin a session. */
         fun beginSession(reason: String = "Agent is controlling your phone") {
@@ -64,14 +66,14 @@ class PhoneControlAccessibilityService : AccessibilityService() {
         fun endSession() {
             _sessionState.value = SessionState.inactive
             _overlayMessage.value = ""
-            instance?.removeOverlay()
+            getInstance()?.removeOverlay()
         }
 
         /** Called by STOP button — immediately stops and blocks further actions. */
         fun emergencyStop() {
             _sessionState.value = SessionState.stoppedByUser
             _overlayMessage.value = "STOPPED — tap phone_control_start to resume"
-            instance?.showStopOverlay()
+            getInstance()?.showStopOverlay()
         }
 
         /** Check if phone-control dangerous actions should be blocked. */
@@ -85,7 +87,7 @@ class PhoneControlAccessibilityService : AccessibilityService() {
 
     override fun onServiceConnected() {
         super.onServiceConnected()
-        instance = this
+        instanceRef = WeakReference(this)
         _isRunning.value = true
 
         serviceInfo = serviceInfo.apply {
@@ -107,7 +109,9 @@ class PhoneControlAccessibilityService : AccessibilityService() {
     override fun onDestroy() {
         super.onDestroy()
         removeOverlay()
-        instance = null
+        if (instanceRef?.get() === this) {
+            instanceRef = null
+        }
         _isRunning.value = false
         _sessionState.value = SessionState.inactive
     }
@@ -245,6 +249,7 @@ class PhoneControlAccessibilityService : AccessibilityService() {
         }
     }
 
+    @TargetApi(Build.VERSION_CODES.R)
     private suspend fun captureScreenshotResult(): ScreenshotResult {
         val deferred = CompletableDeferred<ScreenshotResult>()
         takeScreenshot(
@@ -328,9 +333,7 @@ class PhoneControlAccessibilityService : AccessibilityService() {
             "recents" -> AccessibilityService.GLOBAL_ACTION_RECENTS
             "notifications" -> AccessibilityService.GLOBAL_ACTION_NOTIFICATIONS
             "quick_settings" -> AccessibilityService.GLOBAL_ACTION_QUICK_SETTINGS
-            "power_dialog" -> {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) AccessibilityService.GLOBAL_ACTION_POWER_DIALOG else return ToolExecutionResult.err("power_dialog requires Android 9+")
-            }
+            "power_dialog" -> AccessibilityService.GLOBAL_ACTION_POWER_DIALOG
             else -> null
         }
 
