@@ -257,8 +257,18 @@ class SettingsViewModel @Inject constructor(
     fun updateProvider(config: ProviderConfig, apiKey: String? = null) {
         viewModelScope.launch {
             val key = apiKey ?: providerRepository.getApiKey(config.id.value)
+            val existingProvider = providerRepository.getAllProviders().firstOrNull { it.id == config.id }
             var configToSave = config.copy(updatedAt = System.currentTimeMillis())
-            if (!configToSave.isLocal && configToSave.models.isEmpty()) {
+            val shouldRefreshModels = if (configToSave.isLocal) {
+                false
+            } else {
+                val endpointChanged = existingProvider == null ||
+                    existingProvider.baseUrl != configToSave.baseUrl ||
+                    existingProvider.modelsEndpoint != configToSave.modelsEndpoint ||
+                    existingProvider.kind != configToSave.kind
+                configToSave.models.isEmpty() || endpointChanged
+            }
+            if (shouldRefreshModels) {
                 configToSave = fetchModelsForProvider(configToSave, key) ?: configToSave
             }
             providerRepository.saveProvider(configToSave, key)

@@ -21,6 +21,8 @@ import com.kolo.agent.core.model.*
 import com.kolo.agent.core.model.ToolPermission
 import com.kolo.agent.core.providers.local.LocalModelManager
 import com.kolo.agent.feature.settings.*
+import java.net.MalformedURLException
+import java.net.URL
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -202,6 +204,7 @@ private fun ProvidersSection(
 ) {
     var showAddDialog by remember { mutableStateOf(false) }
     var expandedProvider by remember { mutableStateOf<ProviderId?>(null) }
+    val existingProviderNames = remember(providers) { providers.map { it.name.lowercase() }.toSet() }
 
     LazyColumn(modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp), contentPadding = PaddingValues(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         item {
@@ -228,10 +231,21 @@ private fun ProvidersSection(
                 onSetModelPath = { onSetProviderModelPath(provider.id, it) },
                 onRefreshModels = { onRefreshProviderModels(provider.id) },
                 onSetLocalLlamaGpuMode = onSetLocalLlamaGpuMode,
+                existingProviderNames = existingProviderNames,
             )
         }
     }
-    if (showAddDialog) { AddProviderDialog(bridgeStatus = bridgeStatus, onDismiss = { showAddDialog = false }, onConfirm = { config, apiKey -> onAddProvider(config, apiKey); showAddDialog = false }) }
+    if (showAddDialog) {
+        AddProviderDialog(
+            bridgeStatus = bridgeStatus,
+            existingProviderNames = existingProviderNames,
+            onDismiss = { showAddDialog = false },
+            onConfirm = { config, apiKey ->
+                onAddProvider(config, apiKey)
+                showAddDialog = false
+            },
+        )
+    }
 }
 
 @Composable
@@ -251,8 +265,13 @@ private fun ProviderCard(
     onSetModelPath: (String) -> Unit,
     onRefreshModels: () -> Unit,
     onSetLocalLlamaGpuMode: (Boolean) -> Unit,
+    existingProviderNames: Set<String> = emptySet(),
 ) {
     var modelPathDraft by remember(provider.id, provider.modelPath) { mutableStateOf(provider.modelPath.orEmpty()) }
+    var modelSearch by remember(provider.id) { mutableStateOf("") }
+    val filteredModels = provider.models.filter {
+        modelSearch.isBlank() || it.label.contains(modelSearch, ignoreCase = true) || it.modelId.contains(modelSearch, ignoreCase = true)
+    }
     var showEditDialog by remember { mutableStateOf(false) }
     Card(onClick = onToggleExpand, colors = CardDefaults.cardColors(containerColor = if (isActive) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface), shape = MaterialTheme.shapes.small) {
         Column(modifier = Modifier.padding(12.dp)) {
@@ -343,9 +362,9 @@ private fun ProviderCard(
                             enabled = modelPathDraft.trim() != provider.modelPath.orEmpty(),
                             contentPadding = PaddingValues(horizontal = 12.dp),
                         ) { Text("Save Path", style = MaterialTheme.typography.labelSmall) }
-	                    } else {
-	                        Spacer(Modifier.height(8.dp))
-	                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    } else {
+                        Spacer(Modifier.height(8.dp))
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f)) {
                                 Text("${provider.models.size} models", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 modelFetchStatus?.let {
@@ -359,36 +378,49 @@ private fun ProviderCard(
                                 Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(14.dp))
                                 Spacer(Modifier.width(4.dp))
                                 Text("Fetch Models", style = MaterialTheme.typography.labelSmall)
-	                            }
-	                        }
-	                        if (provider.models.isNotEmpty()) {
-	                            Spacer(Modifier.height(8.dp))
-	                            Text("Model", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-	                            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-	                                provider.models.take(8).forEach { model ->
-	                                    Row(
-	                                        modifier = Modifier.fillMaxWidth(),
-	                                        verticalAlignment = Alignment.CenterVertically,
-	                                    ) {
-	                                        RadioButton(
-	                                            selected = model.modelId == provider.activeModel?.modelId,
-	                                            onClick = { onSetActiveModel(model.modelId) },
-	                                        )
-	                                        Text(
-	                                            model.label,
-	                                            style = MaterialTheme.typography.bodySmall,
-	                                            maxLines = 1,
-	                                            overflow = TextOverflow.Ellipsis,
-	                                            modifier = Modifier.weight(1f),
-	                                        )
-	                                    }
-	                                }
-	                                if (provider.models.size > 8) {
-	                                    Text("+${provider.models.size - 8} more available in chat picker", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-	                                }
-	                            }
-	                        }
-	                    }
+                            }
+                        }
+                        if (provider.models.isNotEmpty()) {
+                            Spacer(Modifier.height(8.dp))
+                            Text("Model", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            OutlinedTextField(
+                                value = modelSearch,
+                                onValueChange = { modelSearch = it },
+                                label = { Text("Search models") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                            Spacer(Modifier.height(2.dp))
+                            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                if (filteredModels.isEmpty()) {
+                                    Text(
+                                        if (modelSearch.isBlank()) "No models available" else "No models match \"$modelSearch\"",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                } else {
+                                    filteredModels.forEach { model ->
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                        ) {
+                                            RadioButton(
+                                                selected = model.modelId == provider.activeModel?.modelId,
+                                                onClick = { onSetActiveModel(model.modelId) },
+                                            )
+                                            Text(
+                                                model.label,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.weight(1f),
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     Spacer(Modifier.height(6.dp))
                     Row(Modifier.fillMaxWidth(), Arrangement.spacedBy(6.dp)) {
                         if (!isActive) { OutlinedButton(onClick = onSetActive, contentPadding = PaddingValues(horizontal = 12.dp)) { Text("Set Active", style = MaterialTheme.typography.labelSmall) } }
@@ -402,6 +434,7 @@ private fun ProviderCard(
     if (showEditDialog) {
         ProviderDetailDialog(
             provider = provider,
+            existingProviderNames = existingProviderNames - provider.name.lowercase(),
             onDismiss = { showEditDialog = false },
             onSave = { updated, apiKey ->
                 onUpdateProvider(updated, apiKey)
@@ -412,7 +445,12 @@ private fun ProviderCard(
 }
 
 @Composable
-private fun AddProviderDialog(bridgeStatus: LocalModelManager.BridgeStatus = LocalModelManager.BridgeStatus.Unknown, onDismiss: () -> Unit, onConfirm: (ProviderConfig, String) -> Unit) {
+private fun AddProviderDialog(
+    bridgeStatus: LocalModelManager.BridgeStatus = LocalModelManager.BridgeStatus.Unknown,
+    existingProviderNames: Set<String> = emptySet(),
+    onDismiss: () -> Unit,
+    onConfirm: (ProviderConfig, String) -> Unit,
+) {
     var name by remember { mutableStateOf("") }
     var baseUrl by remember { mutableStateOf("") }
     var apiKey by remember { mutableStateOf("") }
@@ -420,11 +458,33 @@ private fun AddProviderDialog(bridgeStatus: LocalModelManager.BridgeStatus = Loc
     var providerKind by remember { mutableStateOf(ProviderKind.openaiCompat) }
     var selectedPreset by remember { mutableStateOf(-1) }
     val presets = remember { ProviderPresets.defaults }
+    val normalizedBaseUrl = normalizeBaseUrl(baseUrl, fallback = null)
+    val effectiveName = name.ifBlank { if (providerKind == ProviderKind.localLlama) "Local llama.cpp" else "" }.trim()
+    val nameError = when {
+        effectiveName.isBlank() -> "Provider name is required."
+        existingProviderNames.contains(effectiveName.lowercase()) -> "A provider with this name already exists."
+        else -> null
+    }
+    val baseUrlError = when {
+        providerKind == ProviderKind.localLlama -> null
+        normalizedBaseUrl == null && baseUrl.isNotBlank() -> "Use a valid URL (e.g. https://api.openai.com/v1)."
+        baseUrl.isBlank() && selectedPreset < 0 -> "Select a preset or enter a base URL."
+        else -> null
+    }
+    val canSave = when {
+        providerKind == ProviderKind.localLlama -> nameError == null
+        else -> nameError == null && baseUrlError == null
+    }
+
     AlertDialog(onDismissRequest = onDismiss, title = { Text("Add Provider") }, text = {
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 FilterChip(selected = providerKind == ProviderKind.openaiCompat, onClick = { providerKind = ProviderKind.openaiCompat }, label = { Text("Remote API") })
-                FilterChip(selected = providerKind == ProviderKind.localLlama, onClick = { providerKind = ProviderKind.localLlama; name = name.ifBlank { "Local llama.cpp" }; baseUrl = "llama.cpp://local" }, label = { Text("Local GGUF") })
+                FilterChip(selected = providerKind == ProviderKind.localLlama, onClick = {
+                    providerKind = ProviderKind.localLlama
+                    name = name.ifBlank { "Local llama.cpp" }
+                    baseUrl = "llama.cpp://local"
+                }, label = { Text("Local GGUF") })
             }
             Text("Quick Setup", style = MaterialTheme.typography.labelMedium)
             if (providerKind == ProviderKind.openaiCompat) {
@@ -445,7 +505,15 @@ private fun AddProviderDialog(bridgeStatus: LocalModelManager.BridgeStatus = Loc
                 }
             }
             Spacer(Modifier.height(6.dp))
-            OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it },
+                label = { Text("Name") },
+                singleLine = true,
+                isError = nameError != null,
+                supportingText = nameError?.let { { Text(it) } },
+                modifier = Modifier.fillMaxWidth(),
+            )
             if (providerKind == ProviderKind.localLlama) {
                 Card(shape = MaterialTheme.shapes.small, colors = CardDefaults.cardColors(containerColor = if (bridgeStatus == LocalModelManager.BridgeStatus.Available) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f) else MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.3f))) {
                     Row(modifier = Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -459,44 +527,63 @@ private fun AddProviderDialog(bridgeStatus: LocalModelManager.BridgeStatus = Loc
                 Spacer(Modifier.height(4.dp))
                 OutlinedTextField(value = modelPath, onValueChange = { modelPath = it }, label = { Text("GGUF model path (optional)") }, singleLine = true, modifier = Modifier.fillMaxWidth(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri))
             } else {
-                OutlinedTextField(value = baseUrl, onValueChange = { baseUrl = it }, label = { Text("Base URL") }, singleLine = true, modifier = Modifier.fillMaxWidth(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri))
+                OutlinedTextField(
+                    value = baseUrl,
+                    onValueChange = { baseUrl = it },
+                    label = { Text("Base URL") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                    isError = baseUrlError != null,
+                    supportingText = baseUrlError?.let { { Text(it) } },
+                )
                 OutlinedTextField(value = apiKey, onValueChange = { apiKey = it }, label = { Text("API Key") }, singleLine = true, modifier = Modifier.fillMaxWidth(), visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password))
             }
         }
-    }, confirmButton = { TextButton(onClick = {
-        val config = if (providerKind == ProviderKind.localLlama) {
-            ProviderConfig(
-                name = name.ifBlank { "Local llama.cpp" },
-                baseUrl = "llama.cpp://local",
-                isActive = true,
-                kind = ProviderKind.localLlama,
-                modelPath = modelPath.trim().ifBlank { null },
-                models = listOf(ModelConfig(modelId = "local-gguf", displayName = "Local GGUF", maxTokens = 1024, contextWindow = 4096, isActive = true)),
-            )
-        } else {
-            val preset = presets.getOrNull(selectedPreset)
-            val cleanBaseUrl = baseUrl.ifBlank { preset?.baseUrl ?: "https://api.openai.com/v1" }.trimEnd('/')
-            preset?.copy(
-                name = name.ifBlank { preset.name },
-                baseUrl = cleanBaseUrl,
-                modelsEndpoint = if (cleanBaseUrl == preset.baseUrl.trimEnd('/')) preset.modelsEndpoint else "$cleanBaseUrl/models",
-                isActive = true,
-                updatedAt = System.currentTimeMillis(),
-            ) ?: ProviderConfig(
-                name = name.ifBlank { "Custom Provider" },
-                baseUrl = cleanBaseUrl,
-                modelsEndpoint = "$cleanBaseUrl/models",
-                isActive = true,
-                kind = ProviderKind.openaiCompat,
-            )
+    }, confirmButton = {
+        TextButton(
+            onClick = {
+                val config = if (providerKind == ProviderKind.localLlama) {
+                    ProviderConfig(
+                        name = effectiveName,
+                        baseUrl = "llama.cpp://local",
+                        isActive = true,
+                        kind = ProviderKind.localLlama,
+                        modelPath = modelPath.trim().ifBlank { null },
+                        models = listOf(ModelConfig(modelId = "local-gguf", displayName = "Local GGUF", maxTokens = 1024, contextWindow = 4096, isActive = true)),
+                    )
+                } else {
+                    val preset = presets.getOrNull(selectedPreset)
+                    val cleanBaseUrl = normalizedBaseUrl ?: preset?.baseUrl ?: "https://api.openai.com/v1"
+                    preset?.copy(
+                        name = effectiveName.ifBlank { preset.name },
+                        baseUrl = cleanBaseUrl,
+                        modelsEndpoint = if (cleanBaseUrl == preset.baseUrl.trimEnd('/')) preset.modelsEndpoint else "$cleanBaseUrl/models",
+                        isActive = true,
+                        updatedAt = System.currentTimeMillis(),
+                    ) ?: ProviderConfig(
+                        name = effectiveName.ifBlank { "Custom Provider" },
+                        baseUrl = cleanBaseUrl,
+                        modelsEndpoint = "$cleanBaseUrl/models",
+                        isActive = true,
+                        kind = ProviderKind.openaiCompat,
+                    )
+                }
+                onConfirm(config, apiKey)
+            },
+            enabled = canSave,
+        ) {
+            Text("Add")
         }
-        onConfirm(config, apiKey)
-    }, enabled = name.isNotBlank() && (providerKind == ProviderKind.localLlama || baseUrl.isNotBlank())) { Text("Add") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
+    }, dismissButton = {
+        TextButton(onClick = onDismiss) { Text("Cancel") }
+    })
 }
 
 @Composable
 private fun ProviderDetailDialog(
     provider: ProviderConfig,
+    existingProviderNames: Set<String> = emptySet(),
     onDismiss: () -> Unit,
     onSave: (ProviderConfig, String?) -> Unit,
 ) {
@@ -507,15 +594,76 @@ private fun ProviderDetailDialog(
     var headers by remember(provider.id) {
         mutableStateOf(provider.customHeaders.entries.joinToString("\n") { "${it.key}: ${it.value}" })
     }
+    val normalizeName = name.ifBlank { provider.name }.trim()
+    val normalizedBaseUrl = normalizeBaseUrl(baseUrl, fallback = provider.baseUrl)
+    val normalizedModelsEndpoint = normalizeBaseUrl(
+        modelsEndpoint,
+        fallback = if (normalizedBaseUrl != null) "${normalizedBaseUrl}/models" else provider.modelsEndpoint,
+        allowRelative = normalizedBaseUrl != null,
+    )
+    val baseUrlError = if (provider.isLocal) {
+        null
+    } else if (normalizedBaseUrl == null) {
+        "Enter a valid base URL (for example, https://api.openai.com/v1)."
+    } else {
+        null
+    }
+    val modelsEndpointError = if (provider.isLocal) {
+        null
+    } else if (modelsEndpoint.isNotBlank() && normalizedModelsEndpoint == null) {
+        "Enter a valid models endpoint URL."
+    } else {
+        null
+    }
+    val headerValidation = parseHeaderLinesWithValidation(headers)
+    val hasHeaderErrors = headerValidation.errors.isNotEmpty()
+    val hasDuplicateName = existingProviderNames.contains(normalizeName.lowercase()) && normalizeName.lowercase() != provider.name.lowercase()
+    val nameError = when {
+        normalizeName.isBlank() -> "Provider name is required."
+        hasDuplicateName -> "A provider with this name already exists."
+        else -> null
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Provider Details") },
         text = {
             LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.heightIn(max = 440.dp)) {
-                item { OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Name") }, singleLine = true, modifier = Modifier.fillMaxWidth()) }
-                item { OutlinedTextField(value = baseUrl, onValueChange = { baseUrl = it }, label = { Text("Base URL") }, singleLine = true, modifier = Modifier.fillMaxWidth(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri)) }
+                item {
+                    OutlinedTextField(
+                        value = name,
+                        onValueChange = { name = it },
+                        label = { Text("Name") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        isError = nameError != null,
+                        supportingText = nameError?.let { { Text(it) } },
+                    )
+                }
+                item {
+                    OutlinedTextField(
+                        value = baseUrl,
+                        onValueChange = { baseUrl = it },
+                        label = { Text("Base URL") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                        isError = baseUrlError != null,
+                        supportingText = baseUrlError?.let { { Text(it) } },
+                    )
+                }
                 if (!provider.isLocal) {
-                    item { OutlinedTextField(value = modelsEndpoint, onValueChange = { modelsEndpoint = it }, label = { Text("Models endpoint") }, singleLine = true, modifier = Modifier.fillMaxWidth(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri)) }
+                    item {
+                        OutlinedTextField(
+                            value = modelsEndpoint,
+                            onValueChange = { modelsEndpoint = it },
+                            label = { Text("Models endpoint") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                            isError = modelsEndpointError != null,
+                            supportingText = modelsEndpointError?.let { { Text(it) } },
+                        )
+                    }
                     item { OutlinedTextField(value = apiKey, onValueChange = { apiKey = it }, label = { Text("API key (leave blank to keep)") }, singleLine = true, modifier = Modifier.fillMaxWidth(), visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password)) }
                     item {
                         OutlinedTextField(
@@ -528,6 +676,21 @@ private fun ProviderDetailDialog(
                             modifier = Modifier.fillMaxWidth(),
                         )
                     }
+                    item {
+                        if (headerValidation.errors.isNotEmpty()) {
+                            Text(
+                                "Header issues: ${headerValidation.errors.joinToString() }",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        } else {
+                            Text(
+                                "Use each header on a separate line as `Header: Value`.",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
                 }
             }
         },
@@ -537,31 +700,73 @@ private fun ProviderDetailDialog(
                     onSave(
                         provider.copy(
                             name = name.ifBlank { provider.name },
-                            baseUrl = baseUrl.trim().trimEnd('/'),
-                            modelsEndpoint = modelsEndpoint.trim().ifBlank { null },
-                            customHeaders = parseHeaderLines(headers),
+                            baseUrl = normalizedBaseUrl ?: baseUrl.trim().trimEnd('/'),
+                            modelsEndpoint = normalizedModelsEndpoint?.trim()?.ifBlank { null },
+                            customHeaders = headerValidation.headers,
                         ),
                         apiKey.trim().ifBlank { null },
                     )
                 },
-                enabled = name.isNotBlank() && baseUrl.isNotBlank(),
+                enabled = nameError == null && baseUrlError == null && modelsEndpointError == null && !hasHeaderErrors,
             ) { Text("Save") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }
 
-private fun parseHeaderLines(value: String): Map<String, String> {
-    return value.lineSequence()
-        .map { it.trim() }
-        .filter { it.isNotBlank() && it.contains(":") }
-        .associate { line ->
-            val key = line.substringBefore(":").trim()
-            val headerValue = line.substringAfter(":").trim()
-            key to headerValue
+private data class ParsedHeaderLines(
+    val headers: Map<String, String>,
+    val errors: List<String>,
+)
+
+private fun parseHeaderLinesWithValidation(value: String): ParsedHeaderLines {
+    val parsed = mutableMapOf<String, String>()
+    val errors = mutableListOf<String>()
+    val seenHeaderLines = mutableMapOf<String, Int>()
+
+    value.lineSequence().forEachIndexed { index, rawLine ->
+        val line = rawLine.trim()
+        if (line.isBlank()) return@forEachIndexed
+        if (!line.contains(":")) {
+            errors += "Line ${index + 1}: missing ':'"
+            return@forEachIndexed
         }
-        .filterKeys { it.isNotBlank() }
-        .filterValues { it.isNotBlank() }
+        val key = line.substringBefore(":").trim()
+        val headerValue = line.substringAfter(":").trim()
+        if (key.isBlank()) {
+            errors += "Line ${index + 1}: missing header name"
+            return@forEachIndexed
+        }
+        if (headerValue.isBlank()) {
+            errors += "Line ${index + 1}: missing value for '$key'"
+            return@forEachIndexed
+        }
+        val keyLower = key.lowercase()
+        if (seenHeaderLines.containsKey(keyLower)) {
+            val previousLine = seenHeaderLines[keyLower] ?: index
+            errors += "Line ${index + 1}: duplicate header '$key' (first seen on line ${previousLine + 1})"
+            return@forEachIndexed
+        }
+        parsed[key] = headerValue
+        seenHeaderLines[keyLower] = index
+    }
+
+    return ParsedHeaderLines(parsed, errors)
+}
+
+private fun normalizeBaseUrl(value: String, fallback: String? = null, allowRelative: Boolean = true): String? {
+    val trimmed = value.trim()
+    if (trimmed.isBlank()) return fallback?.trimEnd('/')
+    if (!allowRelative && !trimmed.contains("://")) return null
+    return try {
+        val normalized = if (trimmed.contains("://")) trimmed else "https://$trimmed"
+        val url = URL(normalized)
+        if (url.host.isBlank()) null else normalized.trimEnd('/')
+    } catch (_: MalformedURLException) {
+        null
+    } catch (_: IllegalArgumentException) {
+        null
+    }
 }
 
 // ──── Tools ────
