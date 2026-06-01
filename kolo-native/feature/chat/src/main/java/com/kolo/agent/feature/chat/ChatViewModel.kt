@@ -276,6 +276,36 @@ class ChatViewModel @Inject constructor(
         }
     }
 
+    fun refreshActiveProviderModels() {
+        val provider = _uiState.value.activeProviderConfig ?: return
+        if (provider.isLocal) return
+        viewModelScope.launch {
+            try {
+                val fetched = streamClient.fetchModels(provider)
+                    .distinctBy { it.first }
+                    .sortedBy { it.first }
+                if (fetched.isEmpty()) {
+                    _uiState.update { it.copy(error = "No models were returned by ${provider.effectiveModelsUrl}") }
+                    return@launch
+                }
+                val activeModelId = provider.activeModel?.modelId
+                val updated = provider.copy(
+                    models = fetched.mapIndexed { index, (id, label) ->
+                        ModelConfig(
+                            modelId = id,
+                            displayName = label?.takeIf { it.isNotBlank() && it != id },
+                            isActive = id == activeModelId || (activeModelId == null && index == 0),
+                        )
+                    },
+                    updatedAt = System.currentTimeMillis(),
+                )
+                providerRep.saveProvider(updated, providerRep.getApiKey(provider.id.value))
+            } catch (e: Exception) {
+                _uiState.update { it.copy(error = "Model fetch failed: ${e.message ?: "unknown error"}") }
+            }
+        }
+    }
+
     fun touchPromptTemplate(templateId: TemplateId) {
         viewModelScope.launch {
             promptTemplateDao.touch(templateId.value)

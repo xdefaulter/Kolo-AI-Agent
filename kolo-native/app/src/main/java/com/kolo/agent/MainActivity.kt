@@ -58,6 +58,7 @@ fun KoloNavApp() {
                 onSetPinned = { chatId, pinned -> chatViewModel.setPinned(chatId, pinned) },
                 onNavigateSettings = { navController.navigate("settings") },
                 onSetActiveModel = { modelId -> chatViewModel.setActiveModel(modelId) },
+                onRefreshActiveModels = { chatViewModel.refreshActiveProviderModels() },
                 onUsePromptTemplate = { templateId -> chatViewModel.touchPromptTemplate(templateId) },
                 onAllowOnce = { chatViewModel.handleApprovalAction(ToolApprovalAction.AllowOnce(it)) },
                 onAlwaysAllow = { chatViewModel.handleApprovalAction(ToolApprovalAction.AlwaysAllow(it)) },

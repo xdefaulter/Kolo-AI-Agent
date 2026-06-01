@@ -61,6 +61,7 @@ fun ChatScreen(
     onSetPinned: (ChatId, Boolean) -> Unit = { _, _ -> },
     onNavigateSettings: () -> Unit = {},
     onSetActiveModel: (String) -> Unit = {},
+    onRefreshActiveModels: () -> Unit = {},
     onUsePromptTemplate: (TemplateId) -> Unit = {},
     onAllowOnce: (ToolPermissionApproval) -> Unit = {},
     onAlwaysAllow: (ToolPermissionApproval) -> Unit = {},
@@ -107,6 +108,7 @@ fun ChatScreen(
             onOpenDrawer = { scope.launch { drawerState.open() } },
             onNavigateSettings = onNavigateSettings,
             onSetActiveModel = onSetActiveModel,
+            onRefreshActiveModels = onRefreshActiveModels,
             onUsePromptTemplate = onUsePromptTemplate,
             onAllowOnce = onAllowOnce,
             onAlwaysAllow = onAlwaysAllow,
@@ -348,6 +350,7 @@ private fun ChatContent(
     onOpenDrawer: () -> Unit,
     onNavigateSettings: () -> Unit,
     onSetActiveModel: (String) -> Unit,
+    onRefreshActiveModels: () -> Unit,
     onUsePromptTemplate: (TemplateId) -> Unit,
     onAllowOnce: (ToolPermissionApproval) -> Unit,
     onAlwaysAllow: (ToolPermissionApproval) -> Unit,
@@ -374,6 +377,7 @@ private fun ChatContent(
                 onOpenDrawer = onOpenDrawer,
                 onSettings = onNavigateSettings,
                 onSetActiveModel = onSetActiveModel,
+                onRefreshActiveModels = onRefreshActiveModels,
             )
         },
         bottomBar = {
@@ -479,10 +483,12 @@ private fun ChatHeader(
     onOpenDrawer: () -> Unit,
     onSettings: () -> Unit,
     onSetActiveModel: (String) -> Unit,
+    onRefreshActiveModels: () -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
     val models = providerConfig?.models.orEmpty()
-    val showModelPicker = models.size > 1
+    val hasProvider = providerConfig != null
+    val isLocalProvider = providerConfig?.isLocal == true
     Surface(
         tonalElevation = 2.dp,
         shadowElevation = 1.dp,
@@ -516,31 +522,66 @@ private fun ChatHeader(
                     )
                 }
             }
-            if (showModelPicker) {
+            if (hasProvider) {
                 Box {
                     IconButton(onClick = { expanded = true }, modifier = Modifier.size(40.dp)) {
-                        Icon(Icons.Filled.ArrowDropDown, contentDescription = "Switch model", modifier = Modifier.size(24.dp))
+                        Icon(Icons.Filled.ArrowDropDown, contentDescription = "Model picker", modifier = Modifier.size(24.dp))
                     }
                     DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                        models.forEach { option ->
+                        if (models.isEmpty()) {
                             DropdownMenuItem(
-                                text = {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                text = { Text(model ?: if (isLocalProvider) "Local model" else "No models loaded") },
+                                leadingIcon = {
+                                    Icon(
+                                        if (isLocalProvider) Icons.Filled.Memory else Icons.Filled.Cloud,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp),
+                                    )
+                                },
+                                enabled = false,
+                                onClick = {},
+                            )
+                        } else {
+                            models.forEach { option ->
+                                DropdownMenuItem(
+                                    text = { Text(option.label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                    leadingIcon = {
                                         if (option.modelId == providerConfig?.activeModel?.modelId) {
-                                            Icon(Icons.Filled.Check, contentDescription = null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+                                            Icon(Icons.Filled.Check, contentDescription = null, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
                                         } else {
-                                            Spacer(modifier = Modifier.width(16.dp))
+                                            Spacer(modifier = Modifier.size(18.dp))
                                         }
-                                        Spacer(modifier = Modifier.width(8.dp))
-                                        Text(option.label, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                    }
+                                    },
+                                    onClick = {
+                                        expanded = false
+                                        onSetActiveModel(option.modelId)
+                                    },
+                                )
+                            }
+                        }
+                        HorizontalDivider()
+                        if (!isLocalProvider) {
+                            DropdownMenuItem(
+                                text = { Text(if (models.isEmpty()) "Fetch models" else "Refresh models") },
+                                leadingIcon = {
+                                    Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
                                 },
                                 onClick = {
                                     expanded = false
-                                    onSetActiveModel(option.modelId)
+                                    onRefreshActiveModels()
                                 },
                             )
                         }
+                        DropdownMenuItem(
+                            text = { Text(if (isLocalProvider) "Local model settings" else "Provider settings") },
+                            leadingIcon = {
+                                Icon(Icons.Filled.Settings, contentDescription = null, modifier = Modifier.size(18.dp))
+                            },
+                            onClick = {
+                                expanded = false
+                                onSettings()
+                            },
+                        )
                     }
                 }
             }
