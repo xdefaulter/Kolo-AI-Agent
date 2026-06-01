@@ -3,6 +3,7 @@ package com.kolo.agent.core.providers.openai
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
+import com.kolo.agent.core.model.ProviderConfig
 
 class OpenAiStreamClientTest {
     private val client = OpenAiStreamClient()
@@ -67,5 +68,31 @@ class OpenAiStreamClientTest {
 
         assertEquals("deepseek-v3.2", models.single().first)
         assertNull(models.single().second)
+    }
+
+    @Test
+    fun modelFetchUrls_addsOllamaCloudFallbackForCommonManualEndpointMistake() {
+        val config = ProviderConfig(
+            name = "Ollama Web",
+            baseUrl = "https://ollama.com",
+            modelsEndpoint = "https://ollama.com/models",
+        )
+
+        val urls = client.modelFetchUrls(config)
+
+        assertEquals(listOf("https://ollama.com/models", "https://ollama.com/v1/models"), urls)
+    }
+
+    @Test
+    fun modelFetchUrls_doesNotDuplicateCorrectOllamaCloudEndpoint() {
+        val config = ProviderConfig(
+            name = "Ollama Cloud",
+            baseUrl = "https://ollama.com/v1",
+            modelsEndpoint = "https://ollama.com/v1/models",
+        )
+
+        val urls = client.modelFetchUrls(config)
+
+        assertEquals(listOf("https://ollama.com/v1/models"), urls)
     }
 }

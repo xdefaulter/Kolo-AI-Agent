@@ -153,7 +153,26 @@ class OpenAiStreamClient(
      * Fetch available models from the provider.
      */
     suspend fun fetchModels(config: ProviderConfig): List<Pair<String, String?>> = withContext(Dispatchers.IO) {
-        val url = config.effectiveModelsUrl
+        val urls = modelFetchUrls(config)
+        var lastError: Exception? = null
+
+        for (url in urls) {
+            try {
+                val models = fetchModelsFromUrl(config, url)
+                if (models.isNotEmpty() || url == urls.last()) {
+                    return@withContext models
+                }
+            } catch (e: Exception) {
+                lastError = e
+                if (url == urls.last()) throw e
+            }
+        }
+
+        lastError?.let { throw it }
+        return@withContext emptyList()
+    }
+
+    private fun fetchModelsFromUrl(config: ProviderConfig, url: String): List<Pair<String, String?>> {
         val requestBuilder = Request.Builder()
             .url(url)
             .get()
@@ -171,12 +190,24 @@ class OpenAiStreamClient(
             val responseBody = result.body?.string().orEmpty()
             if (!result.isSuccessful) {
                 val detail = responseBody.take(200).ifBlank { result.message }
-                throw IllegalStateException("HTTP ${result.code} from ${config.effectiveModelsUrl}: $detail")
+                throw IllegalStateException("HTTP ${result.code} from $url: $detail")
             }
-            responseBody.ifBlank { return@withContext emptyList() }
+            responseBody.ifBlank { return emptyList() }
         }
 
-        return@withContext parseModelListResponse(body)
+        return parseModelListResponse(body)
+    }
+
+    internal fun modelFetchUrls(config: ProviderConfig): List<String> {
+        val primary = config.effectiveModelsUrl
+        val normalizedPrimary = primary.trimEnd('/')
+        val isOllamaWeb = normalizedPrimary.startsWith("https://ollama.com", ignoreCase = true)
+        return buildList {
+            add(primary)
+            if (isOllamaWeb && normalizedPrimary != "https://ollama.com/v1/models") {
+                add("https://ollama.com/v1/models")
+            }
+        }.distinct()
     }
 
     internal fun parseModelListResponse(body: String): List<Pair<String, String?>> {
