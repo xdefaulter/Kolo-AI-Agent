@@ -69,6 +69,7 @@ fun ChatScreen(
     onSetActiveModel: (String) -> Unit = {},
     onRefreshActiveModels: () -> Unit = {},
     onUsePromptTemplate: (TemplateId) -> Unit = {},
+    onNavigateLocalModels: () -> Unit = {},
     onAllowOnce: (ToolPermissionApproval) -> Unit = {},
     onAlwaysAllow: (ToolPermissionApproval) -> Unit = {},
     onDenyOnce: (ToolPermissionApproval) -> Unit = {},
@@ -105,6 +106,7 @@ fun ChatScreen(
                 onMoveChat = onMoveChat,
                 onSetPinned = onSetPinned,
                 onNavigateSettings = onNavigateSettings,
+                providerReadinessError = state.activeProviderReadinessError,
                 drawerState = drawerState,
             )
         },
@@ -116,6 +118,8 @@ fun ChatScreen(
             onClearError = onClearError,
             onOpenDrawer = { scope.launch { drawerState.open() } },
             onNavigateSettings = onNavigateSettings,
+            onNavigateLocalModels = onNavigateLocalModels,
+            providerReadinessError = state.activeProviderReadinessError,
             onSetActiveModel = onSetActiveModel,
             onRefreshActiveModels = onRefreshActiveModels,
             onUsePromptTemplate = onUsePromptTemplate,
@@ -147,6 +151,7 @@ private fun ChatDrawer(
     onMoveChat: (ChatId, FolderId?) -> Unit,
     onSetPinned: (ChatId, Boolean) -> Unit,
     onNavigateSettings: () -> Unit,
+    providerReadinessError: String?,
     drawerState: DrawerState,
 ) {
     var showFolderDialog by remember { mutableStateOf(false) }
@@ -157,9 +162,8 @@ private fun ChatDrawer(
     var pendingDeleteFolder by remember { mutableStateOf<Folder?>(null) }
     var openMenuChatId by remember { mutableStateOf<ChatId?>(null) }
     val providerStatusText = when {
+        providerReadinessError != null -> providerReadinessError
         activeProviderConfig == null -> "No provider configured"
-        activeProviderConfig.isLocal && activeProviderConfig.activeModel == null -> "Local provider missing active model"
-        !activeProviderConfig.isLocal && activeProviderConfig.activeModel == null -> "Remote provider has no model selected"
         else -> null
     }
     ModalDrawerSheet(
@@ -487,6 +491,8 @@ private fun ChatContent(
     onClearError: () -> Unit,
     onOpenDrawer: () -> Unit,
     onNavigateSettings: () -> Unit,
+    onNavigateLocalModels: () -> Unit,
+    providerReadinessError: String?,
     onSetActiveModel: (String) -> Unit,
     onRefreshActiveModels: () -> Unit,
     onUsePromptTemplate: (TemplateId) -> Unit,
@@ -665,7 +671,15 @@ private fun ChatContent(
                 }
 
                 if (state.messages.isEmpty() && !state.isLoading) {
-                    item { EmptyChatState(hasProvider = state.activeProviderConfig != null, onNavigateSettings = onNavigateSettings) }
+                    item {
+                        EmptyChatState(
+                            hasProvider = state.activeProviderConfig != null,
+                            activeProviderConfig = state.activeProviderConfig,
+                            providerReadinessError = state.activeProviderReadinessError,
+                            onNavigateSettings = onNavigateSettings,
+                            onNavigateLocalModels = onNavigateLocalModels,
+                        )
+                    }
                 }
             }
 
@@ -844,21 +858,28 @@ private fun ChatHeader(
                             if (filteredModels.isEmpty()) {
                                 DropdownMenuItem(text = { Text("No models match") }, onClick = {}, enabled = false)
                             } else {
-                                filteredModels.forEach { option ->
-                                    DropdownMenuItem(
-                                        text = { Text(option.label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                                        leadingIcon = {
-                                            if (option.modelId == activeModelId) {
-                                                Icon(Icons.Filled.Check, contentDescription = null, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
-                                            } else {
-                                                Spacer(modifier = Modifier.size(18.dp))
-                                            }
-                                        },
-                                        onClick = {
-                                            expanded = false
-                                            onSetActiveModel(option.modelId)
-                                        },
-                                    )
+                                DropdownMenuItem(enabled = false, text = { Text("${filteredModels.size} model${if (filteredModels.size != 1) "s" else ""} available", style = MaterialTheme.typography.labelSmall) }, onClick = {})
+                                LazyColumn(
+                                    modifier = Modifier
+                                        .heightIn(max = 220.dp)
+                                        .fillMaxWidth(),
+                                ) {
+                                    items(filteredModels) { option ->
+                                        DropdownMenuItem(
+                                            text = { Text(option.label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                            leadingIcon = {
+                                                if (option.modelId == activeModelId) {
+                                                    Icon(Icons.Filled.Check, contentDescription = null, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
+                                                } else {
+                                                    Spacer(modifier = Modifier.size(18.dp))
+                                                }
+                                            },
+                                            onClick = {
+                                                expanded = false
+                                                onSetActiveModel(option.modelId)
+                                            },
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -1314,7 +1335,10 @@ private fun LoadingIndicator() {
 @Composable
 private fun EmptyChatState(
     hasProvider: Boolean,
+    activeProviderConfig: ProviderConfig?,
+    providerReadinessError: String?,
     onNavigateSettings: () -> Unit,
+    onNavigateLocalModels: () -> Unit,
 ) {
     Column(
         modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp),
@@ -1329,7 +1353,7 @@ private fun EmptyChatState(
         Spacer(modifier = Modifier.height(8.dp))
         Text("How can I help you?", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
         Spacer(modifier = Modifier.height(4.dp))
-        if (hasProvider) {
+        if (providerReadinessError == null && hasProvider) {
             Text(
                 "Ask anything — I have tools for calculations,\nweb lookups, device control, and more.",
                 style = MaterialTheme.typography.bodySmall,
@@ -1338,7 +1362,7 @@ private fun EmptyChatState(
             )
         } else {
             Text(
-                "Pick a provider first to start chatting.",
+                providerReadinessError ?: "Pick a provider first to start chatting.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,
@@ -1348,6 +1372,19 @@ private fun EmptyChatState(
                 Icon(Icons.Filled.Settings, contentDescription = null, modifier = Modifier.size(14.dp))
                 Spacer(modifier = Modifier.width(6.dp))
                 Text("Setup Provider")
+            }
+            if (activeProviderConfig?.isLocal == true) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    "If a local model is already imported, open Local Models to choose one.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                TextButton(onClick = onNavigateLocalModels) {
+                    Text("Open Local Models")
+                }
             }
         }
     }

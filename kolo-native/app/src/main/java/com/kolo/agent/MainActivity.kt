@@ -60,6 +60,7 @@ fun KoloNavApp() {
                 onSetActiveModel = { modelId -> chatViewModel.setActiveModel(modelId) },
                 onRefreshActiveModels = { chatViewModel.refreshActiveProviderModels() },
                 onUsePromptTemplate = { templateId -> chatViewModel.touchPromptTemplate(templateId) },
+                onNavigateLocalModels = { navController.navigate("local_models") },
                 onAllowOnce = { chatViewModel.handleApprovalAction(ToolApprovalAction.AllowOnce(it)) },
                 onAlwaysAllow = { chatViewModel.handleApprovalAction(ToolApprovalAction.AlwaysAllow(it)) },
                 onDenyOnce = { chatViewModel.handleApprovalAction(ToolApprovalAction.DenyOnce(it)) },

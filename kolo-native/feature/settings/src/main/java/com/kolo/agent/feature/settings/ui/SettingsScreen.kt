@@ -614,34 +614,66 @@ private fun ProviderCard(
                                 modifier = Modifier.fillMaxWidth(),
                             )
                             Spacer(Modifier.height(2.dp))
-                            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text("${filteredModels.size} shown (${provider.models.size} total)", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Spacer(Modifier.height(4.dp))
+                            LazyColumn(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(max = 240.dp),
+                                verticalArrangement = Arrangement.spacedBy(2.dp),
+                            ) {
                                 if (filteredModels.isEmpty()) {
-                                    Text(
-                                        if (modelSearch.isBlank()) "No models available" else "No models match \"$modelSearch\"",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    )
-                                } else {
-                                    filteredModels.forEach { model ->
-                                        Row(
-                                            modifier = Modifier.fillMaxWidth(),
-                                            verticalAlignment = Alignment.CenterVertically,
-                                        ) {
-                                            RadioButton(
-                                                selected = model.modelId == provider.activeModel?.modelId,
-                                                onClick = { onSetActiveModel(model.modelId) },
-                                            )
-                                            Text(
-                                                model.label,
-                                                style = MaterialTheme.typography.bodySmall,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis,
-                                                modifier = Modifier.weight(1f),
-                                            )
-                                        }
+                                    item {
+                                        Text(
+                                            if (modelSearch.isBlank()) "No models available" else "No models match \"$modelSearch\"",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
                                     }
                                 }
+                                items(filteredModels) { model ->
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        RadioButton(
+                                            selected = model.modelId == provider.activeModel?.modelId,
+                                            onClick = { onSetActiveModel(model.modelId) },
+                                        )
+                                        Text(
+                                            model.label,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f),
+                                        )
+                                    }
+                                }
+                                if (filteredModels.isNotEmpty() && filteredModels.size < provider.models.size) {
+                                    item {
+                                        Text(
+                                            "Showing ${filteredModels.size} filtered results",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(vertical = 4.dp, horizontal = 6.dp),
+                                        )
+                                    }
+                                }
+                            if (provider.models.size > 24 && filteredModels.isNotEmpty()) {
+                                item {
+                                    Text(
+                                        "Scroll to view all models",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(top = 2.dp, start = 6.dp, end = 6.dp, bottom = 4.dp),
+                                    )
+                                }
                             }
+                        }
                         }
                     }
                     Spacer(Modifier.height(6.dp))
@@ -681,8 +713,15 @@ private fun AddProviderDialog(
     var providerKind by remember { mutableStateOf(ProviderKind.openaiCompat) }
     var selectedPreset by remember { mutableStateOf(-1) }
     val presets = remember { ProviderPresets.defaults }
+    val selectedPresetConfig = presets.getOrNull(selectedPreset)
     val normalizedBaseUrl = normalizeBaseUrl(baseUrl, fallback = null)
     val effectiveName = name.ifBlank { if (providerKind == ProviderKind.localLlama) "Local llama.cpp" else "" }.trim()
+    val inferredModelsEndpoint = when {
+        providerKind == ProviderKind.localLlama -> null
+        selectedPresetConfig != null -> selectedPresetConfig.modelsEndpoint
+        normalizedBaseUrl != null -> "$normalizedBaseUrl/models"
+        else -> null
+    }
     val nameError = when {
         effectiveName.isBlank() -> "Provider name is required."
         existingProviderNames.contains(effectiveName.lowercase()) -> "A provider with this name already exists."
@@ -726,6 +765,17 @@ private fun AddProviderDialog(
                         )
                     }
                 }
+                selectedPresetConfig?.let { preset ->
+                    Spacer(Modifier.height(4.dp))
+                    Card(shape = MaterialTheme.shapes.small, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.24f))) {
+                        Column(modifier = Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text("Preset: ${preset.name}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("Base URL: ${preset.baseUrl}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("Models: ${preset.modelsEndpoint}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("Auth: configure API key if provider requires it", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
             }
             Spacer(Modifier.height(6.dp))
             OutlinedTextField(
@@ -750,6 +800,24 @@ private fun AddProviderDialog(
                 Spacer(Modifier.height(4.dp))
                 OutlinedTextField(value = modelPath, onValueChange = { modelPath = it }, label = { Text("GGUF model path (optional)") }, singleLine = true, modifier = Modifier.fillMaxWidth(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri))
             } else {
+                if (selectedPreset < 0 && inferredModelsEndpoint != null) {
+                    Spacer(Modifier.height(2.dp))
+                    Card(shape = MaterialTheme.shapes.small, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                        Row(
+                            modifier = Modifier.padding(8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(Icons.Filled.Info, contentDescription = null, modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(
+                                "Models endpoint will be inferred as $inferredModelsEndpoint",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(4.dp))
+                }
                 OutlinedTextField(
                     value = baseUrl,
                     onValueChange = { baseUrl = it },
