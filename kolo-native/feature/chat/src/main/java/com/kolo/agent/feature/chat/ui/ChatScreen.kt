@@ -27,6 +27,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Article
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -46,6 +48,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.kolo.agent.core.model.*
+import com.kolo.agent.core.providers.local.LocalModelManager
 import com.kolo.agent.feature.chat.ChatUiState
 import java.text.DateFormat
 import java.util.Calendar
@@ -56,7 +59,7 @@ import kotlin.math.min
 @Composable
 fun ChatScreen(
     state: ChatUiState,
-    onSendMessage: (String, List<MessageAttachment>, (Boolean) -> Unit) -> Unit,
+    onSendMessage: (String, List<MessageAttachment>, (Boolean, String, List<MessageAttachment>) -> Unit) -> Unit,
     onCancel: () -> Unit,
     onClearError: () -> Unit = {},
     onSelectChat: (ChatId) -> Unit = {},
@@ -111,6 +114,7 @@ fun ChatScreen(
                 onSetPinned = onSetPinned,
                 onNavigateSettings = onNavigateSettings,
                 providerReadinessError = state.activeProviderReadinessError,
+                localBridgeStatus = state.localBridgeStatus,
                 drawerState = drawerState,
             )
         },
@@ -124,6 +128,7 @@ fun ChatScreen(
             onNavigateSettings = onNavigateSettings,
             onNavigateLocalModels = onNavigateLocalModels,
             sendDisabledReason = state.activeProviderReadinessError,
+            localBridgeStatus = state.localBridgeStatus,
             onSetActiveModel = onSetActiveModel,
             onRefreshActiveModels = onRefreshActiveModels,
             onUsePromptTemplate = onUsePromptTemplate,
@@ -157,6 +162,7 @@ private fun ChatDrawer(
     onSetPinned: (ChatId, Boolean) -> Unit,
     onNavigateSettings: () -> Unit,
     providerReadinessError: String?,
+    localBridgeStatus: LocalModelManager.BridgeStatus = LocalModelManager.BridgeStatus.Unknown,
     drawerState: DrawerState,
 ) {
     var showFolderDialog by remember { mutableStateOf(false) }
@@ -170,6 +176,14 @@ private fun ChatDrawer(
         providerReadinessError != null -> providerReadinessError
         activeProviderConfig == null -> "No provider configured"
         else -> null
+    }
+    val providerReadyLabel = when {
+        providerReadinessError != null -> "Provider status: issue"
+        activeProviderConfig == null -> "Provider status: not set"
+        activeProviderConfig.isLocal && localBridgeStatus == LocalModelManager.BridgeStatus.Unavailable -> "Local runtime unavailable"
+        activeProviderConfig.isLocal && localBridgeStatus == LocalModelManager.BridgeStatus.Checking -> "Local runtime checking"
+        activeProviderConfig.isLocal && localBridgeStatus == LocalModelManager.BridgeStatus.Available -> "Local runtime ready"
+        else -> "Provider ready"
     }
     ModalDrawerSheet(
         modifier = Modifier.width(280.dp),
@@ -201,6 +215,45 @@ private fun ChatDrawer(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 12.dp, vertical = 4.dp),
+            )
+        }
+        BadgedBox(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 2.dp),
+            badge = {
+                val badgeContainerColor = when {
+                    providerReadinessError != null -> MaterialTheme.colorScheme.error
+                    activeProviderConfig?.isLocal == true && localBridgeStatus == LocalModelManager.BridgeStatus.Unavailable -> MaterialTheme.colorScheme.error
+                    activeProviderConfig?.isLocal == true && localBridgeStatus == LocalModelManager.BridgeStatus.Checking -> MaterialTheme.colorScheme.secondary
+                    else -> MaterialTheme.colorScheme.primary
+                }
+                val badgeContentColor = when (badgeContainerColor) {
+                    MaterialTheme.colorScheme.error -> MaterialTheme.colorScheme.onError
+                    else -> MaterialTheme.colorScheme.onPrimary
+                }
+                Badge(
+                    containerColor = badgeContainerColor,
+                    contentColor = badgeContentColor,
+                ) {
+                    Text(
+                        when {
+                            providerReadinessError != null -> "Needs setup"
+                            activeProviderConfig?.isLocal == true && localBridgeStatus == LocalModelManager.BridgeStatus.Unavailable -> "Runtime missing"
+                            activeProviderConfig?.isLocal == true && localBridgeStatus == LocalModelManager.BridgeStatus.Checking -> "Checking"
+                            else -> "Ready"
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                }
+            },
+        ) {
+            Text(
+                providerReadyLabel,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                maxLines = 2,
             )
         }
 
@@ -404,6 +457,17 @@ private fun ChatDrawer(
                         label = { Text("Folder name") },
                         isError = folderDraftError != null,
                         singleLine = true,
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                        keyboardActions = KeyboardActions(
+                            onDone = {
+                                if (folderDraftError == null && folderDraft.isNotBlank()) {
+                                    onCreateFolder(folderDraft)
+                                    folderDraft = ""
+                                    folderDraftError = null
+                                    showFolderDialog = false
+                                }
+                            },
+                        ),
                     )
                     folderDraftError?.let {
                         Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
@@ -491,13 +555,14 @@ private fun ChatDrawer(
 @Composable
 private fun ChatContent(
     state: ChatUiState,
-    onSendMessage: (String, List<MessageAttachment>, (Boolean) -> Unit) -> Unit,
+    onSendMessage: (String, List<MessageAttachment>, (Boolean, String, List<MessageAttachment>) -> Unit) -> Unit,
     onCancel: () -> Unit,
     onClearError: () -> Unit,
     onOpenDrawer: () -> Unit,
     onNavigateSettings: () -> Unit,
     onNavigateLocalModels: () -> Unit,
     sendDisabledReason: String?,
+    localBridgeStatus: LocalModelManager.BridgeStatus = LocalModelManager.BridgeStatus.Unknown,
     onSetActiveModel: (String) -> Unit,
     onRefreshActiveModels: () -> Unit,
     onUsePromptTemplate: (TemplateId) -> Unit,
@@ -561,6 +626,7 @@ private fun ChatContent(
                 provider = state.activeProvider,
                 model = state.activeModel,
                 providerConfig = state.activeProviderConfig,
+                localBridgeStatus = localBridgeStatus,
                 onOpenDrawer = onOpenDrawer,
                 onSettings = onNavigateSettings,
                 onSetActiveModel = onSetActiveModel,
@@ -577,10 +643,13 @@ private fun ChatContent(
                 onAttachmentsChanged = { pendingAttachments = it },
                 onSend = {
                     if (resolvedSendDisabledReason == null && (inputText.isNotBlank() || pendingAttachments.isNotEmpty())) {
-                        onSendMessage(inputText.trim(), pendingAttachments) { accepted ->
+                        onSendMessage(inputText.trim(), pendingAttachments) { accepted, draftText, draftAttachments ->
                             if (accepted) {
                                 inputText = ""
                                 pendingAttachments = emptyList()
+                            } else {
+                                inputText = draftText
+                                pendingAttachments = draftAttachments
                             }
                         }
                     }
@@ -720,6 +789,7 @@ private fun ChatHeader(
     provider: String?,
     model: String?,
     providerConfig: ProviderConfig?,
+    localBridgeStatus: LocalModelManager.BridgeStatus = LocalModelManager.BridgeStatus.Unknown,
     onOpenDrawer: () -> Unit,
     onSettings: () -> Unit,
     onSetActiveModel: (String) -> Unit,
@@ -748,6 +818,13 @@ private fun ChatHeader(
         if (providerConfig.localGpuLayers > 0) "GPU (${providerConfig.localGpuLayers})" else "CPU"
     } else {
         "Remote"
+    }
+    val localRuntimeStatusLabel = when {
+        !isLocalProvider -> null
+        localBridgeStatus == LocalModelManager.BridgeStatus.Available -> "ready"
+        localBridgeStatus == LocalModelManager.BridgeStatus.Unavailable -> "unavailable"
+        localBridgeStatus == LocalModelManager.BridgeStatus.Checking -> "checking"
+        else -> "unknown"
     }
 
     Surface(
@@ -803,7 +880,13 @@ private fun ChatHeader(
             if (providerConfig?.isLocal == true) {
                 AssistChip(
                     onClick = onSettings,
-                    label = { Text(runtimeLabel, style = MaterialTheme.typography.labelSmall) },
+                    label = {
+                        Text(
+                            "$runtimeLabel · $localRuntimeStatusLabel",
+                            style = MaterialTheme.typography.labelSmall,
+                            maxLines = 1,
+                        )
+                    },
                     leadingIcon = {
                         Icon(Icons.Filled.Speed, contentDescription = null, modifier = Modifier.size(12.dp))
                     },
@@ -1060,12 +1143,26 @@ private fun MessageBubble(
     isGroupedWithPrevious: Boolean = false,
 ) {
     val isUser = message.role == MessageRole.user
+    val isTool = message.role == MessageRole.tool
+    val isSystem = message.role == MessageRole.system
     val maxWidthFraction = 0.88f
     val configuration = LocalConfiguration.current
     val maxWidthDp = (configuration.screenWidthDp * maxWidthFraction).dp
     val context = LocalContext.current
     val timeText = remember(message.createdAt) {
         DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(message.createdAt))
+    }
+    val roleSurfaceColor = when {
+        isUser -> MaterialTheme.colorScheme.primary
+        isTool -> MaterialTheme.colorScheme.secondaryContainer
+        isSystem -> MaterialTheme.colorScheme.tertiaryContainer
+        else -> MaterialTheme.colorScheme.surfaceVariant
+    }
+    val roleContentColor = when {
+        isUser -> MaterialTheme.colorScheme.onPrimary
+        isTool -> MaterialTheme.colorScheme.onSecondaryContainer
+        isSystem -> MaterialTheme.colorScheme.onTertiaryContainer
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
 
     Row(
@@ -1087,7 +1184,7 @@ private fun MessageBubble(
                     bottomEnd = if (isUser) 2.dp else 14.dp,
                 )
             },
-            color = if (isUser) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+            color = roleSurfaceColor,
             tonalElevation = if (!isUser) 0.5.dp else 0.dp,
             modifier = Modifier
                 .widthIn(max = maxWidthDp)
@@ -1097,7 +1194,7 @@ private fun MessageBubble(
                 ),
         ) {
             Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
-                if (message.role == MessageRole.tool) {
+                if (isTool) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier.padding(bottom = 2.dp),
@@ -1117,11 +1214,11 @@ private fun MessageBubble(
                         )
                     }
                 }
-                Text(
-                    text = message.content,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = if (isUser) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                    Text(
+                        text = message.content,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = roleContentColor,
+                    )
                 if (message.attachments.isNotEmpty()) {
                     Spacer(modifier = Modifier.height(6.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -1131,9 +1228,6 @@ private fun MessageBubble(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         Spacer(modifier = Modifier.weight(1f))
-                        IconButton(onClick = { copyMessageToClipboard(context, message.content) }, modifier = Modifier.size(18.dp)) {
-                            Icon(Icons.Filled.ContentCopy, contentDescription = "Copy message", modifier = Modifier.size(12.dp))
-                        }
                     }
                     Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
                         message.attachments.forEach { attachment ->
@@ -1165,7 +1259,7 @@ private fun MessageBubble(
                                     modifier = Modifier.weight(1f),
                                 )
                                 IconButton(onClick = { openMessageAttachment(context, attachment) }, modifier = Modifier.size(18.dp)) {
-                                    Icon(Icons.Filled.OpenInNew, contentDescription = "Open", modifier = Modifier.size(12.dp))
+                                    Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = "Open", modifier = Modifier.size(12.dp))
                                 }
                                 IconButton(onClick = { copyTextToClipboard(context, attachment.name) }, modifier = Modifier.size(18.dp)) {
                                     Icon(Icons.Filled.ContentCopy, contentDescription = "Copy filename", modifier = Modifier.size(12.dp))
@@ -1183,16 +1277,25 @@ private fun MessageBubble(
                     )
                 }
                 Spacer(modifier = Modifier.height(3.dp))
-                Text(
-                    text = timeText,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (isUser) {
-                        MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.72f)
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f)
-                    },
-                    modifier = Modifier.align(Alignment.End),
-                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (message.content.isNotBlank()) {
+                        IconButton(
+                            onClick = { copyMessageToClipboard(context, message.content) },
+                            modifier = Modifier.size(18.dp),
+                        ) {
+                            Icon(Icons.Filled.ContentCopy, contentDescription = "Copy message", modifier = Modifier.size(12.dp))
+                        }
+                    }
+                    Text(
+                        text = timeText,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = roleContentColor.copy(alpha = 0.72f),
+                    )
+                }
             }
         }
     }
@@ -1574,7 +1677,7 @@ private fun ChatInputBar(
                     },
                 ) {
                     Icon(
-                        Icons.Filled.Article,
+                        Icons.AutoMirrored.Filled.Article,
                         contentDescription = "Prompt template library",
                         tint = if (promptTemplates.isNotEmpty()) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f),
                         modifier = Modifier.size(20.dp),

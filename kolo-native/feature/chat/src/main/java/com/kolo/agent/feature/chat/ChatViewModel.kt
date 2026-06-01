@@ -60,6 +60,7 @@ data class ChatUiState(
     val isRefreshingModels: Boolean = false,
     val modelFetchStatus: String? = null,
     val activeProviderReadinessError: String? = null,
+    val localBridgeStatus: LocalModelManager.BridgeStatus = LocalModelManager.BridgeStatus.Unknown,
 )
 
 /**
@@ -98,11 +99,19 @@ class ChatViewModel @Inject constructor(
     private var currentChatId: ChatId? = null
     private var isCancelled = false
     private val refreshingProviderModels = mutableSetOf<String>()
+    private var localBridgeStatus: LocalModelManager.BridgeStatus = LocalModelManager.BridgeStatus.Unknown
 
     /** Continuation for pending tool approval — resumed by approve/deny actions. */
     private var approvalContinuation: kotlin.coroutines.Continuation<Boolean>? = null
 
     init {
+        viewModelScope.launch {
+            localModelManager.checkBridgeAvailability()
+            localModelManager.bridgeStatus.collect { status ->
+                localBridgeStatus = status
+                _uiState.update { it.copy(localBridgeStatus = status) }
+            }
+        }
         viewModelScope.launch {
             loadFolders()
             loadChatList()
@@ -286,6 +295,12 @@ class ChatViewModel @Inject constructor(
         if (provider.baseUrl.isBlank()) return "Provider endpoint is missing"
 
         if (provider.isLocal) {
+            if (localBridgeStatus == LocalModelManager.BridgeStatus.Unavailable) {
+                return "Local llama.cpp runtime is unavailable"
+            }
+            if (localBridgeStatus == LocalModelManager.BridgeStatus.Checking) {
+                return "Checking local runtime availability"
+            }
             val effectiveModelPath = provider.modelPath.orEmpty().ifBlank { localModelPath.orEmpty() }
             if (effectiveModelPath.isBlank()) {
                 return "Import or select a local GGUF model first."
@@ -407,17 +422,17 @@ class ChatViewModel @Inject constructor(
     fun sendMessage(
         content: String,
         attachments: List<MessageAttachment> = emptyList(),
-        onAccepted: (Boolean) -> Unit = {},
+        onAccepted: (Boolean, String, List<MessageAttachment>) -> Unit = { _, _, _ -> },
     ) {
         if (content.isBlank() && attachments.isEmpty()) {
-            onAccepted(false)
+            onAccepted(false, content, attachments)
             return
         }
         if (_uiState.value.isStreaming) return
         val readinessError = _uiState.value.activeProviderReadinessError
         if (readinessError != null) {
             _uiState.update { it.copy(error = readinessError) }
-            onAccepted(false)
+            onAccepted(false, content, attachments)
             return
         }
         val chatId = currentChatId ?: run {
@@ -436,7 +451,7 @@ class ChatViewModel @Inject constructor(
                             if (persisted.failed.size > 2) " and ${persisted.failed.size - 2} more" else "",
                     )
                 }
-                onAccepted(false)
+                onAccepted(false, content, attachments)
                 return@launch
             }
 
@@ -504,7 +519,7 @@ class ChatViewModel @Inject constructor(
                 )
                 val fullMessages = listOf(ApiMessage(role = "system", content = systemPrompt)) + apiMessages
 
-                onAccepted(true)
+                onAccepted(true, "", emptyList())
 
                 val agentLoop = AgentLoop(
                     client = streamClient,
@@ -551,7 +566,7 @@ class ChatViewModel @Inject constructor(
                 }
                 loadChatList()
             } catch (e: Exception) {
-                onAccepted(false)
+                onAccepted(false, content, attachments)
                 _uiState.update { it.copy(error = e.message, isStreaming = false, isLoading = false) }
             }
         }
