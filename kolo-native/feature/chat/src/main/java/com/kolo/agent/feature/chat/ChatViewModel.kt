@@ -295,13 +295,16 @@ class ChatViewModel @Inject constructor(
         viewModelScope.launch {
             isCancelled = false
             val stableAttachments = persistAttachments(attachments)
+            if (chatDao.getById(chatId.value) == null) {
+                chatDao.upsert(Chat(id = chatId, folderId = _uiState.value.activeFolderId).toEntity())
+            }
 
             val userMsg = Message(chatId = chatId, role = MessageRole.user, content = content, attachments = stableAttachments)
             messageDao.upsert(userMsg.toEntity())
 
             val currentMessages = _uiState.value.messages
             if (currentMessages.isEmpty()) {
-                chatDao.updateTitle(chatId.value, content.take(50).replace('\n', ' '))
+                chatDao.updateTitle(chatId.value, firstChatTitle(content, stableAttachments))
             }
 
             _uiState.update { it.copy(
@@ -476,6 +479,12 @@ class ChatViewModel @Inject constructor(
                 attachment
             }
         }
+    }
+
+    private fun firstChatTitle(content: String, attachments: List<MessageAttachment>): String {
+        val textTitle = content.trim().replace('\n', ' ').take(50)
+        if (textTitle.isNotBlank()) return textTitle
+        return attachments.firstOrNull()?.name?.take(50) ?: "Attachment"
     }
 
     private fun ProviderConfig.displayModelName(): String {

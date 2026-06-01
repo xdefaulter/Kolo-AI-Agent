@@ -43,4 +43,5 @@ data class ToolExecutionContext(
     val permissionChecker: suspend (ToolPermission) -> Boolean = { true },
     val subLlmCall: (suspend (String, String) -> String)? = null,
     val runToolByName: (suspend (String, Map<String, String>) -> ToolExecutionResult)? = null,
+    val getToolByName: ((String) -> KoloTool?)? = null,
 )

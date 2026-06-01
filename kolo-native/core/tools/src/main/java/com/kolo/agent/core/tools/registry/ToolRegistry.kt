@@ -142,6 +142,7 @@ class ToolRegistry {
             runToolByName = { toolName, toolParams ->
                 executeParsedTool(toolName, toolParams, chatId, providerConfig, context, subLlmCall, depth + 1)
             },
+            getToolByName = { toolName -> tools[toolName] },
         )
 
         return try {
@@ -201,6 +202,13 @@ private class CustomToolAdapter(private val def: CustomToolDef) : KoloTool() {
         val values = params.toMutableMap()
         val outputs = mutableListOf<String>()
         def.steps.forEachIndexed { index, step ->
+            val subTool = context.getToolByName?.invoke(step.toolName)
+            if (subTool?.permission == ToolPermission.dangerous) {
+                return ToolExecutionResult.err("Step ${index + 1} (${step.toolName}) is dangerous and cannot run inside a composed custom tool.")
+            }
+            if (subTool?.permission == ToolPermission.sensitive && permission == ToolPermission.safe) {
+                return ToolExecutionResult.err("Step ${index + 1} (${step.toolName}) is sensitive; mark this custom tool as sensitive or dangerous.")
+            }
             val rendered = step.params.mapValues { (_, value) -> renderTemplate(value, values) }
             val result = runTool(step.toolName, rendered)
             if (!result.success) {

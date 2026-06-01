@@ -23,7 +23,6 @@ object DatabaseModule {
             AppDatabase::class.java,
             "kolo.db"
         )
-            .fallbackToDestructiveMigration()
             .build()
 
     @Provides
