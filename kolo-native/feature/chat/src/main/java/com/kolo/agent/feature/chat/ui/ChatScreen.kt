@@ -3,6 +3,8 @@ package com.kolo.agent.feature.chat.ui
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.ActivityNotFoundException
+import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.widget.Toast
@@ -11,6 +13,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
@@ -73,13 +76,14 @@ fun ChatScreen(
 
     ModalNavigationDrawer(
         drawerState = drawerState,
-        drawerContent = {
+                drawerContent = {
             ChatDrawer(
                 chats = state.chatList,
                 folders = state.folders,
                 activeFolderId = state.activeFolderId,
                 searchQuery = state.chatSearchQuery,
                 currentChatId = state.currentChatId,
+                isLocked = state.isStreaming || state.isLoading,
                 onSelectChat = { chatId ->
                     onSelectChat(chatId)
                     scope.launch { drawerState.close() }
@@ -91,6 +95,7 @@ fun ChatScreen(
                 onDeleteChat = onDeleteChat,
                 onSetSearchQuery = onSetChatSearchQuery,
                 onSetActiveFolder = onSetActiveFolder,
+                allChats = state.allChats,
                 onCreateFolder = onCreateFolder,
                 onDeleteFolder = onDeleteFolder,
                 onMoveChat = onMoveChat,
@@ -121,10 +126,12 @@ fun ChatScreen(
 @Composable
 private fun ChatDrawer(
     chats: List<Chat>,
+    allChats: List<Chat>,
     folders: List<Folder>,
     activeFolderId: FolderId?,
     searchQuery: String,
     currentChatId: ChatId?,
+    isLocked: Boolean,
     onSelectChat: (ChatId) -> Unit,
     onNewChat: () -> Unit,
     onDeleteChat: (ChatId) -> Unit,
@@ -139,6 +146,10 @@ private fun ChatDrawer(
 ) {
     var showFolderDialog by remember { mutableStateOf(false) }
     var folderDraft by remember { mutableStateOf("") }
+    var folderDraftError by remember { mutableStateOf<String?>(null) }
+    var pendingDeleteChat by remember { mutableStateOf<ChatId?>(null) }
+    var pendingDeleteFolder by remember { mutableStateOf<Folder?>(null) }
+    var openMenuChatId by remember { mutableStateOf<ChatId?>(null) }
     ModalDrawerSheet(
         modifier = Modifier.width(280.dp),
     ) {
@@ -164,6 +175,7 @@ private fun ChatDrawer(
         // New chat button
         FilledTonalButton(
             onClick = onNewChat,
+            enabled = !isLocked,
             modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
         ) {
             Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -178,11 +190,18 @@ private fun ChatDrawer(
             placeholder = { Text("Search chats") },
             singleLine = true,
             leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null, modifier = Modifier.size(18.dp)) },
+            trailingIcon = {
+                if (searchQuery.isNotBlank()) {
+                    IconButton(onClick = { onSetSearchQuery("") }, modifier = Modifier.size(20.dp)) {
+                        Icon(Icons.Filled.Close, contentDescription = "Clear search", modifier = Modifier.size(14.dp))
+                    }
+                }
+            },
             textStyle = MaterialTheme.typography.bodySmall,
         )
 
         LazyColumn(
-            modifier = Modifier.fillMaxWidth().heightIn(max = 116.dp),
+            modifier = Modifier.fillMaxWidth(),
             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
         ) {
             item {
@@ -191,18 +210,26 @@ private fun ChatDrawer(
                     icon = { Icon(Icons.Filled.Forum, contentDescription = null, modifier = Modifier.size(16.dp)) },
                     selected = activeFolderId == null,
                     onClick = { onSetActiveFolder(null) },
+                    badge = { Text(allChats.size.toString(), style = MaterialTheme.typography.labelSmall) },
                     modifier = Modifier.padding(vertical = 1.dp),
                 )
             }
             items(folders, key = { it.id.value }) { folder ->
+                val folderChatCount = allChats.count { it.folderId == folder.id }
                 NavigationDrawerItem(
                     label = { Text(folder.name, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                     icon = { Icon(Icons.Filled.Folder, contentDescription = null, modifier = Modifier.size(16.dp)) },
                     selected = activeFolderId == folder.id,
                     onClick = { onSetActiveFolder(folder.id) },
                     badge = {
-                        IconButton(onClick = { onDeleteFolder(folder.id) }, modifier = Modifier.size(24.dp)) {
-                            Icon(Icons.Filled.Close, contentDescription = "Delete folder", modifier = Modifier.size(12.dp))
+                        Row {
+                            if (folderChatCount > 0) {
+                                Text(folderChatCount.toString(), style = MaterialTheme.typography.labelSmall)
+                            }
+                            Spacer(modifier = Modifier.width(2.dp))
+                            IconButton(onClick = { pendingDeleteFolder = folder }, modifier = Modifier.size(24.dp)) {
+                                Icon(Icons.Filled.Close, contentDescription = "Delete folder", modifier = Modifier.size(12.dp))
+                            }
                         }
                     },
                     modifier = Modifier.padding(vertical = 1.dp),
@@ -226,7 +253,6 @@ private fun ChatDrawer(
         ) {
             items(chats, key = { it.id.value }) { chat ->
                 val isCurrent = chat.id == currentChatId
-                var menuExpanded by remember { mutableStateOf(false) }
                 NavigationDrawerItem(
                     label = {
                         Column(modifier = Modifier.weight(1f)) {
@@ -254,15 +280,15 @@ private fun ChatDrawer(
                     },
                     badge = {
                         Box {
-                            IconButton(onClick = { menuExpanded = true }, modifier = Modifier.size(28.dp)) {
+                            IconButton(onClick = { openMenuChatId = chat.id }, modifier = Modifier.size(28.dp)) {
                                 Icon(Icons.Filled.MoreVert, contentDescription = "Chat actions", modifier = Modifier.size(15.dp))
                             }
-                            DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
+                            DropdownMenu(expanded = openMenuChatId == chat.id, onDismissRequest = { openMenuChatId = null }) {
                                 DropdownMenuItem(
                                     text = { Text(if (chat.isPinned) "Unpin" else "Pin") },
                                     leadingIcon = { Icon(Icons.Filled.PushPin, contentDescription = null) },
                                     onClick = {
-                                        menuExpanded = false
+                                        openMenuChatId = null
                                         onSetPinned(chat.id, !chat.isPinned)
                                     },
                                 )
@@ -270,8 +296,9 @@ private fun ChatDrawer(
                                     text = { Text("No folder") },
                                     leadingIcon = { Icon(Icons.Filled.FolderOff, contentDescription = null) },
                                     onClick = {
-                                        menuExpanded = false
+                                        openMenuChatId = null
                                         onMoveChat(chat.id, null)
+                                        onSetActiveFolder(null)
                                     },
                                 )
                                 folders.forEach { folder ->
@@ -279,7 +306,7 @@ private fun ChatDrawer(
                                         text = { Text(folder.name) },
                                         leadingIcon = { Icon(Icons.Filled.Folder, contentDescription = null) },
                                         onClick = {
-                                            menuExpanded = false
+                                            openMenuChatId = null
                                             onMoveChat(chat.id, folder.id)
                                         },
                                     )
@@ -288,8 +315,8 @@ private fun ChatDrawer(
                                     text = { Text("Delete") },
                                     leadingIcon = { Icon(Icons.Filled.Delete, contentDescription = null) },
                                     onClick = {
-                                        menuExpanded = false
-                                        onDeleteChat(chat.id)
+                                        openMenuChatId = null
+                                        pendingDeleteChat = chat.id
                                     },
                                 )
                             }
@@ -319,24 +346,79 @@ private fun ChatDrawer(
             onDismissRequest = { showFolderDialog = false },
             title = { Text("New Folder") },
             text = {
-                OutlinedTextField(
-                    value = folderDraft,
-                    onValueChange = { folderDraft = it },
-                    label = { Text("Folder name") },
-                    singleLine = true,
-                )
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    OutlinedTextField(
+                        value = folderDraft,
+                        onValueChange = {
+                            folderDraft = it
+                            folderDraftError = when {
+                                it.isBlank() -> "Folder name is required"
+                                it.trim().length > 40 -> "Name is too long"
+                                folders.any { folder -> folder.name.equals(it.trim(), ignoreCase = true) } -> "A folder with this name already exists"
+                                else -> null
+                            }
+                        },
+                        label = { Text("Folder name") },
+                        isError = folderDraftError != null,
+                        singleLine = true,
+                    )
+                    folderDraftError?.let {
+                        Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
             },
             confirmButton = {
                 TextButton(
                     onClick = {
                         onCreateFolder(folderDraft)
                         folderDraft = ""
+                        folderDraftError = null
                         showFolderDialog = false
                     },
-                    enabled = folderDraft.isNotBlank(),
+                    enabled = folderDraftError == null && folderDraft.isNotBlank(),
                 ) { Text("Create") }
             },
             dismissButton = { TextButton(onClick = { showFolderDialog = false }) { Text("Cancel") } },
+        )
+    }
+
+    pendingDeleteChat?.let { chatId ->
+        AlertDialog(
+            onDismissRequest = { pendingDeleteChat = null },
+            title = { Text("Delete chat?") },
+            text = { Text("Delete this chat and all its messages? This cannot be undone.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onDeleteChat(chatId)
+                        pendingDeleteChat = null
+                    },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                ) { Text("Delete") }
+            },
+            dismissButton = { TextButton(onClick = { pendingDeleteChat = null }) { Text("Cancel") } },
+        )
+    }
+
+    pendingDeleteFolder?.let { folder ->
+        val affectedChats = allChats.count { it.folderId == folder.id }
+        AlertDialog(
+            onDismissRequest = { pendingDeleteFolder = null },
+            title = { Text("Delete folder?") },
+            text = {
+                val suffix = if (affectedChats > 0) " and move $affectedChats chat${if (affectedChats != 1) "s" else ""} out" else ""
+                Text("Delete \"${folder.name}\"$suffix? This cannot be undone.")
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onDeleteFolder(folder.id)
+                        pendingDeleteFolder = null
+                    },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                ) { Text("Delete") }
+            },
+            dismissButton = { TextButton(onClick = { pendingDeleteFolder = null }) { Text("Cancel") } },
         )
     }
 }
@@ -361,10 +443,22 @@ private fun ChatContent(
     var pendingAttachments by remember { mutableStateOf<List<MessageAttachment>>(emptyList()) }
     val listState = rememberLazyListState()
 
-    // Auto-scroll to bottom on new messages
-    LaunchedEffect(state.messages.size, state.streamingContent) {
-        if (state.messages.isNotEmpty()) {
-            listState.animateScrollToItem(state.messages.size)
+    LaunchedEffect(
+        state.messages.size,
+        state.streamingContent,
+        state.streamingThinking,
+        state.activeToolCalls.size,
+        state.toolResults.size,
+        state.isLoading,
+        state.isStreaming,
+    ) {
+        val bubbleCount = state.messages.size +
+            (if (state.streamingContent.isNotEmpty()) 1 else 0) +
+            (if (state.streamingThinking.isNotEmpty()) 1 else 0) +
+            (if (state.activeToolCalls.isNotEmpty()) 1 else 0) +
+            (if (state.isLoading && !state.isStreaming) 1 else 0)
+        if (bubbleCount > 0) {
+            listState.animateScrollToItem((bubbleCount - 1).coerceAtLeast(0))
         }
     }
 
@@ -378,6 +472,8 @@ private fun ChatContent(
                 onSettings = onNavigateSettings,
                 onSetActiveModel = onSetActiveModel,
                 onRefreshActiveModels = onRefreshActiveModels,
+                isRefreshingModels = state.isRefreshingModels,
+                modelFetchStatus = state.modelFetchStatus,
             )
         },
         bottomBar = {
@@ -484,11 +580,20 @@ private fun ChatHeader(
     onSettings: () -> Unit,
     onSetActiveModel: (String) -> Unit,
     onRefreshActiveModels: () -> Unit,
+    isRefreshingModels: Boolean,
+    modelFetchStatus: String?,
 ) {
     var expanded by remember { mutableStateOf(false) }
+    var modelSearch by remember(providerConfig?.id) { mutableStateOf("") }
     val models = providerConfig?.models.orEmpty()
+    val filteredModels = remember(modelSearch, models) {
+        if (modelSearch.isBlank()) models
+        else models.filter { it.label.contains(modelSearch, ignoreCase = true) || it.modelId.contains(modelSearch, ignoreCase = true) }
+    }
     val hasProvider = providerConfig != null
     val isLocalProvider = providerConfig?.isLocal == true
+    val activeModelId = providerConfig?.activeModel?.modelId
+
     Surface(
         tonalElevation = 2.dp,
         shadowElevation = 1.dp,
@@ -520,17 +625,57 @@ private fun ChatHeader(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         lineHeight = 14.sp,
                     )
+                } else {
+                    Text(
+                        text = "No provider configured",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                        lineHeight = 14.sp,
+                    )
+                }
+                modelFetchStatus?.takeIf { it.isNotBlank() }?.let {
+                    Text(
+                        text = it,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 }
             }
+
+            if (providerConfig?.isLocal == true) {
+                val runtimeModeLabel = if (providerConfig.localGpuLayers > 0) "GPU" else "CPU"
+                AssistChip(
+                    onClick = onSettings,
+                    label = { Text(runtimeModeLabel, style = MaterialTheme.typography.labelSmall) },
+                    leadingIcon = {
+                        if (providerConfig.localGpuLayers > 0) {
+                            Icon(Icons.Filled.Speed, contentDescription = null, modifier = Modifier.size(12.dp))
+                        }
+                    },
+                )
+            }
+
             if (hasProvider) {
                 Box {
                     IconButton(onClick = { expanded = true }, modifier = Modifier.size(40.dp)) {
                         Icon(Icons.Filled.ArrowDropDown, contentDescription = "Model picker", modifier = Modifier.size(24.dp))
                     }
                     DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                        if (isRefreshingModels) {
+                            DropdownMenuItem(
+                                enabled = false,
+                                leadingIcon = { CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp) },
+                                text = { Text("Refreshing models…") },
+                                onClick = {},
+                            )
+                            HorizontalDivider()
+                        }
+
                         if (models.isEmpty()) {
                             DropdownMenuItem(
-                                text = { Text(model ?: if (isLocalProvider) "Local model" else "No models loaded") },
+                                text = { Text(if (isLocalProvider) "No local model loaded" else "No models loaded") },
                                 leadingIcon = {
                                     Icon(
                                         if (isLocalProvider) Icons.Filled.Memory else Icons.Filled.Cloud,
@@ -542,30 +687,54 @@ private fun ChatHeader(
                                 onClick = {},
                             )
                         } else {
-                            models.forEach { option ->
-                                DropdownMenuItem(
-                                    text = { Text(option.label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                                    leadingIcon = {
-                                        if (option.modelId == providerConfig?.activeModel?.modelId) {
-                                            Icon(Icons.Filled.Check, contentDescription = null, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
-                                        } else {
-                                            Spacer(modifier = Modifier.size(18.dp))
-                                        }
-                                    },
-                                    onClick = {
-                                        expanded = false
-                                        onSetActiveModel(option.modelId)
-                                    },
+                            if (models.size > 6) {
+                                OutlinedTextField(
+                                        modifier = Modifier
+                                            .padding(horizontal = 8.dp)
+                                            .width(220.dp),
+                                        value = modelSearch,
+                                        onValueChange = { modelSearch = it },
+                                        singleLine = true,
+                                        placeholder = { Text("Search models") },
+                                        textStyle = MaterialTheme.typography.bodySmall,
+                                        trailingIcon = {
+                                            if (modelSearch.isNotBlank()) {
+                                                IconButton(onClick = { modelSearch = "" }, modifier = Modifier.size(16.dp)) {
+                                                    Icon(Icons.Filled.Close, contentDescription = "Clear", modifier = Modifier.size(12.dp))
+                                                }
+                                            }
+                                        },
                                 )
+                                HorizontalDivider()
+                            }
+
+                            if (filteredModels.isEmpty()) {
+                                DropdownMenuItem(text = { Text("No models match") }, onClick = {}, enabled = false)
+                            } else {
+                                filteredModels.forEach { option ->
+                                    DropdownMenuItem(
+                                        text = { Text(option.label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                        leadingIcon = {
+                                            if (option.modelId == activeModelId) {
+                                                Icon(Icons.Filled.Check, contentDescription = null, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
+                                            } else {
+                                                Spacer(modifier = Modifier.size(18.dp))
+                                            }
+                                        },
+                                        onClick = {
+                                            expanded = false
+                                            onSetActiveModel(option.modelId)
+                                        },
+                                    )
+                                }
                             }
                         }
+
                         HorizontalDivider()
                         if (!isLocalProvider) {
                             DropdownMenuItem(
                                 text = { Text(if (models.isEmpty()) "Fetch models" else "Refresh models") },
-                                leadingIcon = {
-                                    Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
-                                },
+                                leadingIcon = { Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(18.dp)) },
                                 onClick = {
                                     expanded = false
                                     onRefreshActiveModels()
@@ -574,15 +743,22 @@ private fun ChatHeader(
                         }
                         DropdownMenuItem(
                             text = { Text(if (isLocalProvider) "Local model settings" else "Provider settings") },
-                            leadingIcon = {
-                                Icon(Icons.Filled.Settings, contentDescription = null, modifier = Modifier.size(18.dp))
-                            },
+                            leadingIcon = { Icon(Icons.Filled.Settings, contentDescription = null, modifier = Modifier.size(18.dp)) },
                             onClick = {
                                 expanded = false
                                 onSettings()
                             },
                         )
                     }
+                }
+            } else {
+                FilledTonalButton(
+                    onClick = onSettings,
+                    contentPadding = PaddingValues(horizontal = 8.dp),
+                ) {
+                    Icon(Icons.Filled.Settings, contentDescription = null, modifier = Modifier.size(14.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Setup", style = MaterialTheme.typography.labelSmall)
                 }
             }
             IconButton(onClick = onSettings, modifier = Modifier.size(40.dp)) {
@@ -757,16 +933,29 @@ private fun MessageBubble(message: Message) {
                 )
                 if (message.attachments.isNotEmpty()) {
                     Spacer(modifier = Modifier.height(6.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(
+                            "Attachments (${message.attachments.size})",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Spacer(modifier = Modifier.weight(1f))
+                        IconButton(onClick = { copyMessageToClipboard(context, message.content) }, modifier = Modifier.size(18.dp)) {
+                            Icon(Icons.Filled.ContentCopy, contentDescription = "Copy message", modifier = Modifier.size(12.dp))
+                        }
+                    }
                     Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
                         message.attachments.forEach { attachment ->
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier
+                                    .fillMaxWidth()
                                     .clip(RoundedCornerShape(8.dp))
                                     .background(
                                         if (isUser) MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.14f)
                                         else MaterialTheme.colorScheme.surface.copy(alpha = 0.72f)
                                     )
+                                    .clickable { openMessageAttachment(context, attachment) }
                                     .padding(horizontal = 8.dp, vertical = 4.dp),
                             ) {
                                 Icon(
@@ -782,7 +971,14 @@ private fun MessageBubble(message: Message) {
                                     color = if (isUser) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f),
                                 )
+                                IconButton(onClick = { openMessageAttachment(context, attachment) }, modifier = Modifier.size(18.dp)) {
+                                    Icon(Icons.Filled.OpenInNew, contentDescription = "Open", modifier = Modifier.size(12.dp))
+                                }
+                                IconButton(onClick = { copyTextToClipboard(context, attachment.name) }, modifier = Modifier.size(18.dp)) {
+                                    Icon(Icons.Filled.ContentCopy, contentDescription = "Copy filename", modifier = Modifier.size(12.dp))
+                                }
                             }
                         }
                     }
@@ -815,6 +1011,27 @@ private fun copyMessageToClipboard(context: Context, text: String) {
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     clipboard.setPrimaryClip(ClipData.newPlainText("Kolo message", text))
     Toast.makeText(context, "Message copied", Toast.LENGTH_SHORT).show()
+}
+
+private fun copyTextToClipboard(context: Context, text: String) {
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    clipboard.setPrimaryClip(ClipData.newPlainText("Kolo attachment", text))
+    Toast.makeText(context, "Attachment copied", Toast.LENGTH_SHORT).show()
+}
+
+private fun openMessageAttachment(context: Context, attachment: MessageAttachment) {
+    val uri = Uri.parse(attachment.uri)
+    val openIntent = Intent(Intent.ACTION_VIEW).apply {
+        setDataAndType(uri, attachment.mimeType)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    try {
+        context.startActivity(Intent.createChooser(openIntent, "Open attachment"))
+    } catch (_: ActivityNotFoundException) {
+        Toast.makeText(context, "No app available to open ${attachment.name}", Toast.LENGTH_SHORT).show()
+    } catch (_: Exception) {
+        Toast.makeText(context, "Unable to open ${attachment.name}", Toast.LENGTH_SHORT).show()
+    }
 }
 
 private fun Context.toMessageAttachment(uri: Uri): MessageAttachment {
@@ -1016,6 +1233,7 @@ private fun ChatInputBar(
     onInsertPrompt: (PromptTemplate) -> Unit,
 ) {
     var showPromptLibrary by remember { mutableStateOf(false) }
+    var showAllAttachments by remember { mutableStateOf(false) }
     val context = LocalContext.current
     val attachmentPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.GetMultipleContents(),
@@ -1077,7 +1295,11 @@ private fun ChatInputBar(
                             )
                         }
                         if (attachments.size > 3) {
-                            AssistChip(onClick = {}, label = { Text("+${attachments.size - 3}") }, modifier = Modifier.height(32.dp))
+                            AssistChip(
+                                onClick = { showAllAttachments = true },
+                                label = { Text("+${attachments.size - 3} more") },
+                                modifier = Modifier.height(32.dp),
+                            )
                         }
                     }
                 }
@@ -1129,6 +1351,45 @@ private fun ChatInputBar(
                 }
             }
         }
+    }
+
+        if (showAllAttachments) {
+        AlertDialog(
+            onDismissRequest = { showAllAttachments = false },
+            title = { Text("Attachments") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    attachments.forEach { attachment ->
+                        Surface(
+                            onClick = { openMessageAttachment(context, attachment) },
+                            shape = MaterialTheme.shapes.small,
+                            color = MaterialTheme.colorScheme.surfaceVariant,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Icon(
+                                    if (attachment.kind == "image") Icons.Filled.Image else Icons.Filled.AttachFile,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp),
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(attachment.name, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text(attachment.mimeType, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                                IconButton(onClick = { onAttachmentsChanged(attachments - attachment) }, modifier = Modifier.size(20.dp)) {
+                                    Icon(Icons.Filled.Close, contentDescription = "Remove", modifier = Modifier.size(12.dp))
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { showAllAttachments = false }) { Text("Done") } },
+        )
     }
 
     if (showPromptLibrary) {

@@ -38,6 +38,7 @@ import kotlin.coroutines.resume
 data class ChatUiState(
     val messages: List<Message> = emptyList(),
     val chatList: List<Chat> = emptyList(),
+    val allChats: List<Chat> = emptyList(),
     val currentChatId: ChatId? = null,
     val isLoading: Boolean = false,
     val isStreaming: Boolean = false,
@@ -55,6 +56,8 @@ data class ChatUiState(
     val activeFolderId: FolderId? = null,
     val chatSearchQuery: String = "",
     val pendingApproval: ToolPermissionApproval? = null,
+    val isRefreshingModels: Boolean = false,
+    val modelFetchStatus: String? = null,
 )
 
 /**
@@ -92,6 +95,7 @@ class ChatViewModel @Inject constructor(
 
     private var currentChatId: ChatId? = null
     private var isCancelled = false
+    private val refreshingProviderModels = mutableSetOf<String>()
 
     /** Continuation for pending tool approval — resumed by approve/deny actions. */
     private var approvalContinuation: kotlin.coroutines.Continuation<Boolean>? = null
@@ -102,13 +106,33 @@ class ChatViewModel @Inject constructor(
             loadChatList()
         }
         viewModelScope.launch {
-            providerRep.activeProviderFlow.collect { provider ->
+            providerRep.providersFlow.collect { providers ->
+                val activeProvider = providers.firstOrNull { it.isActive }
+                if (activeProvider == null) {
+                    _uiState.update {
+                        it.copy(
+                            activeProvider = null,
+                            activeModel = null,
+                            activeProviderConfig = null,
+                            isRefreshingModels = false,
+                            modelFetchStatus = null,
+                        )
+                    }
+                }
                 _uiState.update {
                     it.copy(
-                        activeProvider = provider?.name,
-                        activeModel = provider?.displayModelName(),
-                        activeProviderConfig = provider,
+                        activeProvider = activeProvider?.name,
+                        activeModel = activeProvider?.displayModelName(),
+                        activeProviderConfig = activeProvider,
+                        isRefreshingModels = false,
+                        modelFetchStatus = null,
                     )
+                }
+
+                activeProvider?.let {
+                    if (!it.isLocal && it.models.isEmpty()) {
+                        refreshActiveProviderModelsInternal(it, markAsBusy = false)
+                    }
                 }
             }
         }
@@ -133,10 +157,11 @@ class ChatViewModel @Inject constructor(
                 .map { it.chat_id }
                 .toSet()
         }
-        val chats = chatDao.getAll().map { it.toDomain() }
+        val allChats = chatDao.getAll().map { it.toDomain() }
+        val chats = allChats
             .filter { folderId == null || it.folderId == folderId }
             .filter { query.isBlank() || it.title.lowercase().contains(query) || it.id.value in matchingChatIds }
-        _uiState.update { it.copy(chatList = chats) }
+        _uiState.update { it.copy(chatList = chats, allChats = allChats) }
     }
 
     private suspend fun loadFolders() {
@@ -279,15 +304,40 @@ class ChatViewModel @Inject constructor(
     fun refreshActiveProviderModels() {
         val provider = _uiState.value.activeProviderConfig ?: return
         if (provider.isLocal) return
+        refreshActiveProviderModelsInternal(provider)
+    }
+
+    private fun refreshActiveProviderModelsInternal(
+        provider: ProviderConfig,
+        markAsBusy: Boolean = true,
+    ) {
+        if (provider.isLocal) return
+        if (!refreshingProviderModels.add(provider.id.value)) return
         viewModelScope.launch {
+            if (markAsBusy) {
+                _uiState.update {
+                    it.copy(
+                        isRefreshingModels = true,
+                        modelFetchStatus = "Fetching models for ${provider.name}...",
+                    )
+                }
+            }
             try {
                 val fetched = streamClient.fetchModels(provider)
                     .distinctBy { it.first }
                     .sortedBy { it.first }
+
                 if (fetched.isEmpty()) {
-                    _uiState.update { it.copy(error = "No models were returned by ${provider.effectiveModelsUrl}") }
+                    val message = "No models returned by ${provider.effectiveModelsUrl}"
+                    _uiState.update {
+                        it.copy(
+                            error = it.error ?: message,
+                            modelFetchStatus = message,
+                        )
+                    }
                     return@launch
                 }
+
                 val activeModelId = provider.activeModel?.modelId
                 val updated = provider.copy(
                     models = fetched.mapIndexed { index, (id, label) ->
@@ -300,8 +350,21 @@ class ChatViewModel @Inject constructor(
                     updatedAt = System.currentTimeMillis(),
                 )
                 providerRep.saveProvider(updated, providerRep.getApiKey(provider.id.value))
+                _uiState.update {
+                    it.copy(
+                        modelFetchStatus = "Fetched ${fetched.size} models",
+                    )
+                }
             } catch (e: Exception) {
-                _uiState.update { it.copy(error = "Model fetch failed: ${e.message ?: "unknown error"}") }
+                val error = "Model fetch failed: ${e.message ?: "unknown error"}"
+                _uiState.update { it.copy(error = error, modelFetchStatus = error) }
+            } finally {
+                refreshingProviderModels.remove(provider.id.value)
+                if (markAsBusy) {
+                    _uiState.update {
+                        it.copy(isRefreshingModels = false)
+                    }
+                }
             }
         }
     }
@@ -362,23 +425,11 @@ class ChatViewModel @Inject constructor(
                     throw IllegalStateException("Import a GGUF model in Settings > Local Models and set it active.")
                 }
                 if (!provider.isLocal && provider.activeModel == null) {
-                    val fetched = streamClient.fetchModels(provider)
-                        .distinctBy { it.first }
-                        .sortedBy { it.first }
-                    if (fetched.isEmpty()) {
+                    val refreshed = ensureRemoteProviderHasModels(provider)
+                    if (refreshed == null) {
                         throw IllegalStateException("No model selected and no models were returned by ${provider.effectiveModelsUrl}")
                     }
-                    provider = provider.copy(
-                        models = fetched.mapIndexed { index, (id, label) ->
-                            ModelConfig(
-                                modelId = id,
-                                displayName = label?.takeIf { it.isNotBlank() && it != id },
-                                isActive = index == 0,
-                            )
-                        },
-                        updatedAt = System.currentTimeMillis(),
-                    )
-                    providerRep.saveProvider(provider, providerRep.getApiKey(provider.id.value))
+                    provider = refreshed
                 }
 
                 val apiMessages = buildApiMessages(chatId, content, stableAttachments)
@@ -442,6 +493,29 @@ class ChatViewModel @Inject constructor(
                 _uiState.update { it.copy(error = e.message, isStreaming = false, isLoading = false) }
             }
         }
+    }
+
+    private suspend fun ensureRemoteProviderHasModels(provider: ProviderConfig): ProviderConfig? {
+        if (provider.isLocal) return provider
+        val fetched = streamClient.fetchModels(provider)
+            .distinctBy { it.first }
+            .sortedBy { it.first }
+
+        if (fetched.isEmpty()) return null
+
+        val activeModelId = provider.activeModel?.modelId
+        val updated = provider.copy(
+            models = fetched.mapIndexed { index, (id, label) ->
+                ModelConfig(
+                    modelId = id,
+                    displayName = label?.takeIf { it.isNotBlank() && it != id },
+                    isActive = id == activeModelId || (activeModelId == null && index == 0),
+                )
+            },
+            updatedAt = System.currentTimeMillis(),
+        )
+        providerRep.saveProvider(updated, providerRep.getApiKey(provider.id.value))
+        return updated
     }
 
     private suspend fun buildApiMessages(chatId: ChatId, newUserContent: String, newAttachments: List<MessageAttachment>): List<ApiMessage> {
