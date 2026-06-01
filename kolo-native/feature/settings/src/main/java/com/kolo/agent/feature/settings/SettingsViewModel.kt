@@ -45,6 +45,7 @@ data class SettingsUiState(
     val customInstructions: String = "",
     val customTools: List<CustomToolDef> = emptyList(),
     val skills: List<Skill> = emptyList(),
+    val showTokenUsage: Boolean = true,
 )
 
 enum class AppThemeMode { SYSTEM, LIGHT, DARK }
@@ -71,6 +72,7 @@ class SettingsViewModel @Inject constructor(
         loadLocalSettings()
         loadCustomInstructions()
         loadCustomToolsAndSkills()
+        loadShowTokenUsage()
     }
 
     private fun loadProviders() {
@@ -155,6 +157,12 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
+    fun setShowTokenUsage(enabled: Boolean) {
+        viewModelScope.launch {
+            appSettings.setShowTokenUsage(enabled)
+        }
+    }
+
     fun setToolPermission(toolName: String, mode: ToolPermissionMode) {
         viewModelScope.launch {
             if (mode == toolRegistry.getDefaultPermissionMode(toolName)) {
@@ -191,6 +199,14 @@ class SettingsViewModel @Inject constructor(
                     toolRegistry.setSkills(skills)
                     _uiState.value = _uiState.value.copy(skills = skills)
                 }
+            }
+        }
+    }
+
+    private fun loadShowTokenUsage() {
+        viewModelScope.launch {
+            appSettings.showTokenUsage.collect { enabled ->
+                _uiState.value = _uiState.value.copy(showTokenUsage = enabled)
             }
         }
     }

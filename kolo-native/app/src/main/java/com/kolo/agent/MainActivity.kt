@@ -89,6 +89,7 @@ fun KoloNavApp() {
                 onSetSkillEnabled = { id, enabled -> settingsViewModel.setSkillEnabled(id, enabled) },
                 onSetTheme = { mode -> settingsViewModel.setThemeMode(mode) },
                 onSetLocalLlamaGpuMode = { useGpu -> settingsViewModel.setLocalLlamaGpuMode(useGpu) },
+                onSetShowTokenUsage = { enabled -> settingsViewModel.setShowTokenUsage(enabled) },
                 onNavigateLocalModels = { navController.navigate("local_models") },
                 onNavigateBack = { navController.popBackStack() },
             )

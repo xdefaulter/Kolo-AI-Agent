@@ -3,6 +3,7 @@ package com.kolo.agent.core.settings
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import com.kolo.agent.core.model.CustomToolDef
@@ -33,6 +34,7 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
     private val KEY_CUSTOM_INSTRUCTIONS = stringPreferencesKey("custom_instructions")
     private val KEY_CUSTOM_TOOLS = stringPreferencesKey("custom_tools_v1")
     private val KEY_SKILLS = stringPreferencesKey("skills_v1")
+    private val KEY_SHOW_TOKEN_USAGE = booleanPreferencesKey("show_token_usage")
 
     val themeMode: Flow<ThemeMode> = dataStore.data.map { prefs ->
         prefs[KEY_THEME]?.let { ThemeMode.valueOf(it) } ?: ThemeMode.SYSTEM
@@ -84,6 +86,16 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
             val cleanValue = value.trim()
             if (cleanValue.isNotEmpty()) prefs[KEY_CUSTOM_INSTRUCTIONS] = cleanValue
             else prefs.remove(KEY_CUSTOM_INSTRUCTIONS)
+        }
+    }
+
+    val showTokenUsage: Flow<Boolean> = dataStore.data.map { prefs ->
+        prefs[KEY_SHOW_TOKEN_USAGE] ?: true
+    }
+
+    suspend fun setShowTokenUsage(enabled: Boolean) {
+        dataStore.edit { prefs ->
+            prefs[KEY_SHOW_TOKEN_USAGE] = enabled
         }
     }
 

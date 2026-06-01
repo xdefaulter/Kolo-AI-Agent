@@ -52,6 +52,7 @@ data class ChatUiState(
     val activeProvider: String? = null,
     val activeProviderConfig: ProviderConfig? = null,
     val promptTemplates: List<PromptTemplate> = emptyList(),
+    val showTokenUsage: Boolean = true,
     val folders: List<Folder> = emptyList(),
     val activeFolderId: FolderId? = null,
     val chatSearchQuery: String = "",
@@ -144,6 +145,11 @@ class ChatViewModel @Inject constructor(
         }
         viewModelScope.launch {
             appSettings.skills.collect { toolRegistry.setSkills(it) }
+        }
+        viewModelScope.launch {
+            appSettings.showTokenUsage.collect { showTokenUsage ->
+                _uiState.update { it.copy(showTokenUsage = showTokenUsage) }
+            }
         }
     }
 

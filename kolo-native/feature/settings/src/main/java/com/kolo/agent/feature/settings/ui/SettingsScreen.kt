@@ -22,7 +22,15 @@ import com.kolo.agent.core.model.ToolPermission
 import com.kolo.agent.core.providers.local.LocalModelManager
 import com.kolo.agent.feature.settings.*
 import java.net.MalformedURLException
+import java.io.File
 import java.net.URL
+import java.util.UUID
+import androidx.compose.ui.platform.LocalContext
+import android.content.Intent
+import android.provider.Settings
+import org.json.JSONException
+import org.json.JSONTokener
+import org.json.JSONObject
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -46,6 +54,7 @@ fun SettingsScreen(
     onSetSkillEnabled: (String, Boolean) -> Unit,
     onSetTheme: (AppThemeMode) -> Unit = {},
     onSetLocalLlamaGpuMode: (Boolean) -> Unit = {},
+    onSetShowTokenUsage: (Boolean) -> Unit = {},
     onNavigateLocalModels: () -> Unit = {},
     onNavigateBack: () -> Unit,
 ) {
@@ -108,12 +117,14 @@ fun SettingsScreen(
                     tools = state.customTools,
                     onSave = onSaveCustomTool,
                     onDelete = onDeleteCustomTool,
+                    onEdit = onSaveCustomTool,
                 )
                 SettingsSection.Skills -> SkillsSection(
                     skills = state.skills,
                     onSave = onSaveSkill,
                     onDelete = onDeleteSkill,
                     onSetEnabled = onSetSkillEnabled,
+                    onEdit = onSaveSkill,
                 )
                 SettingsSection.Memory -> MemorySection(
                     memories = state.memories,
@@ -125,7 +136,12 @@ fun SettingsScreen(
                     onSave = onSetCustomInstructions,
                 )
                 SettingsSection.PhoneControl -> PhoneControlSection()
-                SettingsSection.Appearance -> AppearanceSection(state.themeMode, onSetTheme)
+                SettingsSection.Appearance -> AppearanceSection(
+                    themeMode = state.themeMode,
+                    onSetTheme = onSetTheme,
+                    showTokenUsage = state.showTokenUsage,
+                    onSetShowTokenUsage = onSetShowTokenUsage,
+                )
                 SettingsSection.About -> AboutSection(state.bridgeStatus)
                 null -> SettingsHome(onSectionSelected = { selectedSection = it }, onNavigateLocalModels = onNavigateLocalModels)
             }
@@ -204,6 +220,7 @@ private fun ProvidersSection(
 ) {
     var showAddDialog by remember { mutableStateOf(false) }
     var expandedProvider by remember { mutableStateOf<ProviderId?>(null) }
+    var pendingDeleteProvider by remember { mutableStateOf<ProviderConfig?>(null) }
     val existingProviderNames = remember(providers) { providers.map { it.name.lowercase() }.toSet() }
 
     LazyColumn(modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp), contentPadding = PaddingValues(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -227,13 +244,32 @@ private fun ProvidersSection(
                 onUpdateProvider = onUpdateProvider,
                 onSetActive = { onSetActiveProvider(provider.id) },
                 onSetActiveModel = { modelId -> onSetProviderActiveModel(provider.id, modelId) },
-                onDelete = { onDeleteProvider(provider.id) },
+                onDelete = { pendingDeleteProvider = provider },
                 onSetModelPath = { onSetProviderModelPath(provider.id, it) },
                 onRefreshModels = { onRefreshProviderModels(provider.id) },
                 onSetLocalLlamaGpuMode = onSetLocalLlamaGpuMode,
                 existingProviderNames = existingProviderNames,
             )
         }
+    }
+    pendingDeleteProvider?.let { provider ->
+        AlertDialog(
+            onDismissRequest = { pendingDeleteProvider = null },
+            title = { Text("Delete provider?") },
+            text = {
+                Text("Delete \"${provider.name}\" permanently? This action will remove the provider and all of its model metadata.")
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onDeleteProvider(provider.id)
+                        pendingDeleteProvider = null
+                    },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                ) { Text("Delete") }
+            },
+            dismissButton = { TextButton(onClick = { pendingDeleteProvider = null }) { Text("Cancel") } },
+        )
     }
     if (showAddDialog) {
         AddProviderDialog(
@@ -269,6 +305,16 @@ private fun ProviderCard(
 ) {
     var modelPathDraft by remember(provider.id, provider.modelPath) { mutableStateOf(provider.modelPath.orEmpty()) }
     var modelSearch by remember(provider.id) { mutableStateOf("") }
+    val trimmedModelPath = modelPathDraft.trim()
+    val pathError = if (trimmedModelPath.isBlank()) null else {
+        val candidate = File(trimmedModelPath)
+        when {
+            !candidate.exists() -> "Selected file does not exist."
+            !candidate.isFile -> "Path must point to a file."
+            !candidate.name.lowercase().endsWith(".gguf") -> "Path should point to a .gguf file."
+            else -> null
+        }
+    }
     val filteredModels = provider.models.filter {
         modelSearch.isBlank() || it.label.contains(modelSearch, ignoreCase = true) || it.modelId.contains(modelSearch, ignoreCase = true)
     }
@@ -355,11 +401,13 @@ private fun ProviderCard(
                             singleLine = true,
                             modifier = Modifier.fillMaxWidth(),
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                            isError = pathError != null,
+                            supportingText = pathError?.let { { Text(it) } },
                         )
                         Spacer(Modifier.height(6.dp))
                         OutlinedButton(
                             onClick = { onSetModelPath(modelPathDraft) },
-                            enabled = modelPathDraft.trim() != provider.modelPath.orEmpty(),
+                            enabled = pathError == null && trimmedModelPath != provider.modelPath.orEmpty(),
                             contentPadding = PaddingValues(horizontal = 12.dp),
                         ) { Text("Save Path", style = MaterialTheme.typography.labelSmall) }
                     } else {
@@ -810,8 +858,11 @@ private fun CustomToolsSection(
     tools: List<CustomToolDef>,
     onSave: (CustomToolDef) -> Unit,
     onDelete: (String) -> Unit,
+    onEdit: (CustomToolDef) -> Unit,
 ) {
     var showDialog by remember { mutableStateOf(false) }
+    var selectedTool by remember { mutableStateOf<CustomToolDef?>(null) }
+    var pendingDeleteTool by remember { mutableStateOf<CustomToolDef?>(null) }
     LazyColumn(modifier = Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         item {
             Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
@@ -819,7 +870,10 @@ private fun CustomToolsSection(
                     Text("Custom Tools", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
                     Text("${tools.size} saved", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                FilledTonalButton(onClick = { showDialog = true }, contentPadding = PaddingValues(horizontal = 10.dp)) {
+                FilledTonalButton(onClick = {
+                    selectedTool = null
+                    showDialog = true
+                }, contentPadding = PaddingValues(horizontal = 10.dp)) {
                     Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(Modifier.width(4.dp))
                     Text("Add", style = MaterialTheme.typography.labelMedium)
@@ -835,8 +889,16 @@ private fun CustomToolsSection(
                 supportingContent = { Text("${tool.kind.name} / ${tool.permission.name} - ${tool.description}", maxLines = 2, overflow = TextOverflow.Ellipsis) },
                 leadingContent = { Icon(Icons.Filled.Extension, contentDescription = null) },
                 trailingContent = {
-                    IconButton(onClick = { onDelete(tool.id.value) }) {
-                        Icon(Icons.Filled.Delete, contentDescription = "Delete", tint = MaterialTheme.colorScheme.error)
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        IconButton(onClick = {
+                            selectedTool = tool
+                            showDialog = true
+                        }) {
+                            Icon(Icons.Filled.Edit, contentDescription = "Edit", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        IconButton(onClick = { pendingDeleteTool = tool }) {
+                            Icon(Icons.Filled.Delete, contentDescription = "Delete", tint = MaterialTheme.colorScheme.error)
+                        }
                     }
                 },
             )
@@ -844,33 +906,86 @@ private fun CustomToolsSection(
     }
     if (showDialog) {
         CustomToolDialog(
-            onDismiss = { showDialog = false },
+            onDismiss = {
+                showDialog = false
+                selectedTool = null
+            },
             onSave = {
-                onSave(it)
+                if (selectedTool != null) onEdit(it) else onSave(it)
+                selectedTool = null
                 showDialog = false
             },
+            initialTool = selectedTool,
+        )
+    }
+    pendingDeleteTool?.let { tool ->
+        AlertDialog(
+            onDismissRequest = { pendingDeleteTool = null },
+            title = { Text("Delete Custom Tool") },
+            text = { Text("Delete \"${tool.name}\"? This cannot be undone.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onDelete(tool.id.value)
+                        pendingDeleteTool = null
+                    },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                ) { Text("Delete") }
+            },
+            dismissButton = { TextButton(onClick = { pendingDeleteTool = null }) { Text("Cancel") } },
         )
     }
 }
 
 @Composable
-private fun CustomToolDialog(onDismiss: () -> Unit, onSave: (CustomToolDef) -> Unit) {
-    var name by remember { mutableStateOf("") }
-    var description by remember { mutableStateOf("") }
-    var schema by remember { mutableStateOf("""{"type":"object","properties":{"input":{"type":"string"}},"required":["input"]}""") }
-    var systemPrompt by remember { mutableStateOf("") }
-    var userTemplate by remember { mutableStateOf("{{input}}") }
-    var kind by remember { mutableStateOf(CustomToolKind.prompt) }
-    var steps by remember { mutableStateOf("") }
-    var permission by remember { mutableStateOf(ToolPermission.sensitive) }
+private fun CustomToolDialog(
+    onDismiss: () -> Unit,
+    onSave: (CustomToolDef) -> Unit,
+    initialTool: CustomToolDef? = null,
+) {
+    val parsedSchemaDefault = remember(initialTool?.parameterSchema) {
+        initialTool?.parameterSchema?.trim()?.ifBlank { """{"type":"object","properties":{}}""" } ?: """{"type":"object","properties":{"input":{"type":"string"}},"required":["input"]}"""
+    }
+    var name by remember { mutableStateOf(initialTool?.name.orEmpty()) }
+    var description by remember { mutableStateOf(initialTool?.description.orEmpty()) }
+    var schema by remember { mutableStateOf(parsedSchemaDefault) }
+    var systemPrompt by remember { mutableStateOf(initialTool?.systemPrompt.orEmpty()) }
+    var userTemplate by remember { mutableStateOf(if (initialTool?.userMessage.orEmpty().isBlank()) "{{input}}" else initialTool?.userMessage.orEmpty()) }
+    var kind by remember { mutableStateOf(initialTool?.kind ?: CustomToolKind.prompt) }
+    var steps by remember { mutableStateOf(initialTool?.steps.orEmpty().joinToString("\\n") { step ->
+        buildString {
+            append(step.toolName)
+            step.params.forEach { (key, value) ->
+                append(" ").append(key).append("=").append(value)
+            }
+        }
+    }) }
+    var permission by remember { mutableStateOf(initialTool?.permission ?: ToolPermission.sensitive) }
+    val schemaError = remember(schema) { validateToolSchema(schema) }
+    val composedSteps = parseComposedStepLines(steps)
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Add Custom Tool") },
+        title = { Text(if (initialTool == null) "Add Custom Tool" else "Edit Custom Tool") },
         text = {
             LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.heightIn(max = 460.dp)) {
                 item { OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Tool name") }, placeholder = { Text("summarize_notes") }, singleLine = true, modifier = Modifier.fillMaxWidth()) }
                 item { OutlinedTextField(value = description, onValueChange = { description = it }, label = { Text("Description") }, minLines = 2, modifier = Modifier.fillMaxWidth()) }
-                item { OutlinedTextField(value = schema, onValueChange = { schema = it }, label = { Text("Parameter JSON schema") }, minLines = 3, maxLines = 5, modifier = Modifier.fillMaxWidth()) }
+                item {
+                    OutlinedTextField(
+                        value = schema,
+                        onValueChange = { schema = it },
+                        label = { Text("Parameter JSON schema") },
+                        minLines = 3,
+                        maxLines = 5,
+                        modifier = Modifier.fillMaxWidth(),
+                        isError = schemaError != null,
+                    )
+                }
+                item {
+                    if (schemaError != null) {
+                        Text(schemaError, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
+                    }
+                }
                 item {
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         FilterChip(selected = kind == CustomToolKind.prompt, onClick = { kind = CustomToolKind.prompt }, label = { Text("Prompt") })
@@ -907,21 +1022,25 @@ private fun CustomToolDialog(onDismiss: () -> Unit, onSave: (CustomToolDef) -> U
                 onClick = {
                     onSave(
                         CustomToolDef(
+                            id = initialTool?.id ?: CustomToolId(UUID.randomUUID().toString()),
                             name = name.trim(),
                             description = description.trim(),
                             kind = kind,
                             parameterSchema = schema.trim(),
                             systemPrompt = systemPrompt.trim(),
                             userMessage = userTemplate,
-                            steps = if (kind == CustomToolKind.composed) parseComposedStepLines(steps) else emptyList(),
+                            steps = if (kind == CustomToolKind.composed) composedSteps else emptyList(),
                             permission = permission,
+                            createdAt = initialTool?.createdAt ?: System.currentTimeMillis(),
+                            updatedAt = System.currentTimeMillis(),
                         )
                     )
                 },
                 enabled = name.isNotBlank() &&
                     description.isNotBlank() &&
                     (kind == CustomToolKind.composed || systemPrompt.isNotBlank()) &&
-                    (kind == CustomToolKind.prompt || parseComposedStepLines(steps).isNotEmpty()),
+                    (kind == CustomToolKind.prompt || composedSteps.isNotEmpty()) &&
+                    schemaError == null,
             ) { Text("Save") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
@@ -945,6 +1064,17 @@ private fun parseComposedStepLines(value: String): List<ComposedStep> {
         .toList()
 }
 
+private fun validateToolSchema(schema: String): String? {
+    val trimmed = schema.trim()
+    if (trimmed.isBlank()) return "Schema is required."
+    return try {
+        val element = JSONTokener(trimmed).nextValue()
+        if (element is JSONObject) null else "Schema must be a JSON object."
+    } catch (e: JSONException) {
+        "Invalid JSON: ${e.message}"
+    }
+}
+
 // ---- Skills ----
 
 @Composable
@@ -953,8 +1083,11 @@ private fun SkillsSection(
     onSave: (Skill) -> Unit,
     onDelete: (String) -> Unit,
     onSetEnabled: (String, Boolean) -> Unit,
+    onEdit: (Skill) -> Unit,
 ) {
     var showDialog by remember { mutableStateOf(false) }
+    var selectedSkill by remember { mutableStateOf<Skill?>(null) }
+    var pendingDeleteSkill by remember { mutableStateOf<Skill?>(null) }
     LazyColumn(modifier = Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         item {
             Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
@@ -962,7 +1095,10 @@ private fun SkillsSection(
                     Text("Skills", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
                     Text("${skills.count { it.isEnabled }} enabled / ${skills.size} saved", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                FilledTonalButton(onClick = { showDialog = true }, contentPadding = PaddingValues(horizontal = 10.dp)) {
+                FilledTonalButton(onClick = {
+                    selectedSkill = null
+                    showDialog = true
+                }, contentPadding = PaddingValues(horizontal = 10.dp)) {
                     Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(Modifier.width(4.dp))
                     Text("Add", style = MaterialTheme.typography.labelMedium)
@@ -980,7 +1116,13 @@ private fun SkillsSection(
                 trailingContent = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Switch(checked = skill.isEnabled, onCheckedChange = { onSetEnabled(skill.id.value, it) })
-                        IconButton(onClick = { onDelete(skill.id.value) }) {
+                        IconButton(onClick = {
+                            selectedSkill = skill
+                            showDialog = true
+                        }) {
+                            Icon(Icons.Filled.Edit, contentDescription = "Edit", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        IconButton(onClick = { pendingDeleteSkill = skill }) {
                             Icon(Icons.Filled.Delete, contentDescription = "Delete", tint = MaterialTheme.colorScheme.error)
                         }
                     }
@@ -990,23 +1132,49 @@ private fun SkillsSection(
     }
     if (showDialog) {
         SkillDialog(
-            onDismiss = { showDialog = false },
+            onDismiss = {
+                showDialog = false
+                selectedSkill = null
+            },
             onSave = {
-                onSave(it)
+                if (selectedSkill != null) onEdit(it) else onSave(it)
+                selectedSkill = null
                 showDialog = false
             },
+            initialSkill = selectedSkill,
+        )
+    }
+    pendingDeleteSkill?.let { skill ->
+        AlertDialog(
+            onDismissRequest = { pendingDeleteSkill = null },
+            title = { Text("Delete Skill") },
+            text = { Text("Delete \"${skill.name}\"? This cannot be undone.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onDelete(skill.id.value)
+                        pendingDeleteSkill = null
+                    },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                ) { Text("Delete") }
+            },
+            dismissButton = { TextButton(onClick = { pendingDeleteSkill = null }) { Text("Cancel") } },
         )
     }
 }
 
 @Composable
-private fun SkillDialog(onDismiss: () -> Unit, onSave: (Skill) -> Unit) {
-    var name by remember { mutableStateOf("") }
-    var description by remember { mutableStateOf("") }
-    var content by remember { mutableStateOf("") }
+private fun SkillDialog(
+    onDismiss: () -> Unit,
+    onSave: (Skill) -> Unit,
+    initialSkill: Skill? = null,
+) {
+    var name by remember { mutableStateOf(initialSkill?.name.orEmpty()) }
+    var description by remember { mutableStateOf(initialSkill?.description.orEmpty()) }
+    var content by remember { mutableStateOf(initialSkill?.content.orEmpty()) }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Add Skill") },
+        title = { Text(if (initialSkill == null) "Add Skill" else "Edit Skill") },
         text = {
             LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.heightIn(max = 420.dp)) {
                 item { OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Name") }, singleLine = true, modifier = Modifier.fillMaxWidth()) }
@@ -1017,7 +1185,18 @@ private fun SkillDialog(onDismiss: () -> Unit, onSave: (Skill) -> Unit) {
         confirmButton = {
             TextButton(
                 onClick = {
-                    onSave(Skill(name = name.trim(), description = description.trim(), content = content.trim()))
+                    onSave(
+                        Skill(
+                            id = initialSkill?.id ?: SkillId(UUID.randomUUID().toString()),
+                            name = name.trim(),
+                            description = description.trim(),
+                            content = content.trim(),
+                            isEnabled = initialSkill?.isEnabled ?: true,
+                            isAgentAuthored = initialSkill?.isAgentAuthored ?: false,
+                            createdAt = initialSkill?.createdAt ?: System.currentTimeMillis(),
+                            updatedAt = System.currentTimeMillis(),
+                        ),
+                    )
                 },
                 enabled = name.isNotBlank() && description.isNotBlank() && content.isNotBlank(),
             ) { Text("Save") }
@@ -1149,6 +1328,7 @@ private fun InstructionsSection(
 
 @Composable
 private fun PhoneControlSection() {
+    val context = LocalContext.current
     LazyColumn(modifier = Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         item {
             Card(shape = MaterialTheme.shapes.small, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
@@ -1164,6 +1344,16 @@ private fun PhoneControlSection() {
                     Spacer(Modifier.height(6.dp))
                     Text("Safety guarantee:", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
                     Text("A persistent STOP overlay appears during active sessions. Pressing it blocks all phone-control actions immediately.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.height(8.dp))
+                    FilledTonalButton(
+                        onClick = {
+                            context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                        },
+                    ) {
+                        Icon(Icons.Filled.Settings, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Open Accessibility Settings")
+                    }
                 }
             }
         }
@@ -1186,7 +1376,12 @@ private fun PhoneControlSection() {
 // ──── Appearance ────
 
 @Composable
-private fun AppearanceSection(themeMode: AppThemeMode, onSetTheme: (AppThemeMode) -> Unit) {
+private fun AppearanceSection(
+    themeMode: AppThemeMode,
+    onSetTheme: (AppThemeMode) -> Unit,
+    showTokenUsage: Boolean,
+    onSetShowTokenUsage: (Boolean) -> Unit,
+) {
     LazyColumn(modifier = Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         item {
             SectionHeader("Theme")
@@ -1201,7 +1396,14 @@ private fun AppearanceSection(themeMode: AppThemeMode, onSetTheme: (AppThemeMode
         item {
             Card(shape = MaterialTheme.shapes.small, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) { Column(Modifier.padding(12.dp)) { Row(verticalAlignment = Alignment.CenterVertically) { Icon(Icons.Filled.Memory, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("Local Model", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold) }; Spacer(Modifier.height(4.dp)); Text("llama.cpp JNI/CMake bridge is built into this build. Import GGUF models via Settings > Local Models to start local inference.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) } }
         }
-        item { SwitchPreference("Show Token Usage", "Token count bar in chat", true, { }, false) }
+        item {
+            SwitchPreference(
+                "Show Token Usage",
+                "Token count bar in chat",
+                showTokenUsage,
+                onSetShowTokenUsage,
+            )
+        }
     }
 }
 
