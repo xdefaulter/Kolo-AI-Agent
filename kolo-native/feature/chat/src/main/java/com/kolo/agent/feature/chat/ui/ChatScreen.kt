@@ -53,7 +53,7 @@ import kotlin.math.min
 @Composable
 fun ChatScreen(
     state: ChatUiState,
-    onSendMessage: (String, List<MessageAttachment>) -> Unit,
+    onSendMessage: (String, List<MessageAttachment>, (Boolean) -> Unit) -> Unit,
     onCancel: () -> Unit,
     onClearError: () -> Unit = {},
     onSelectChat: (ChatId) -> Unit = {},
@@ -86,6 +86,7 @@ fun ChatScreen(
                 activeFolderId = state.activeFolderId,
                 searchQuery = state.chatSearchQuery,
                 currentChatId = state.currentChatId,
+                activeProviderConfig = state.activeProviderConfig,
                 isLocked = state.isStreaming || state.isLoading,
                 onSelectChat = { chatId ->
                     onSelectChat(chatId)
@@ -131,6 +132,7 @@ private fun ChatDrawer(
     chats: List<Chat>,
     allChats: List<Chat>,
     folders: List<Folder>,
+    activeProviderConfig: ProviderConfig?,
     activeFolderId: FolderId?,
     searchQuery: String,
     currentChatId: ChatId?,
@@ -154,6 +156,12 @@ private fun ChatDrawer(
     var pendingMoveToNoFolderChatId by remember { mutableStateOf<ChatId?>(null) }
     var pendingDeleteFolder by remember { mutableStateOf<Folder?>(null) }
     var openMenuChatId by remember { mutableStateOf<ChatId?>(null) }
+    val providerStatusText = when {
+        activeProviderConfig == null -> "No provider configured"
+        activeProviderConfig.isLocal && activeProviderConfig.activeModel == null -> "Local provider missing active model"
+        !activeProviderConfig.isLocal && activeProviderConfig.activeModel == null -> "Remote provider has no model selected"
+        else -> null
+    }
     ModalDrawerSheet(
         modifier = Modifier.width(280.dp),
     ) {
@@ -175,6 +183,17 @@ private fun ChatDrawer(
             Text("Kolo AI", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
         }
         HorizontalDivider()
+
+        if (providerStatusText != null) {
+            Text(
+                text = providerStatusText,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
+            )
+        }
 
         // New chat button
         FilledTonalButton(
@@ -231,8 +250,14 @@ private fun ChatDrawer(
                                 Text(folderChatCount.toString(), style = MaterialTheme.typography.labelSmall)
                             }
                             Spacer(modifier = Modifier.width(2.dp))
-                            IconButton(onClick = { pendingDeleteFolder = folder }, modifier = Modifier.size(24.dp)) {
-                                Icon(Icons.Filled.Close, contentDescription = "Delete folder", modifier = Modifier.size(12.dp))
+                            FilledTonalButton(
+                                onClick = { pendingDeleteFolder = folder },
+                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                                modifier = Modifier.height(22.dp),
+                            ) {
+                                Icon(Icons.Filled.Delete, contentDescription = "Delete folder", modifier = Modifier.size(12.dp))
+                                Spacer(modifier = Modifier.width(2.dp))
+                                Text("Delete", style = MaterialTheme.typography.labelSmall)
                             }
                         }
                     },
@@ -283,9 +308,15 @@ private fun ChatDrawer(
                         )
                     },
                     badge = {
-                        Box {
-                            IconButton(onClick = { openMenuChatId = chat.id }, modifier = Modifier.size(28.dp)) {
-                                Icon(Icons.Filled.MoreVert, contentDescription = "Chat actions", modifier = Modifier.size(15.dp))
+                        Row {
+                            FilledTonalButton(
+                                onClick = { openMenuChatId = chat.id },
+                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                                modifier = Modifier.height(22.dp),
+                            ) {
+                                Icon(Icons.Filled.MoreVert, contentDescription = null, modifier = Modifier.size(12.dp))
+                                Spacer(modifier = Modifier.width(3.dp))
+                                Text("Actions", style = MaterialTheme.typography.labelSmall)
                             }
                             DropdownMenu(expanded = openMenuChatId == chat.id, onDismissRequest = { openMenuChatId = null }) {
                                 DropdownMenuItem(
@@ -451,7 +482,7 @@ private fun ChatDrawer(
 @Composable
 private fun ChatContent(
     state: ChatUiState,
-    onSendMessage: (String, List<MessageAttachment>) -> Unit,
+    onSendMessage: (String, List<MessageAttachment>, (Boolean) -> Unit) -> Unit,
     onCancel: () -> Unit,
     onClearError: () -> Unit,
     onOpenDrawer: () -> Unit,
@@ -523,12 +554,16 @@ private fun ChatContent(
                 onAttachmentsChanged = { pendingAttachments = it },
                 onSend = {
                     if (inputText.isNotBlank() || pendingAttachments.isNotEmpty()) {
-                        onSendMessage(inputText.trim(), pendingAttachments)
-                        inputText = ""
-                        pendingAttachments = emptyList()
+                        onSendMessage(inputText.trim(), pendingAttachments) { accepted ->
+                            if (accepted) {
+                                inputText = ""
+                                pendingAttachments = emptyList()
+                            }
+                        }
                     }
                 },
                 isStreaming = state.isStreaming,
+                sendDisabledReason = state.activeProviderReadinessError,
                 onCancel = onCancel,
                 promptTemplates = state.promptTemplates,
                     onInsertPrompt = { template ->
@@ -1372,7 +1407,11 @@ private fun ErrorBanner(error: String, onDismiss: () -> Unit) {
 private fun TokenUsageBar(usage: TokenUsage) {
     Surface(color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f), modifier = Modifier.fillMaxWidth()) {
         Row(modifier = Modifier.padding(horizontal = 10.dp, vertical = 2.dp), horizontalArrangement = Arrangement.End) {
-            Text("${usage.promptTokens}↑ ${usage.completionTokens}↓ ${usage.totalTokens}Σ", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(
+                "Latest turn · prompt ${usage.promptTokens} · completion ${usage.completionTokens} · total ${usage.totalTokens}",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }
@@ -1387,12 +1426,14 @@ private fun ChatInputBar(
     onAttachmentsChanged: (List<MessageAttachment>) -> Unit,
     onSend: () -> Unit,
     isStreaming: Boolean,
+    sendDisabledReason: String? = null,
     onCancel: () -> Unit,
     promptTemplates: List<PromptTemplate>,
     onInsertPrompt: (PromptTemplate) -> Unit,
 ) {
     var showPromptLibrary by remember { mutableStateOf(false) }
     var showAllAttachments by remember { mutableStateOf(false) }
+    var pickerHint by remember { mutableStateOf<String?>(null) }
     val context = LocalContext.current
     val maxAttachments = 8
     val attachmentPicker = rememberLauncherForActivityResult(
@@ -1409,20 +1450,22 @@ private fun ChatInputBar(
         val supported = parsed.filter { isSupportedChatAttachment(it) }
         val rejected = parsed.filterNot { isSupportedChatAttachment(it) }
         if (rejected.isNotEmpty()) {
-            Toast.makeText(
-                context,
-                "Unsupported files skipped: ${rejected.joinToString(", ") { it.name }}",
-                Toast.LENGTH_SHORT,
-            ).show()
+            pickerHint = "Unsupported files skipped: ${rejected.joinToString(", ") { it.name }}"
         }
         val next = (attachments + supported).take(maxAttachments)
-        if (supported.size + attachments.size > maxAttachments) {
-            Toast.makeText(
-                context,
-                "Attachment limit is $maxAttachments. Extra files were ignored.",
-                Toast.LENGTH_SHORT,
-            ).show()
+        val skipped = (attachments + parsed).size - next.size
+        if (supported.isEmpty()) {
+            if (rejected.isNotEmpty()) {
+                pickerHint = "No supported files in selection."
+            } else {
+                pickerHint = null
+            }
+            return@rememberLauncherForActivityResult
         }
+        if (skipped > 0) {
+            pickerHint = "Attachment limit is $maxAttachments. Extra files were ignored."
+        }
+        if (skipped == 0 && rejected.isEmpty()) pickerHint = null
         onAttachmentsChanged(next)
     }
     Surface(
@@ -1492,7 +1535,10 @@ private fun ChatInputBar(
                                 leadingIcon = { Icon(if (attachment.kind == "image") Icons.Filled.Image else Icons.Filled.AttachFile, contentDescription = null, modifier = Modifier.size(14.dp)) },
                                 trailingIcon = {
                                     IconButton(
-                                        onClick = { onAttachmentsChanged(attachments - attachment) },
+                                        onClick = {
+                                            onAttachmentsChanged(attachments - attachment)
+                                            pickerHint = null
+                                        },
                                         modifier = Modifier.size(20.dp),
                                     ) { Icon(Icons.Filled.Close, contentDescription = "Remove", modifier = Modifier.size(14.dp)) }
                                 },
@@ -1508,13 +1554,23 @@ private fun ChatInputBar(
                         }
                     }
                 }
+                pickerHint?.let { hint ->
+                    Text(
+                        hint,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(bottom = 4.dp),
+                    )
+                }
                 OutlinedTextField(
                     value = value,
                     onValueChange = onValueChange,
                     modifier = Modifier.fillMaxWidth(),
-                    enabled = !isStreaming,
+                    enabled = !isStreaming && sendDisabledReason == null,
                     label = if (isStreaming) {
                         { Text("Draft locked while generating. Cancel to edit.") }
+                    } else if (sendDisabledReason != null) {
+                        { Text(sendDisabledReason, color = MaterialTheme.colorScheme.error, maxLines = 1) }
                     } else null,
                     placeholder = { Text("Message…") },
                     maxLines = 4,
@@ -1523,7 +1579,7 @@ private fun ChatInputBar(
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                     keyboardActions = KeyboardActions(
                         onSend = {
-                            if ((value.isNotBlank() || attachments.isNotEmpty()) && !isStreaming) {
+                            if (sendDisabledReason == null && (value.isNotBlank() || attachments.isNotEmpty()) && !isStreaming) {
                                 onSend()
                             }
                         },
@@ -1548,7 +1604,7 @@ private fun ChatInputBar(
                     onClick = onSend,
                     modifier = Modifier.size(36.dp),
                     shape = CircleShape,
-                    enabled = !isStreaming && (value.isNotBlank() || attachments.isNotEmpty()),
+                    enabled = sendDisabledReason == null && !isStreaming && (value.isNotBlank() || attachments.isNotEmpty()),
                     colors = IconButtonDefaults.filledIconButtonColors(
                         containerColor = MaterialTheme.colorScheme.primary,
                         contentColor = MaterialTheme.colorScheme.onPrimary,
@@ -1589,7 +1645,10 @@ private fun ChatInputBar(
                                     Text(attachment.name, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                     Text(attachment.mimeType, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
-                                IconButton(onClick = { onAttachmentsChanged(attachments - attachment) }, modifier = Modifier.size(20.dp)) {
+                                IconButton(onClick = {
+                                    onAttachmentsChanged(attachments - attachment)
+                                    pickerHint = null
+                                }, modifier = Modifier.size(20.dp)) {
                                     Icon(Icons.Filled.Close, contentDescription = "Remove", modifier = Modifier.size(12.dp))
                                 }
                             }

@@ -302,8 +302,16 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch {
             providerRepository.setActiveProvider(id)
             val provider = providerRepository.getAllProviders().firstOrNull { it.id == id }
-            if (provider != null && !provider.isLocal && provider.models.isEmpty()) {
+            if (provider == null) return@launch
+            if (provider.isLocal) {
+                return@launch
+            }
+            if (provider.models.isEmpty()) {
                 refreshProviderModels(id)
+                return@launch
+            }
+            if (provider.activeModel == null && provider.models.isNotEmpty()) {
+                providerRepository.setActiveModel(id, provider.models.first().modelId)
             }
         }
     }
@@ -333,6 +341,12 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
+    fun setLocalLlamaGpuLayers(gpuLayers: Int) {
+        viewModelScope.launch {
+            appSettings.setLocalLlamaGpuLayers(gpuLayers)
+        }
+    }
+
     fun setProviderModelPath(id: ProviderId, modelPath: String) {
         viewModelScope.launch {
             val providers = providerRepository.getAllProviders()
@@ -355,6 +369,7 @@ class SettingsViewModel @Inject constructor(
     private suspend fun fetchModelsForProvider(provider: ProviderConfig, apiKey: String): ProviderConfig? {
         setModelFetchStatus(provider.id.value, "Fetching models...")
         com.kolo.agent.core.providers.ProviderConfigKeyStore[provider.id.value] = apiKey
+        val activeModelId = provider.activeModel?.modelId
         return try {
             val fetched = streamClient.fetchModels(provider)
                 .distinctBy { it.first }
@@ -369,7 +384,7 @@ class SettingsViewModel @Inject constructor(
                         ModelConfig(
                             modelId = id,
                             displayName = label?.takeIf { it.isNotBlank() && it != id },
-                            isActive = index == 0,
+                            isActive = id == activeModelId || (activeModelId == null && index == 0),
                         )
                     },
                     updatedAt = System.currentTimeMillis(),

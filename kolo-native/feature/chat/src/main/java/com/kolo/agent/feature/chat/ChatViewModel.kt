@@ -59,6 +59,7 @@ data class ChatUiState(
     val pendingApproval: ToolPermissionApproval? = null,
     val isRefreshingModels: Boolean = false,
     val modelFetchStatus: String? = null,
+    val activeProviderReadinessError: String? = null,
 )
 
 /**
@@ -107,24 +108,15 @@ class ChatViewModel @Inject constructor(
             loadChatList()
         }
         viewModelScope.launch {
-            providerRep.providersFlow.collect { providers ->
+            combine(providerRep.providersFlow, appSettings.localLlamaModelPath) { providers, localModelPath ->
                 val activeProvider = providers.firstOrNull { it.isActive }
-                if (activeProvider == null) {
-                    _uiState.update {
-                        it.copy(
-                            activeProvider = null,
-                            activeModel = null,
-                            activeProviderConfig = null,
-                            isRefreshingModels = false,
-                            modelFetchStatus = null,
-                        )
-                    }
-                }
+                val readinessError = evaluateProviderReadinessError(activeProvider, localModelPath)
                 _uiState.update {
                     it.copy(
                         activeProvider = activeProvider?.name,
                         activeModel = activeProvider?.displayModelName(),
                         activeProviderConfig = activeProvider,
+                        activeProviderReadinessError = readinessError,
                         isRefreshingModels = false,
                         modelFetchStatus = null,
                     )
@@ -282,6 +274,29 @@ class ChatViewModel @Inject constructor(
         approvalContinuation = null
     }
 
+    private fun evaluateProviderReadinessError(provider: ProviderConfig?, localModelPath: String?): String? {
+        if (provider == null) return "No provider configured"
+        if (provider.baseUrl.isBlank()) return "Provider endpoint is missing"
+
+        if (provider.isLocal) {
+            val effectiveModelPath = provider.modelPath.orEmpty().ifBlank { localModelPath.orEmpty() }
+            if (effectiveModelPath.isBlank()) {
+                return "Import or select a local GGUF model first."
+            }
+            val modelFile = File(effectiveModelPath)
+            return when {
+                !modelFile.exists() -> "Configured local model file does not exist"
+                !modelFile.isFile -> "Configured local model path is not a file"
+                else -> null
+            }
+        }
+
+        if (provider.activeModel == null) {
+            return "Remote provider has no model selected"
+        }
+        return null
+    }
+
     /** @deprecated Use [handleApprovalAction] instead for precise semantics. */
     fun approveTool(approval: ToolPermissionApproval) = handleApprovalAction(ToolApprovalAction.AlwaysAllow(approval))
 
@@ -382,9 +397,19 @@ class ChatViewModel @Inject constructor(
         }
     }
 
-    fun sendMessage(content: String, attachments: List<MessageAttachment> = emptyList()) {
+    fun sendMessage(
+        content: String,
+        attachments: List<MessageAttachment> = emptyList(),
+        onAccepted: (Boolean) -> Unit = {},
+    ) {
         if (content.isBlank() && attachments.isEmpty()) return
         if (_uiState.value.isStreaming) return
+        val readinessError = _uiState.value.activeProviderReadinessError
+        if (readinessError != null) {
+            _uiState.update { it.copy(error = readinessError) }
+            onAccepted(false)
+            return
+        }
         val chatId = currentChatId ?: run {
             val newId = newChat()
             currentChatId = newId
@@ -393,7 +418,19 @@ class ChatViewModel @Inject constructor(
 
         viewModelScope.launch {
             isCancelled = false
-            val stableAttachments = persistAttachments(attachments)
+            val persisted = persistAttachments(attachments)
+            if (persisted.failed.isNotEmpty()) {
+                _uiState.update {
+                    it.copy(
+                        error = "Unable to attach: ${persisted.failed.take(2).joinToString(", ")}" +
+                            if (persisted.failed.size > 2) " and ${persisted.failed.size - 2} more" else "",
+                    )
+                }
+                onAccepted(false)
+                return@launch
+            }
+
+            val stableAttachments = persisted.attachments
             if (chatDao.getById(chatId.value) == null) {
                 chatDao.upsert(Chat(id = chatId, folderId = _uiState.value.activeFolderId).toEntity())
             }
@@ -413,6 +450,7 @@ class ChatViewModel @Inject constructor(
                 error = null, activeToolCalls = emptyList(), toolResults = emptyMap(),
                 pendingApproval = null,
             )}
+            onAccepted(true)
 
             try {
                 val rawProvider = providerRep.getActiveProvider()
@@ -436,6 +474,13 @@ class ChatViewModel @Inject constructor(
                         throw IllegalStateException("No model selected and no models were returned by ${provider.effectiveModelsUrl}")
                     }
                     provider = refreshed
+                }
+                val providerReadyError = evaluateProviderReadinessError(
+                    provider,
+                    if (provider.isLocal) appSettings.localLlamaModelPath.first() else null,
+                )
+                if (providerReadyError != null) {
+                    throw IllegalStateException(providerReadyError)
                 }
 
                 val apiMessages = buildApiMessages(chatId, content, stableAttachments)
@@ -569,10 +614,16 @@ class ChatViewModel @Inject constructor(
         }
     }
 
-    private suspend fun persistAttachments(attachments: List<MessageAttachment>): List<MessageAttachment> = withContext(Dispatchers.IO) {
-        if (attachments.isEmpty()) return@withContext emptyList()
+    private data class PersistedAttachments(
+        val attachments: List<MessageAttachment>,
+        val failed: List<String>,
+    )
+
+    private suspend fun persistAttachments(attachments: List<MessageAttachment>): PersistedAttachments = withContext(Dispatchers.IO) {
+        if (attachments.isEmpty()) return@withContext PersistedAttachments(emptyList(), emptyList())
         val dir = File(androidContext.filesDir, "chat_attachments").apply { mkdirs() }
-        attachments.map { attachment ->
+        val failed = mutableListOf<String>()
+        val processed = attachments.mapNotNull { attachment ->
             try {
                 val uri = Uri.parse(attachment.uri)
                 if (uri.scheme == "file" && uri.path?.startsWith(dir.absolutePath) == true) {
@@ -582,13 +633,18 @@ class ChatViewModel @Inject constructor(
                     val target = File(dir, "${UUID.randomUUID()}-$safeName")
                     androidContext.contentResolver.openInputStream(uri)?.use { input ->
                         target.outputStream().use { output -> input.copyTo(output) }
-                    } ?: return@map attachment
+                    } ?: run {
+                        failed.add(attachment.name)
+                        return@mapNotNull null
+                    }
                     attachment.copy(uri = Uri.fromFile(target).toString(), sizeBytes = target.length())
                 }
             } catch (_: Exception) {
-                attachment
+                failed.add(attachment.name)
+                null
             }
         }
+        PersistedAttachments(processed, failed)
     }
 
     private fun firstChatTitle(content: String, attachments: List<MessageAttachment>): String {

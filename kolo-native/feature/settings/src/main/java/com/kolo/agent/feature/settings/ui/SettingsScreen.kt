@@ -54,18 +54,20 @@ fun SettingsScreen(
     onSetSkillEnabled: (String, Boolean) -> Unit,
     onSetTheme: (AppThemeMode) -> Unit = {},
     onSetLocalLlamaGpuMode: (Boolean) -> Unit = {},
+    onSetLocalLlamaGpuLayers: (Int) -> Unit = {},
     onSetShowTokenUsage: (Boolean) -> Unit = {},
     onNavigateLocalModels: () -> Unit = {},
     onNavigateBack: () -> Unit,
 ) {
     var selectedSection by remember { mutableStateOf<SettingsSection?>(null) }
+    val currentSection = selectedSection
 
     Scaffold(
         topBar = {
             TopAppBar(
                 title = {
                     Text(
-                        text = selectedSection?.title ?: "Settings",
+                        text = if (currentSection == null) "Settings" else "Settings / ${currentSection.title}",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.SemiBold,
                     )
@@ -108,6 +110,7 @@ fun SettingsScreen(
                     onSetProviderModelPath = onSetProviderModelPath,
                     onRefreshProviderModels = onRefreshProviderModels,
                     onSetLocalLlamaGpuMode = onSetLocalLlamaGpuMode,
+                    onSetLocalLlamaGpuLayers = onSetLocalLlamaGpuLayers,
                 )
                 SettingsSection.Tools -> ToolsSection(
                     toolPermissions = state.toolPermissions,
@@ -143,7 +146,15 @@ fun SettingsScreen(
                     onSetShowTokenUsage = onSetShowTokenUsage,
                 )
                 SettingsSection.About -> AboutSection(state.bridgeStatus)
-                null -> SettingsHome(onSectionSelected = { selectedSection = it }, onNavigateLocalModels = onNavigateLocalModels)
+                null -> SettingsHome(
+                    providers = state.providers,
+                    activeProviderId = state.activeProviderId,
+                    localLlamaModelPath = state.localLlamaModelPath,
+                    localGpuLayers = state.localLlamaGpuLayers,
+                    bridgeStatus = state.bridgeStatus,
+                    onSectionSelected = { selectedSection = it },
+                    onNavigateLocalModels = onNavigateLocalModels,
+                )
             }
         }
     }
@@ -152,12 +163,64 @@ fun SettingsScreen(
 // ──── Home ────
 
 @Composable
-private fun SettingsHome(onSectionSelected: (SettingsSection) -> Unit, onNavigateLocalModels: () -> Unit = {}) {
+private fun SettingsHome(
+    providers: List<ProviderConfig>,
+    activeProviderId: ProviderId?,
+    localLlamaModelPath: String,
+    localGpuLayers: Int,
+    bridgeStatus: LocalModelManager.BridgeStatus,
+    onSectionSelected: (SettingsSection) -> Unit,
+    onNavigateLocalModels: () -> Unit = {},
+) {
+    val activeProvider = providers.firstOrNull { it.id == activeProviderId }
     LazyColumn(
         modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
         verticalArrangement = Arrangement.spacedBy(0.dp),
         contentPadding = PaddingValues(vertical = 4.dp),
     ) {
+        item {
+            Card(
+                shape = MaterialTheme.shapes.small,
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Text("Status", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        "Active provider: ${activeProvider?.name ?: "None"}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (activeProvider == null) {
+                        Text("No provider is active. Add and select one to start.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    } else {
+                        Text(
+                            "Active model: ${activeProvider.activeModel?.label ?: "Not selected"}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    if (activeProvider?.isLocal == true) {
+                        Text(
+                            "Local runtime: " + when {
+                                bridgeStatus == LocalModelManager.BridgeStatus.Available -> "Ready"
+                                bridgeStatus == LocalModelManager.BridgeStatus.Unavailable -> "Unavailable"
+                                bridgeStatus == LocalModelManager.BridgeStatus.Checking -> "Checking"
+                                else -> "Unknown"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Text("GPU layers: $localGpuLayers", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        if (localLlamaModelPath.isNotBlank()) {
+                            Text("Local model path set", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(4.dp))
+        }
         item {
             SectionHeader("Providers & Models")
             SettingsItem(icon = Icons.Filled.Cloud, title = "Providers", subtitle = "API providers and models", onClick = { onSectionSelected(SettingsSection.Providers) })
@@ -169,7 +232,7 @@ private fun SettingsHome(onSectionSelected: (SettingsSection) -> Unit, onNavigat
             SettingsItem(icon = Icons.Filled.Extension, title = "Custom Tools", subtitle = "Author reusable agent tools", onClick = { onSectionSelected(SettingsSection.CustomTools) })
             SettingsItem(icon = Icons.Filled.AutoStories, title = "Skills", subtitle = "Reusable playbooks in prompts", onClick = { onSectionSelected(SettingsSection.Skills) })
             SettingsItem(icon = Icons.Filled.Psychology, title = "Memory", subtitle = "Agent memories", onClick = { onSectionSelected(SettingsSection.Memory) })
-            SettingsItem(icon = Icons.Filled.Rule, title = "Instructions", subtitle = "Custom system guidance", onClick = { onSectionSelected(SettingsSection.Instructions) })
+            SettingsItem(icon = Icons.Filled.AutoStories, title = "Instructions", subtitle = "Custom system guidance", onClick = { onSectionSelected(SettingsSection.Instructions) })
         }
         item {
             SectionHeader("App")
@@ -217,6 +280,7 @@ private fun ProvidersSection(
     onSetProviderModelPath: (ProviderId, String) -> Unit,
     onRefreshProviderModels: (ProviderId) -> Unit,
     onSetLocalLlamaGpuMode: (Boolean) -> Unit,
+    onSetLocalLlamaGpuLayers: (Int) -> Unit,
 ) {
     var showAddDialog by remember { mutableStateOf(false) }
     var expandedProvider by remember { mutableStateOf<ProviderId?>(null) }
@@ -248,6 +312,7 @@ private fun ProvidersSection(
                 onSetModelPath = { onSetProviderModelPath(provider.id, it) },
                 onRefreshModels = { onRefreshProviderModels(provider.id) },
                 onSetLocalLlamaGpuMode = onSetLocalLlamaGpuMode,
+                onSetLocalLlamaGpuLayers = onSetLocalLlamaGpuLayers,
                 existingProviderNames = existingProviderNames,
             )
         }
@@ -301,6 +366,7 @@ private fun ProviderCard(
     onSetModelPath: (String) -> Unit,
     onRefreshModels: () -> Unit,
     onSetLocalLlamaGpuMode: (Boolean) -> Unit,
+    onSetLocalLlamaGpuLayers: (Int) -> Unit,
     existingProviderNames: Set<String> = emptySet(),
 ) {
     var modelPathDraft by remember(provider.id, provider.modelPath) { mutableStateOf(provider.modelPath.orEmpty()) }
@@ -318,7 +384,9 @@ private fun ProviderCard(
     val filteredModels = provider.models.filter {
         modelSearch.isBlank() || it.label.contains(modelSearch, ignoreCase = true) || it.modelId.contains(modelSearch, ignoreCase = true)
     }
+    var gpuLayerDraft by remember(provider.id) { mutableStateOf(localGpuLayers) }
     var showEditDialog by remember { mutableStateOf(false) }
+    LaunchedEffect(localGpuLayers) { gpuLayerDraft = localGpuLayers }
     Card(onClick = onToggleExpand, colors = CardDefaults.cardColors(containerColor = if (isActive) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface), shape = MaterialTheme.shapes.small) {
         Column(modifier = Modifier.padding(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -342,25 +410,27 @@ private fun ProviderCard(
                     if (provider.isLocal) {
                         Spacer(Modifier.height(8.dp))
                         Text("Runtime", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            FilterChip(
-                                selected = localGpuLayers == 0,
-                                onClick = { onSetLocalLlamaGpuMode(false) },
-                                leadingIcon = { Icon(Icons.Filled.Memory, contentDescription = null, modifier = Modifier.size(16.dp)) },
-                                label = { Text("CPU") },
-                            )
-                            FilterChip(
-                                selected = localGpuLayers > 0,
-                                onClick = { onSetLocalLlamaGpuMode(true) },
-                                leadingIcon = { Icon(Icons.Filled.Speed, contentDescription = null, modifier = Modifier.size(16.dp)) },
-                                label = { Text("GPU") },
+                        Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
+                            Text("GPU offload layers", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(
+                                if (gpuLayerDraft <= 0) "CPU only" else "${gpuLayerDraft} layers",
+                                style = MaterialTheme.typography.labelSmall,
                             )
                         }
-                        Text(
-                            if (localGpuLayers > 0) "GPU uses Vulkan full-layer offload when the driver supports it. Switch back to CPU if a model is slow or unstable."
-                            else "CPU keeps llama.cpp fully on processor cores.",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        Slider(
+                            value = gpuLayerDraft.toFloat(),
+                            onValueChange = { gpuLayerDraft = it.toInt().coerceIn(0, 64) },
+                            valueRange = 0f..64f,
+                            steps = 63,
+                            onValueChangeFinished = {
+                                if (gpuLayerDraft <= 0) {
+                                    onSetLocalLlamaGpuMode(false)
+                                    onSetLocalLlamaGpuLayers(0)
+                                } else {
+                                    onSetLocalLlamaGpuMode(true)
+                                    onSetLocalLlamaGpuLayers(gpuLayerDraft)
+                                }
+                            },
                         )
                         Spacer(Modifier.height(8.dp))
                         // Show active inherited model or manual override status
@@ -860,6 +930,19 @@ private fun CustomToolsSection(
     onDelete: (String) -> Unit,
     onEdit: (CustomToolDef) -> Unit,
 ) {
+    var query by remember { mutableStateOf("") }
+    val filteredTools = remember(tools, query) {
+        val normalized = query.trim().lowercase()
+        if (normalized.isBlank()) {
+            tools
+        } else {
+            tools.filter { tool ->
+                tool.name.lowercase().contains(normalized) ||
+                    tool.description.lowercase().contains(normalized) ||
+                    tool.kind.name.lowercase().contains(normalized)
+            }
+        }
+    }
     var showDialog by remember { mutableStateOf(false) }
     var selectedTool by remember { mutableStateOf<CustomToolDef?>(null) }
     var pendingDeleteTool by remember { mutableStateOf<CustomToolDef?>(null) }
@@ -880,10 +963,20 @@ private fun CustomToolsSection(
                 }
             }
         }
+        item {
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it },
+                label = { Text("Search custom tools") },
+                singleLine = true,
+                placeholder = { Text("Search by name, description, type") },
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
         if (tools.isEmpty()) {
             item { Text("No custom tools yet.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         }
-        items(tools, key = { it.id.value }) { tool ->
+        items(filteredTools, key = { it.id.value }) { tool ->
             ListItem(
                 headlineContent = { Text(tool.name, fontWeight = FontWeight.SemiBold) },
                 supportingContent = { Text("${tool.kind.name} / ${tool.permission.name} - ${tool.description}", maxLines = 2, overflow = TextOverflow.Ellipsis) },
@@ -902,6 +995,9 @@ private fun CustomToolsSection(
                     }
                 },
             )
+        }
+        if (filteredTools.isEmpty() && query.isNotBlank()) {
+            item { Text("No tools match \"$query\".", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         }
     }
     if (showDialog) {
@@ -1226,7 +1322,17 @@ private fun MemorySection(memories: List<Memory>, onAdd: (String, String) -> Uni
         items(memories, key = { it.id.value }) { memory ->
             Card(shape = MaterialTheme.shapes.small, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                 Row(Modifier.padding(horizontal = 10.dp, vertical = 6.dp), verticalAlignment = Alignment.Top) {
-                    Icon(when (memory.kind) { "fact" -> Icons.Filled.Lightbulb; "preference" -> Icons.Filled.Favorite; "instruction" -> Icons.Filled.Rule; else -> Icons.Filled.Memory }, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
+                    Icon(
+                        when (memory.kind) {
+                            "fact" -> Icons.Filled.Lightbulb
+                            "preference" -> Icons.Filled.Favorite
+                            "instruction" -> Icons.Filled.AutoStories
+                            else -> Icons.Filled.Memory
+                        },
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(16.dp),
+                    )
                     Spacer(Modifier.width(6.dp))
                     Column(Modifier.weight(1f)) { Text(memory.kind.replaceFirstChar { it.uppercase() }, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary); Text(memory.content, style = MaterialTheme.typography.bodySmall) }
                     IconButton(onClick = { onDelete(memory.id.value) }, modifier = Modifier.size(20.dp)) { Icon(Icons.Filled.Close, contentDescription = "Delete", modifier = Modifier.size(12.dp), tint = MaterialTheme.colorScheme.error) }

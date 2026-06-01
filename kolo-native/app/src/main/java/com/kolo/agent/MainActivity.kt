@@ -44,7 +44,7 @@ fun KoloNavApp() {
             val state by chatViewModel.uiState.collectAsState()
             ChatScreen(
                 state = state,
-                onSendMessage = { text, attachments -> chatViewModel.sendMessage(text, attachments) },
+                onSendMessage = { text, attachments, onAccepted -> chatViewModel.sendMessage(text, attachments, onAccepted) },
                 onCancel = { chatViewModel.cancelGeneration() },
                 onClearError = { chatViewModel.clearError() },
                 onSelectChat = { chatViewModel.loadChat(it) },
@@ -89,6 +89,7 @@ fun KoloNavApp() {
                 onSetSkillEnabled = { id, enabled -> settingsViewModel.setSkillEnabled(id, enabled) },
                 onSetTheme = { mode -> settingsViewModel.setThemeMode(mode) },
                 onSetLocalLlamaGpuMode = { useGpu -> settingsViewModel.setLocalLlamaGpuMode(useGpu) },
+                onSetLocalLlamaGpuLayers = { layers -> settingsViewModel.setLocalLlamaGpuLayers(layers) },
                 onSetShowTokenUsage = { enabled -> settingsViewModel.setShowTokenUsage(enabled) },
                 onNavigateLocalModels = { navController.navigate("local_models") },
                 onNavigateBack = { navController.popBackStack() },

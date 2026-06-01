@@ -87,7 +87,19 @@ class ProviderRepository(
         secureKeyStore.deleteApiKey(id.value)
         ProviderConfigKeyStore.remove(id.value)
         val providers = getAllProviders().filter { it.id != id }
-        writeProviders(providers)
+        if (providers.isEmpty()) {
+            writeProviders(emptyList())
+            return
+        }
+        val noActiveLeft = providers.none { it.isActive }
+        val normalized = if (noActiveLeft) {
+            providers.mapIndexed { index, config ->
+                if (index == 0) config.copy(isActive = true) else config.copy(isActive = false)
+            }
+        } else {
+            providers
+        }
+        writeProviders(normalized)
     }
 
     suspend fun setActiveProvider(id: ProviderId) {
