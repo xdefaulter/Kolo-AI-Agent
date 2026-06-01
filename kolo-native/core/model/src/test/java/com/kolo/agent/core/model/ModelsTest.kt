@@ -102,6 +102,11 @@ class ModelsTest {
         assertTrue(ProviderPresets.defaults.any { it.name == "OpenAI" })
         assertTrue(ProviderPresets.defaults.any { it.name == "Groq" })
         assertTrue(ProviderPresets.defaults.any { it.name == "Ollama (Local)" })
+        assertTrue(ProviderPresets.defaults.any { provider ->
+            provider.name == "Ollama Cloud" &&
+                provider.models.any { it.modelId == "glm-5.1" } &&
+                provider.models.none { it.modelId.endsWith(":cloud") }
+        })
     }
 
     @Test

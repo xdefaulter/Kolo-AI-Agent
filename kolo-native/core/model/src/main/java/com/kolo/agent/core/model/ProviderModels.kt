@@ -198,10 +198,10 @@ object ProviderPresets {
             baseUrl = "https://ollama.com/v1",
             modelsEndpoint = "https://ollama.com/v1/models",
             models = listOf(
-                ModelConfig(modelId = "glm-5.1:cloud", displayName = "GLM 5.1 Cloud", maxTokens = 4096, contextWindow = 128000, description = "Zhipu GLM 5.1 via Ollama Cloud"),
-                ModelConfig(modelId = "kimi-k2.6", displayName = "Kimi K2.6", maxTokens = 4096, contextWindow = 128000, description = "Moonshot Kimi K2.6"),
+                ModelConfig(modelId = "glm-5.1", displayName = "GLM 5.1", maxTokens = 4096, contextWindow = 128000, description = "Zhipu GLM 5.1 via Ollama Cloud"),
+                ModelConfig(modelId = "kimi-k2-thinking", displayName = "Kimi K2 Thinking", maxTokens = 4096, contextWindow = 128000, description = "Moonshot Kimi K2 Thinking"),
                 ModelConfig(modelId = "deepseek-v3.2", displayName = "DeepSeek V3.2", maxTokens = 4096, contextWindow = 128000, description = "DeepSeek V3.2"),
-                ModelConfig(modelId = "qwen3.5:397b", displayName = "Qwen 3.5 397B", maxTokens = 4096, contextWindow = 128000, description = "Alibaba Qwen 3.5"),
+                ModelConfig(modelId = "qwen3.5:397b", displayName = "Qwen 3.5 397B", maxTokens = 4096, contextWindow = 128000, description = "Alibaba Qwen 3.5 397B"),
             ),
         ),
         ProviderConfig(

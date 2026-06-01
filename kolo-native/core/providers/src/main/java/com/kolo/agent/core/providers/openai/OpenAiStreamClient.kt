@@ -168,25 +168,35 @@ class OpenAiStreamClient(
 
         val response = client.newCall(requestBuilder.build()).execute()
         val body = response.use { result ->
-            if (!result.isSuccessful) return@withContext emptyList()
-            result.body?.string() ?: return@withContext emptyList()
+            val responseBody = result.body?.string().orEmpty()
+            if (!result.isSuccessful) {
+                val detail = responseBody.take(200).ifBlank { result.message }
+                throw IllegalStateException("HTTP ${result.code} from ${config.effectiveModelsUrl}: $detail")
+            }
+            responseBody.ifBlank { return@withContext emptyList() }
         }
 
-        return@withContext try {
+        return@withContext parseModelListResponse(body)
+    }
+
+    internal fun parseModelListResponse(body: String): List<Pair<String, String?>> {
+        return try {
             val root = json.parseToJsonElement(body).jsonObject
             val modelsArray = root["data"]?.jsonArray
                 ?: root["models"]?.jsonArray
-                ?: return@withContext emptyList()
+                ?: return emptyList()
             modelsArray.mapNotNull { element ->
                 val obj = element.jsonObject
                 val name = obj["name"]?.jsonPrimitive?.contentOrNull
+                val model = obj["model"]?.jsonPrimitive?.contentOrNull
                 val id = obj["id"]?.jsonPrimitive?.contentOrNull
+                    ?: model
                     ?: name
                     ?: return@mapNotNull null
                 val displayName = obj["displayName"]?.jsonPrimitive?.contentOrNull
                     ?: obj["display_name"]?.jsonPrimitive?.contentOrNull
-                val ownedBy = obj["owned_by"]?.jsonPrimitive?.contentOrNull
-                id to (displayName ?: name?.takeIf { it != id } ?: ownedBy)
+                    ?: name?.takeIf { it != id }
+                id to displayName
             }
         } catch (_: Exception) {
             emptyList()
