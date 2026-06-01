@@ -17,6 +17,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import java.text.DateFormat
+import java.util.Date
 import com.kolo.agent.core.model.*
 import com.kolo.agent.core.model.ToolPermission
 import com.kolo.agent.core.providers.local.LocalModelManager
@@ -24,6 +26,8 @@ import com.kolo.agent.feature.settings.*
 import java.net.MalformedURLException
 import java.io.File
 import java.net.URL
+import android.os.Build
+import android.content.pm.PackageManager
 import java.util.UUID
 import androidx.compose.ui.platform.LocalContext
 import android.content.Intent
@@ -60,6 +64,7 @@ fun SettingsScreen(
     onNavigateBack: () -> Unit,
 ) {
     var selectedSection by remember { mutableStateOf<SettingsSection?>(null) }
+    var homeSearch by remember { mutableStateOf("") }
     val currentSection = selectedSection
 
     Scaffold(
@@ -152,6 +157,8 @@ fun SettingsScreen(
                     localLlamaModelPath = state.localLlamaModelPath,
                     localGpuLayers = state.localLlamaGpuLayers,
                     bridgeStatus = state.bridgeStatus,
+                    sectionSearch = homeSearch,
+                    onSectionSearch = { homeSearch = it },
                     onSectionSelected = { selectedSection = it },
                     onNavigateLocalModels = onNavigateLocalModels,
                 )
@@ -169,10 +176,38 @@ private fun SettingsHome(
     localLlamaModelPath: String,
     localGpuLayers: Int,
     bridgeStatus: LocalModelManager.BridgeStatus,
+    sectionSearch: String,
+    onSectionSearch: (String) -> Unit,
     onSectionSelected: (SettingsSection) -> Unit,
     onNavigateLocalModels: () -> Unit = {},
 ) {
     val activeProvider = providers.firstOrNull { it.id == activeProviderId }
+    val normalizedSearch = sectionSearch.trim().lowercase()
+    val sectionMatch = { text: String ->
+        normalizedSearch.isBlank() || text.lowercase().contains(normalizedSearch)
+    }
+    val providerSections = listOf(
+        "Providers" to SettingsSection.Providers,
+        "Local Models" to null,
+    )
+    val toolsSections = listOf(
+        "Tool Permissions" to SettingsSection.Tools,
+        "Custom Tools" to SettingsSection.CustomTools,
+        "Skills" to SettingsSection.Skills,
+        "Memory" to SettingsSection.Memory,
+        "Instructions" to SettingsSection.Instructions,
+    )
+    val appSections = listOf(
+        "Phone Control" to SettingsSection.PhoneControl,
+        "Appearance" to SettingsSection.Appearance,
+        "About" to SettingsSection.About,
+    )
+    val visibleProviderItems = providerSections.filter { (label, _) -> sectionMatch(label) }
+    val visibleToolsItems = toolsSections.filter { (label, _) -> sectionMatch(label) }
+    val visibleAppItems = appSections.filter { (label, _) -> sectionMatch(label) }
+    val showProvidersSection = visibleProviderItems.isNotEmpty() || sectionMatch("Providers") || sectionMatch("Local Models") || normalizedSearch.isBlank()
+    val showToolsSection = visibleToolsItems.isNotEmpty() || sectionMatch("Tools")
+    val showAppSection = visibleAppItems.isNotEmpty() || sectionMatch("App")
     LazyColumn(
         modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
         verticalArrangement = Arrangement.spacedBy(0.dp),
@@ -222,23 +257,93 @@ private fun SettingsHome(
             Spacer(modifier = Modifier.height(4.dp))
         }
         item {
-            SectionHeader("Providers & Models")
-            SettingsItem(icon = Icons.Filled.Cloud, title = "Providers", subtitle = "API providers and models", onClick = { onSectionSelected(SettingsSection.Providers) })
-            SettingsItem(icon = Icons.Filled.Memory, title = "Local Models", subtitle = "Import & manage GGUF models", onClick = onNavigateLocalModels)
+            OutlinedTextField(
+                value = sectionSearch,
+                onValueChange = onSectionSearch,
+                label = { Text("Search settings sections") },
+                placeholder = { Text("Providers, tools, memory...") },
+                trailingIcon = {
+                    if (sectionSearch.isNotBlank()) {
+                        IconButton(onClick = { onSectionSearch("") }) {
+                            Icon(Icons.Filled.Close, contentDescription = "Clear search")
+                        }
+                    }
+                },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
         }
+        if (showProvidersSection) {
+            item {
+                SectionHeader("Providers & Models")
+                visibleProviderItems.forEach { item ->
+                    val title = item.first
+                    val section = item.second
+                    SettingsItem(
+                        icon = if (title == "Providers") Icons.Filled.Cloud else Icons.Filled.Memory,
+                        title = title,
+                        subtitle = if (title == "Providers") "API providers and models" else "Import & manage GGUF models",
+                        onClick = { if (section == null) onNavigateLocalModels() else onSectionSelected(section) },
+                    )
+                }
+                if (visibleProviderItems.isEmpty() && normalizedSearch.isBlank()) {
+                    SettingsItem(icon = Icons.Filled.Cloud, title = "Providers", subtitle = "API providers and models", onClick = { onSectionSelected(SettingsSection.Providers) })
+                    SettingsItem(icon = Icons.Filled.Memory, title = "Local Models", subtitle = "Import & manage GGUF models", onClick = onNavigateLocalModels)
+                }
+            }
+        }
+        if (showToolsSection) {
         item {
             SectionHeader("Agent")
-            SettingsItem(icon = Icons.Filled.Build, title = "Tool Permissions", subtitle = "Which tools the agent can use", onClick = { onSectionSelected(SettingsSection.Tools) })
-            SettingsItem(icon = Icons.Filled.Extension, title = "Custom Tools", subtitle = "Author reusable agent tools", onClick = { onSectionSelected(SettingsSection.CustomTools) })
-            SettingsItem(icon = Icons.Filled.AutoStories, title = "Skills", subtitle = "Reusable playbooks in prompts", onClick = { onSectionSelected(SettingsSection.Skills) })
-            SettingsItem(icon = Icons.Filled.Psychology, title = "Memory", subtitle = "Agent memories", onClick = { onSectionSelected(SettingsSection.Memory) })
-            SettingsItem(icon = Icons.Filled.AutoStories, title = "Instructions", subtitle = "Custom system guidance", onClick = { onSectionSelected(SettingsSection.Instructions) })
+            visibleToolsItems.forEach { item ->
+                val title = item.first
+                val section = item.second
+                SettingsItem(
+                    icon = when (title) {
+                        "Tool Permissions" -> Icons.Filled.Build
+                        "Custom Tools" -> Icons.Filled.Extension
+                        "Skills" -> Icons.Filled.AutoStories
+                        "Memory" -> Icons.Filled.Psychology
+                        else -> Icons.Filled.AutoStories
+                    },
+                    title = title,
+                    subtitle = when (title) {
+                        "Tool Permissions" -> "Which tools the agent can use"
+                        "Custom Tools" -> "Author reusable agent tools"
+                        "Skills" -> "Reusable playbooks in prompts"
+                        "Memory" -> "Agent memories"
+                        else -> "Custom system guidance"
+                    },
+                    onClick = { onSectionSelected(section) },
+                )
+            }
         }
+        }
+        if (showAppSection) {
         item {
             SectionHeader("App")
-            SettingsItem(icon = Icons.Filled.PhoneAndroid, title = "Phone Control", subtitle = "Accessibility service & overlay", onClick = { onSectionSelected(SettingsSection.PhoneControl) })
-            SettingsItem(icon = Icons.Filled.Palette, title = "Appearance", subtitle = "Theme, colors", onClick = { onSectionSelected(SettingsSection.Appearance) })
-            SettingsItem(icon = Icons.Filled.Info, title = "About", subtitle = "Version, diagnostics", onClick = { onSectionSelected(SettingsSection.About) })
+            visibleAppItems.forEach { item ->
+                val title = item.first
+                val section = item.second
+                SettingsItem(
+                    icon = when (section) {
+                        SettingsSection.PhoneControl -> Icons.Filled.PhoneAndroid
+                        SettingsSection.Appearance -> Icons.Filled.Palette
+                        else -> Icons.Filled.Info
+                    },
+                    title = title,
+                    subtitle = when (section) {
+                        SettingsSection.PhoneControl -> "Accessibility service & overlay"
+                        SettingsSection.Appearance -> "Theme, colors"
+                        else -> "Version, diagnostics"
+                    },
+                    onClick = { onSectionSelected(section) },
+                )
+            }
+        }
+        }
+        if (normalizedSearch.isNotBlank() && visibleProviderItems.isEmpty() && visibleToolsItems.isEmpty() && visibleAppItems.isEmpty()) {
+            item { Text("No settings sections match \"$sectionSearch\".", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(12.dp)) }
         }
     }
 }
@@ -1330,18 +1435,70 @@ private fun MemorySection(memories: List<Memory>, onAdd: (String, String) -> Uni
     var showAddDialog by remember { mutableStateOf(false) }
     var addContent by remember { mutableStateOf("") }
     var addKind by remember { mutableStateOf("fact") }
+    var query by remember { mutableStateOf("") }
+    var kindFilter by remember { mutableStateOf("All") }
+    var pendingDeleteMemory by remember { mutableStateOf<Memory?>(null) }
+    val normalizedQuery = query.trim().lowercase()
+    val availableKinds = remember(memories) { listOf("All") + memories.map { it.kind }.distinct().sorted() }
+    val filteredMemories = remember(memories, normalizedQuery, kindFilter) {
+        memories.filter { memory ->
+            val matchesKind = kindFilter == "All" || memory.kind == kindFilter
+            val matchesQuery = normalizedQuery.isBlank() ||
+                memory.content.lowercase().contains(normalizedQuery) ||
+                memory.kind.lowercase().contains(normalizedQuery)
+            matchesKind && matchesQuery
+        }
+    }
     LazyColumn(modifier = Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         item {
             Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
-                Column { Text("Agent Memory", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold); Text("${memories.size} memories", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                Column { Text("Agent Memory", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold); Text("${filteredMemories.size} of ${memories.size} memories", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                 FilledTonalButton(onClick = { showAddDialog = true }, contentPadding = PaddingValues(horizontal = 10.dp)) { Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(16.dp)); Spacer(Modifier.width(4.dp)); Text("Add", style = MaterialTheme.typography.labelMedium) }
             }
             Spacer(Modifier.height(6.dp))
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it },
+                label = { Text("Search memories") },
+                placeholder = { Text("Search by text or kind") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(Modifier.height(6.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                availableKinds.forEach { kind ->
+                    FilterChip(
+                        selected = kindFilter == kind,
+                        onClick = { kindFilter = kind },
+                        label = { Text(kind.replaceFirstChar { if (it.isLowerCase()) it.uppercaseChar() else it }) },
+                    )
+                }
+            }
+            Spacer(Modifier.height(6.dp))
         }
-        if (memories.isEmpty()) {
-            item { Column(Modifier.fillMaxWidth().padding(vertical = 16.dp), horizontalAlignment = Alignment.CenterHorizontally) { Icon(Icons.Filled.Psychology, contentDescription = null, modifier = Modifier.size(36.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)); Spacer(Modifier.height(4.dp)); Text("No memories yet", style = MaterialTheme.typography.bodyMedium); Text("The agent will remember details from conversations.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) } }
+        if (filteredMemories.isEmpty()) {
+            item {
+                if (memories.isEmpty()) {
+                    Column(Modifier.fillMaxWidth().padding(vertical = 16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(Icons.Filled.Psychology, contentDescription = null, modifier = Modifier.size(36.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f))
+                        Spacer(Modifier.height(4.dp))
+                        Text("No memories yet", style = MaterialTheme.typography.bodyMedium)
+                        Text("The agent will remember details from conversations.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                } else {
+                    Column(Modifier.fillMaxWidth().padding(vertical = 16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("No memories match", style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            if (query.isNotBlank()) "Try a different search term." else "No memories for selected kind.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
         }
-        items(memories, key = { it.id.value }) { memory ->
+        items(filteredMemories, key = { it.id.value }) { memory ->
+            val updatedLabel = remember(memory.updatedAt) { DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(memory.updatedAt)) }
             Card(shape = MaterialTheme.shapes.small, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                 Row(Modifier.padding(horizontal = 10.dp, vertical = 6.dp), verticalAlignment = Alignment.Top) {
                     Icon(
@@ -1356,8 +1513,12 @@ private fun MemorySection(memories: List<Memory>, onAdd: (String, String) -> Uni
                         modifier = Modifier.size(16.dp),
                     )
                     Spacer(Modifier.width(6.dp))
-                    Column(Modifier.weight(1f)) { Text(memory.kind.replaceFirstChar { it.uppercase() }, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary); Text(memory.content, style = MaterialTheme.typography.bodySmall) }
-                    IconButton(onClick = { onDelete(memory.id.value) }, modifier = Modifier.size(20.dp)) { Icon(Icons.Filled.Close, contentDescription = "Delete", modifier = Modifier.size(12.dp), tint = MaterialTheme.colorScheme.error) }
+                    Column(Modifier.weight(1f)) {
+                        Text(memory.kind.replaceFirstChar { if (it.isLowerCase()) it.uppercaseChar() else it }, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                        Text(memory.content, style = MaterialTheme.typography.bodySmall)
+                        Text("Updated $updatedLabel", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    IconButton(onClick = { pendingDeleteMemory = memory }, modifier = Modifier.size(20.dp)) { Icon(Icons.Filled.Close, contentDescription = "Delete", modifier = Modifier.size(12.dp), tint = MaterialTheme.colorScheme.error) }
                 }
             }
         }
@@ -1405,6 +1566,23 @@ private fun MemorySection(memories: List<Memory>, onAdd: (String, String) -> Uni
             },
         )
     }
+    pendingDeleteMemory?.let { memory ->
+        AlertDialog(
+            onDismissRequest = { pendingDeleteMemory = null },
+            title = { Text("Delete Memory") },
+            text = { Text("Delete selected memory? This action cannot be undone.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onDelete(memory.id.value)
+                        pendingDeleteMemory = null
+                    },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                ) { Text("Delete") }
+            },
+            dismissButton = { TextButton(onClick = { pendingDeleteMemory = null }) { Text("Cancel") } },
+        )
+    }
 }
 
 // ──── Instructions ────
@@ -1415,10 +1593,16 @@ private fun InstructionsSection(
     onSave: (String) -> Unit,
 ) {
     var draft by remember(customInstructions) { mutableStateOf(customInstructions) }
+    var showDiscardConfirm by remember { mutableStateOf(false) }
+    var showClearConfirm by remember { mutableStateOf(false) }
+    val hasUnsavedChanges = draft.trim() != customInstructions.trim()
     LazyColumn(modifier = Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         item {
             Text("Custom Instructions", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
             Text("These instructions are added to every chat turn.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (hasUnsavedChanges) {
+                Text("Unsaved changes", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
+            }
         }
         item {
             OutlinedTextField(
@@ -1434,14 +1618,21 @@ private fun InstructionsSection(
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FilledTonalButton(
                     onClick = { onSave(draft) },
-                    enabled = draft.trim() != customInstructions.trim(),
+                    enabled = hasUnsavedChanges,
                 ) {
                     Text("Save")
                 }
+                if (hasUnsavedChanges) {
+                    OutlinedButton(
+                        onClick = { showDiscardConfirm = true },
+                    ) {
+                        Text("Discard")
+                    }
+                }
                 OutlinedButton(
                     onClick = {
-                        draft = ""
-                        onSave("")
+                        if (customInstructions.isBlank() && draft.isBlank()) return@OutlinedButton
+                        showClearConfirm = true
                     },
                     enabled = customInstructions.isNotBlank() || draft.isNotBlank(),
                 ) {
@@ -1449,6 +1640,42 @@ private fun InstructionsSection(
                 }
             }
         }
+    }
+    if (showDiscardConfirm) {
+        AlertDialog(
+            onDismissRequest = { showDiscardConfirm = false },
+            title = { Text("Discard instructions changes") },
+            text = { Text("Discard unsaved instruction edits?") },
+            confirmButton = {
+                TextButton(onClick = {
+                    draft = customInstructions
+                    showDiscardConfirm = false
+                }) { Text("Discard") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDiscardConfirm = false }) { Text("Cancel") }
+            },
+        )
+    }
+    if (showClearConfirm) {
+        AlertDialog(
+            onDismissRequest = { showClearConfirm = false },
+            title = { Text("Clear custom instructions") },
+            text = { Text("This will remove all saved instructions and cannot be undone.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        draft = ""
+                        onSave("")
+                        showClearConfirm = false
+                    },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                ) { Text("Clear") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showClearConfirm = false }) { Text("Cancel") }
+            },
+        )
     }
 }
 
@@ -1574,8 +1801,24 @@ private fun ThemeOptionButton(label: String, mode: AppThemeMode, current: AppThe
 
 @Composable
 private fun AboutSection(bridgeStatus: LocalModelManager.BridgeStatus = LocalModelManager.BridgeStatus.Unknown) {
+    val context = LocalContext.current
+    val packageInfo = remember(context.packageName) {
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                context.packageManager.getPackageInfo(
+                    context.packageName,
+                    PackageManager.PackageInfoFlags.of(0L),
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                context.packageManager.getPackageInfo(context.packageName, 0)
+            }
+        }.getOrNull()
+    }
+    val appVersionName = packageInfo?.versionName ?: "Unknown"
+    val appPackageName = packageInfo?.packageName ?: context.packageName
     LazyColumn(modifier = Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        item { Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) { Icon(Icons.Filled.SmartToy, contentDescription = null, modifier = Modifier.size(36.dp), tint = MaterialTheme.colorScheme.primary); Spacer(Modifier.height(4.dp)); Text("Kolo AI Agent", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold); Text("v1.0.0 (Native)", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) } }
+        item { Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) { Icon(Icons.Filled.SmartToy, contentDescription = null, modifier = Modifier.size(36.dp), tint = MaterialTheme.colorScheme.primary); Spacer(Modifier.height(4.dp)); Text("Kolo AI Agent", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold); Text("$appVersionName (${appPackageName})", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) } }
         item { HorizontalDivider() }
         item { Card(shape = MaterialTheme.shapes.small) { Column(Modifier.padding(10.dp)) { Text("What Works", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold); Spacer(Modifier.height(4.dp)); Text("\u2022 OpenAI-compatible streaming chat with tool use", style = MaterialTheme.typography.bodySmall); Text("\u2022 Tool permission gating (allow once / always / deny / block)", style = MaterialTheme.typography.bodySmall); Text("\u2022 Room-backed memory system", style = MaterialTheme.typography.bodySmall); Text("\u2022 Phone control with session safety \u0026 system overlay", style = MaterialTheme.typography.bodySmall); Text("\u2022 Chat list drawer for switching conversations", style = MaterialTheme.typography.bodySmall); Text("\u2022 Web search via DuckDuckGo (no API key needed)", style = MaterialTheme.typography.bodySmall); Text("\u2022 Theme switching (system / light / dark via DataStore)", style = MaterialTheme.typography.bodySmall); Text("\u2022 Local model import \u0026 management via file picker", style = MaterialTheme.typography.bodySmall); Text("\u2022 llama.cpp ${if (bridgeStatus == LocalModelManager.BridgeStatus.Available) "runtime available" else "bridge built but runtime not loaded"}", style = MaterialTheme.typography.bodySmall, color = if (bridgeStatus == LocalModelManager.BridgeStatus.Available) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.tertiary) } } }
         item { Card(shape = MaterialTheme.shapes.small) { Column(Modifier.padding(10.dp)) { Text("Partially Integrated", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.tertiary); Spacer(Modifier.height(4.dp)); Text("\u2022 Pixel screenshot \u2014 working on Android 11+ with active phone-control session; needs device verification", style = MaterialTheme.typography.bodySmall) } } }
