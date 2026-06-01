@@ -274,6 +274,13 @@ class ChatViewModel @Inject constructor(
         approvalContinuation = null
     }
 
+    fun clearPendingApproval() {
+        _uiState.update { it.copy(pendingApproval = null) }
+        val continuation = approvalContinuation
+        approvalContinuation = null
+        continuation?.resume(false)
+    }
+
     private fun evaluateProviderReadinessError(provider: ProviderConfig?, localModelPath: String?): String? {
         if (provider == null) return "No provider configured"
         if (provider.baseUrl.isBlank()) return "Provider endpoint is missing"
@@ -402,7 +409,10 @@ class ChatViewModel @Inject constructor(
         attachments: List<MessageAttachment> = emptyList(),
         onAccepted: (Boolean) -> Unit = {},
     ) {
-        if (content.isBlank() && attachments.isEmpty()) return
+        if (content.isBlank() && attachments.isEmpty()) {
+            onAccepted(false)
+            return
+        }
         if (_uiState.value.isStreaming) return
         val readinessError = _uiState.value.activeProviderReadinessError
         if (readinessError != null) {
@@ -417,7 +427,6 @@ class ChatViewModel @Inject constructor(
         }
 
         viewModelScope.launch {
-            var draftAccepted = false
             isCancelled = false
             val persisted = persistAttachments(attachments)
             if (persisted.failed.isNotEmpty()) {
@@ -495,6 +504,8 @@ class ChatViewModel @Inject constructor(
                 )
                 val fullMessages = listOf(ApiMessage(role = "system", content = systemPrompt)) + apiMessages
 
+                onAccepted(true)
+
                 val agentLoop = AgentLoop(
                     client = streamClient,
                     toolRegistry = toolRegistry,
@@ -510,9 +521,6 @@ class ChatViewModel @Inject constructor(
                         suspendCancellableCoroutine { cont -> approvalContinuation = cont }
                     },
                 )
-
-                draftAccepted = true
-                onAccepted(true)
                 agentLoop.run(config = provider, messages = fullMessages, chatId = chatId.value).collect { event ->
                     if (isCancelled) return@collect
                     when (event) {
@@ -543,9 +551,7 @@ class ChatViewModel @Inject constructor(
                 }
                 loadChatList()
             } catch (e: Exception) {
-                if (!draftAccepted) {
-                    onAccepted(false)
-                }
+                onAccepted(false)
                 _uiState.update { it.copy(error = e.message, isStreaming = false, isLoading = false) }
             }
         }

@@ -65,6 +65,7 @@ fun KoloNavApp() {
                 onAlwaysAllow = { chatViewModel.handleApprovalAction(ToolApprovalAction.AlwaysAllow(it)) },
                 onDenyOnce = { chatViewModel.handleApprovalAction(ToolApprovalAction.DenyOnce(it)) },
                 onBlock = { chatViewModel.handleApprovalAction(ToolApprovalAction.Block(it)) },
+                onClearPendingApproval = { chatViewModel.clearPendingApproval() },
             )
         }
         composable("settings") {

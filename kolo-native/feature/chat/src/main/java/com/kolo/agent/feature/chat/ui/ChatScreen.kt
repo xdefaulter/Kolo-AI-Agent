@@ -8,6 +8,7 @@ import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
@@ -23,6 +24,8 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -74,6 +77,7 @@ fun ChatScreen(
     onAlwaysAllow: (ToolPermissionApproval) -> Unit = {},
     onDenyOnce: (ToolPermissionApproval) -> Unit = {},
     onBlock: (ToolPermissionApproval) -> Unit = {},
+    onClearPendingApproval: () -> Unit = {},
 ) {
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
@@ -119,7 +123,7 @@ fun ChatScreen(
             onOpenDrawer = { scope.launch { drawerState.open() } },
             onNavigateSettings = onNavigateSettings,
             onNavigateLocalModels = onNavigateLocalModels,
-            providerReadinessError = state.activeProviderReadinessError,
+            sendDisabledReason = state.activeProviderReadinessError,
             onSetActiveModel = onSetActiveModel,
             onRefreshActiveModels = onRefreshActiveModels,
             onUsePromptTemplate = onUsePromptTemplate,
@@ -127,6 +131,7 @@ fun ChatScreen(
             onAlwaysAllow = onAlwaysAllow,
             onDenyOnce = onDenyOnce,
             onBlock = onBlock,
+            onClearPendingApproval = onClearPendingApproval,
         )
     }
 }
@@ -492,7 +497,7 @@ private fun ChatContent(
     onOpenDrawer: () -> Unit,
     onNavigateSettings: () -> Unit,
     onNavigateLocalModels: () -> Unit,
-    providerReadinessError: String?,
+    sendDisabledReason: String?,
     onSetActiveModel: (String) -> Unit,
     onRefreshActiveModels: () -> Unit,
     onUsePromptTemplate: (TemplateId) -> Unit,
@@ -500,12 +505,21 @@ private fun ChatContent(
     onAlwaysAllow: (ToolPermissionApproval) -> Unit,
     onDenyOnce: (ToolPermissionApproval) -> Unit,
     onBlock: (ToolPermissionApproval) -> Unit,
+    onClearPendingApproval: () -> Unit,
 ) {
     val context = LocalContext.current
     var inputText by remember { mutableStateOf("") }
     var pendingAttachments by remember { mutableStateOf<List<MessageAttachment>>(emptyList()) }
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
+    val attachmentValidationError = remember(pendingAttachments) {
+        when {
+            pendingAttachments.any { !isSupportedChatAttachment(it) } -> "Some selected attachments are unsupported."
+            pendingAttachments.any { it.uri.isBlank() || it.name.isBlank() } -> "One or more attachments are missing metadata."
+            else -> null
+        }
+    }
+    val resolvedSendDisabledReason = sendDisabledReason ?: attachmentValidationError
     val timelineItemCount by remember(state) {
         derivedStateOf {
             var count = state.messages.size
@@ -516,6 +530,9 @@ private fun ChatContent(
             if (state.messages.isEmpty() && !state.isLoading) count += 1
             count
         }
+    }
+    BackHandler(enabled = state.pendingApproval != null) {
+        onClearPendingApproval()
     }
     val showScrollToBottom by remember {
         derivedStateOf {
@@ -559,7 +576,7 @@ private fun ChatContent(
                 attachments = pendingAttachments,
                 onAttachmentsChanged = { pendingAttachments = it },
                 onSend = {
-                    if (inputText.isNotBlank() || pendingAttachments.isNotEmpty()) {
+                    if (resolvedSendDisabledReason == null && (inputText.isNotBlank() || pendingAttachments.isNotEmpty())) {
                         onSendMessage(inputText.trim(), pendingAttachments) { accepted ->
                             if (accepted) {
                                 inputText = ""
@@ -569,7 +586,7 @@ private fun ChatContent(
                     }
                 },
                 isStreaming = state.isStreaming,
-                sendDisabledReason = state.activeProviderReadinessError,
+                sendDisabledReason = resolvedSendDisabledReason,
                 onCancel = onCancel,
                 promptTemplates = state.promptTemplates,
                     onInsertPrompt = { template ->
@@ -624,6 +641,9 @@ private fun ChatContent(
                     onBlock = {
                         Toast.makeText(context, "Blocked ${approval.toolName}", Toast.LENGTH_SHORT).show()
                         onBlock(approval)
+                    },
+                    onClear = {
+                        onClearPendingApproval()
                     },
                 )
             }
@@ -931,6 +951,7 @@ private fun ToolApprovalBanner(
     onAlwaysAllow: () -> Unit,
     onDenyOnce: () -> Unit,
     onBlock: () -> Unit,
+    onClear: () -> Unit,
 ) {
     Surface(
         color = when (approval.permission) {
@@ -969,17 +990,22 @@ private fun ToolApprovalBanner(
                 if (approval.permission == ToolPermission.dangerous) {
                     Badge(contentColor = MaterialTheme.colorScheme.onErrorContainer) { Text("!", style = MaterialTheme.typography.labelSmall) }
                 }
+                IconButton(onClick = onClear, modifier = Modifier.size(20.dp)) {
+                    Icon(Icons.Filled.Close, contentDescription = "Dismiss")
+                }
             }
 
             if (approval.arguments.isNotBlank()) {
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = approval.arguments.take(120) + if (approval.arguments.length > 120) "…" else "",
+                    text = approval.arguments,
                     style = MaterialTheme.typography.bodySmall,
                     fontFamily = FontFamily.Monospace,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .verticalScroll(rememberScrollState())
+                        .heightIn(max = 180.dp),
+                    maxLines = Int.MAX_VALUE,
                 )
             }
 
