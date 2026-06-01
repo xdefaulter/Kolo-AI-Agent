@@ -1,6 +1,9 @@
 package com.kolo.agent.core.tools.registry
 
+import com.kolo.agent.core.model.CustomToolDef
+import com.kolo.agent.core.model.CustomToolKind
 import com.kolo.agent.core.model.ProviderConfig
+import com.kolo.agent.core.model.Skill
 import com.kolo.agent.core.model.ToolExecutionResult
 import com.kolo.agent.core.model.ToolPermission
 import com.kolo.agent.core.model.ToolPermissionMode
@@ -20,9 +23,13 @@ import kotlinx.serialization.json.JsonPrimitive
 class ToolRegistry {
 
     private val tools = mutableMapOf<String, KoloTool>()
+    private val builtinNames = mutableSetOf<String>()
+    private var customTools: List<CustomToolDef> = emptyList()
+    private var skills: List<Skill> = emptyList()
 
     init {
         registerBuiltinTools()
+        builtinNames.addAll(tools.keys)
     }
 
     private fun registerBuiltinTools() {
@@ -35,6 +42,19 @@ class ToolRegistry {
         register(HttpPostTool())
         register(WebSearchTool())
         register(WebScrapeTool())
+        register(ClipboardReadTool())
+        register(ClipboardWriteTool())
+        register(DeviceInfoTool())
+        register(ConnectivityTool())
+        register(BatteryInfoTool())
+        register(VibrateTool())
+        register(ListInstalledAppsTool())
+        register(LaunchAppTool())
+        register(TimerTool())
+        register(ContactsSearchTool())
+        register(LocationTool())
+        register(ListSkillsTool { skills })
+        register(ReadSkillTool { skills })
         register(RecallMemoriesTool())
         register(RememberThisTool())
         register(ForgetMemoryTool())
@@ -46,6 +66,18 @@ class ToolRegistry {
 
     fun unregister(name: String) {
         tools.remove(name)
+    }
+
+    fun setCustomTools(definitions: List<CustomToolDef>) {
+        customTools.forEach { tools.remove(it.name) }
+        customTools = definitions
+        definitions
+            .filter { it.name.isNotBlank() && it.name !in builtinNames }
+            .forEach { register(CustomToolAdapter(it)) }
+    }
+
+    fun setSkills(definitions: List<Skill>) {
+        skills = definitions.sortedBy { it.name.lowercase() }
     }
 
     fun getTool(name: String): KoloTool? = tools[name]
@@ -84,10 +116,42 @@ class ToolRegistry {
         chatId: String,
         providerConfig: ProviderConfig,
         context: android.content.Context? = null,
+        subLlmCall: (suspend (String, String) -> String)? = null,
     ): ToolExecutionResult {
+        val params = parseArguments(arguments)
+        return executeParsedTool(name, params, chatId, providerConfig, context, subLlmCall, depth = 0)
+    }
+
+    private suspend fun executeParsedTool(
+        name: String,
+        params: Map<String, String>,
+        chatId: String,
+        providerConfig: ProviderConfig,
+        context: android.content.Context?,
+        subLlmCall: (suspend (String, String) -> String)?,
+        depth: Int,
+    ): ToolExecutionResult {
+        if (depth > 6) return ToolExecutionResult.err("Composed tool depth limit reached.")
         val tool = tools[name]
             ?: return ToolExecutionResult.err("Unknown tool: $name")
 
+        val toolContext = ToolExecutionContext(
+            chatId = chatId,
+            androidContext = context,
+            subLlmCall = subLlmCall,
+            runToolByName = { toolName, toolParams ->
+                executeParsedTool(toolName, toolParams, chatId, providerConfig, context, subLlmCall, depth + 1)
+            },
+        )
+
+        return try {
+            tool.execute(params, toolContext)
+        } catch (e: Exception) {
+            ToolExecutionResult.err("Tool '$name' execution failed: ${e.message}")
+        }
+    }
+
+    private fun parseArguments(arguments: String): Map<String, String> {
         val params = try {
             val json = Json { ignoreUnknownKeys = true }
             val element = json.parseToJsonElement(arguments)
@@ -102,17 +166,83 @@ class ToolRegistry {
         } catch (_: Exception) {
             emptyMap()
         }
+        return params
+    }
+}
 
-        val toolContext = ToolExecutionContext(
-            chatId = chatId,
-            androidContext = context,
-        )
+private class CustomToolAdapter(private val def: CustomToolDef) : KoloTool() {
+    override val name: String = def.name
+    override val description: String = def.description
+    override val parameterSchema: String = def.parameterSchema.ifBlank {
+        """{"type":"object","properties":{},"required":[]}"""
+    }
+    override val permission: ToolPermission = def.permission
 
-        return try {
-            tool.execute(params, toolContext)
-        } catch (e: Exception) {
-            ToolExecutionResult.err("Tool '$name' execution failed: ${e.message}")
+    override suspend fun execute(params: Map<String, String>, context: ToolExecutionContext): ToolExecutionResult {
+        return when (def.kind) {
+            CustomToolKind.prompt -> executePrompt(params, context)
+            CustomToolKind.composed -> executeComposed(params, context)
         }
+    }
+
+    private suspend fun executePrompt(params: Map<String, String>, context: ToolExecutionContext): ToolExecutionResult {
+        val systemPrompt = def.systemPrompt.ifBlank { def.description }
+        val userMessage = renderTemplate(def.userMessage.ifBlank { "{{input}}" }, params)
+        val call = context.subLlmCall
+            ?: return ToolExecutionResult.err("Prompt custom tool needs a remote active provider.")
+        val output = call(systemPrompt, userMessage)
+        return ToolExecutionResult.ok(output, mapOf("custom_tool_id" to def.id.value, "kind" to "prompt"))
+    }
+
+    private suspend fun executeComposed(params: Map<String, String>, context: ToolExecutionContext): ToolExecutionResult {
+        val runTool = context.runToolByName
+            ?: return ToolExecutionResult.err("Composed custom tool cannot call sub-tools in this context.")
+        if (def.steps.isEmpty()) return ToolExecutionResult.err("Custom tool has no composed steps.")
+        val values = params.toMutableMap()
+        val outputs = mutableListOf<String>()
+        def.steps.forEachIndexed { index, step ->
+            val rendered = step.params.mapValues { (_, value) -> renderTemplate(value, values) }
+            val result = runTool(step.toolName, rendered)
+            if (!result.success) {
+                return ToolExecutionResult.err("Step ${index + 1} (${step.toolName}) failed: ${result.error}")
+            }
+            outputs.add("[${index + 1}] ${step.toolName}\n${result.output}")
+            values["_previous"] = result.output
+        }
+        return ToolExecutionResult.ok(outputs.joinToString("\n\n"), mapOf("custom_tool_id" to def.id.value, "kind" to "composed"))
+    }
+}
+
+private class ListSkillsTool(private val skillsProvider: () -> List<Skill>) : KoloTool() {
+    override val name = "list_skills"
+    override val description = "List saved Kolo skills with their names and descriptions."
+    override val parameterSchema = """{"type":"object","properties":{},"required":[]}"""
+    override val permission = ToolPermission.safe
+
+    override suspend fun execute(params: Map<String, String>, context: ToolExecutionContext): ToolExecutionResult {
+        val enabled = skillsProvider().filter { it.isEnabled }
+        if (enabled.isEmpty()) return ToolExecutionResult.ok("(no enabled skills)")
+        return ToolExecutionResult.ok(enabled.joinToString("\n") { "- ${it.name}: ${it.description}" })
+    }
+}
+
+private class ReadSkillTool(private val skillsProvider: () -> List<Skill>) : KoloTool() {
+    override val name = "read_skill"
+    override val description = "Read the full instructions for one saved Kolo skill by name."
+    override val parameterSchema = """{"type":"object","properties":{"name":{"type":"string","description":"Skill name"}},"required":["name"]}"""
+    override val permission = ToolPermission.safe
+
+    override suspend fun execute(params: Map<String, String>, context: ToolExecutionContext): ToolExecutionResult {
+        val name = params["name"]?.trim().orEmpty()
+        val skill = skillsProvider().firstOrNull { it.isEnabled && it.name.equals(name, ignoreCase = true) }
+            ?: return ToolExecutionResult.err("Skill '$name' was not found or is disabled.")
+        return ToolExecutionResult.ok(skill.content, mapOf("skill_id" to skill.id.value))
+    }
+}
+
+private fun renderTemplate(template: String, values: Map<String, String>): String {
+    return Regex("""\{\{\s*([a-zA-Z0-9_]+)\s*}}""").replace(template) { match ->
+        values[match.groupValues[1]].orEmpty()
     }
 }
 

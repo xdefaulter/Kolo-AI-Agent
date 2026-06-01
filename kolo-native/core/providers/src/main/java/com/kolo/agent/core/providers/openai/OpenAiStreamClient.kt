@@ -4,9 +4,11 @@ import com.kolo.agent.core.model.ProviderConfig
 import com.kolo.agent.core.model.api.ApiMessage
 import com.kolo.agent.core.model.api.ApiToolDefinition
 import com.kolo.agent.core.providers.ProviderConfigKeyStore
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -150,7 +152,7 @@ class OpenAiStreamClient(
     /**
      * Fetch available models from the provider.
      */
-    suspend fun fetchModels(config: ProviderConfig): List<Pair<String, String?>> {
+    suspend fun fetchModels(config: ProviderConfig): List<Pair<String, String?>> = withContext(Dispatchers.IO) {
         val url = config.effectiveModelsUrl
         val requestBuilder = Request.Builder()
             .url(url)
@@ -165,16 +167,26 @@ class OpenAiStreamClient(
         }
 
         val response = client.newCall(requestBuilder.build()).execute()
-        val body = response.body?.string() ?: return emptyList()
+        val body = response.use { result ->
+            if (!result.isSuccessful) return@withContext emptyList()
+            result.body?.string() ?: return@withContext emptyList()
+        }
 
-        return try {
+        return@withContext try {
             val root = json.parseToJsonElement(body).jsonObject
-            val modelsArray = root["data"]?.jsonArray ?: return emptyList()
+            val modelsArray = root["data"]?.jsonArray
+                ?: root["models"]?.jsonArray
+                ?: return@withContext emptyList()
             modelsArray.mapNotNull { element ->
                 val obj = element.jsonObject
-                val id = obj["id"]?.jsonPrimitive?.content ?: return@mapNotNull null
-                val ownedBy = obj["owned_by"]?.jsonPrimitive?.content
-                id to ownedBy
+                val name = obj["name"]?.jsonPrimitive?.contentOrNull
+                val id = obj["id"]?.jsonPrimitive?.contentOrNull
+                    ?: name
+                    ?: return@mapNotNull null
+                val displayName = obj["displayName"]?.jsonPrimitive?.contentOrNull
+                    ?: obj["display_name"]?.jsonPrimitive?.contentOrNull
+                val ownedBy = obj["owned_by"]?.jsonPrimitive?.contentOrNull
+                id to (displayName ?: name?.takeIf { it != id } ?: ownedBy)
             }
         } catch (_: Exception) {
             emptyList()

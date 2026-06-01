@@ -28,6 +28,7 @@ data class Message(
     val chatId: ChatId,
     val role: MessageRole,
     val content: String,
+    val attachments: List<MessageAttachment> = emptyList(),
     val toolCallId: ToolCallId? = null,
     val toolName: String? = null,
     val toolSuccess: Boolean? = null,
@@ -36,6 +37,18 @@ data class Message(
     val error: String? = null,
     val createdAt: Long = System.currentTimeMillis(),
     val editedAt: Long? = null,
+)
+
+/**
+ * Attachment metadata for a user message.
+ */
+@Serializable
+data class MessageAttachment(
+    val name: String,
+    val mimeType: String,
+    val uri: String,
+    val kind: String = if (mimeType.lowercase().startsWith("image/")) "image" else "file",
+    val sizeBytes: Long = -1,
 )
 
 @Serializable

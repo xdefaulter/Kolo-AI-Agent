@@ -26,7 +26,6 @@ class ProviderRepository(
     private val json = Json { ignoreUnknownKeys = true; prettyPrint = true }
 
     private val PROVIDERS_KEY = stringPreferencesKey("providers_v2")
-    private val ACTIVE_MODEL_PREFIX = "active_model_"
 
     /** Get API key for a provider from secure storage + in-memory cache. */
     fun getApiKey(providerId: String): String = ProviderConfigKeyStore[providerId]
@@ -99,14 +98,19 @@ class ProviderRepository(
     }
 
     suspend fun setActiveModel(providerId: ProviderId, modelId: String) {
-        context.dataStore.edit { prefs ->
-            prefs[stringPreferencesKey("${ACTIVE_MODEL_PREFIX}${providerId.value}")] = modelId
+        val providers = getAllProviders().map { config ->
+            if (config.id != providerId) {
+                config
+            } else {
+                config.copy(
+                    models = config.models.map { model ->
+                        model.copy(isActive = model.modelId == modelId)
+                    },
+                    updatedAt = System.currentTimeMillis(),
+                )
+            }
         }
-    }
-
-    suspend fun getActiveModel(providerId: ProviderId): String? {
-        val prefs = context.dataStore.data.first()
-        return prefs[stringPreferencesKey("${ACTIVE_MODEL_PREFIX}${providerId.value}")]
+        writeProviders(providers)
     }
 
     private suspend fun writeProviders(providers: List<ProviderConfig>) {

@@ -52,6 +52,7 @@ class AgentLoop(
     private val client: OpenAiStreamClient,
     private val toolRegistry: ToolRegistry,
     private val localModelManager: LocalModelManager? = null,
+    private val androidContext: android.content.Context? = null,
     private val permissionChecker: suspend (toolName: String) -> ToolPermissionMode = { ToolPermissionMode.alwaysAllow },
     private val approvalCallback: suspend (ToolPermissionApproval) -> Boolean = { true },
     private val maxIterations: Int = 20,
@@ -220,6 +221,8 @@ class AgentLoop(
                             arguments = call.arguments,
                             chatId = chatId,
                             providerConfig = config,
+                            context = androidContext,
+                            subLlmCall = subLlmCall(config),
                         )
                         emit(AgentEvent.ToolResult(call.name, call.id, result))
                         currentMessages.add(ApiMessage(
@@ -253,6 +256,8 @@ class AgentLoop(
                                 arguments = call.arguments,
                                 chatId = chatId,
                                 providerConfig = config,
+                                context = androidContext,
+                                subLlmCall = subLlmCall(config),
                             )
                             emit(AgentEvent.ToolResult(call.name, call.id, result))
                             currentMessages.add(ApiMessage(
@@ -326,6 +331,7 @@ class AgentLoop(
                 modelPath = modelPath,
                 contextSize = (config.activeModel?.contextWindow ?: LOCAL_CONTEXT_SIZE).coerceAtMost(LOCAL_CONTEXT_SIZE),
                 threads = Runtime.getRuntime().availableProcessors().coerceIn(1, 8),
+                gpuLayers = config.localGpuLayers,
             )
 
             repeat(maxIterations) {
@@ -411,6 +417,8 @@ class AgentLoop(
                             arguments = call.arguments,
                             chatId = chatId,
                             providerConfig = config,
+                            context = androidContext,
+                            subLlmCall = null,
                         )
                         is ToolPermissionCheckResult.NeedsApproval -> {
                             val approval = ToolPermissionApproval(
@@ -426,6 +434,8 @@ class AgentLoop(
                                     arguments = call.arguments,
                                     chatId = chatId,
                                     providerConfig = config,
+                                    context = androidContext,
+                                    subLlmCall = null,
                                 )
                             } else {
                                 ToolExecutionResult.err("Tool '${call.name}' was denied by user")
@@ -568,6 +578,41 @@ class AgentLoop(
         }
         builder.append("ASSISTANT:")
         return builder.toString()
+    }
+
+    private fun subLlmCall(config: ProviderConfig): (suspend (String, String) -> String)? {
+        if (config.isLocal) return null
+        return { systemPrompt, userMessage ->
+            val raw = client.chatComplete(
+                config = config,
+                messages = listOf(
+                    ApiMessage(role = "system", content = systemPrompt),
+                    ApiMessage(role = "user", content = userMessage),
+                ),
+                tools = null,
+                maxTokens = 1024,
+                temperature = 0.2,
+            )
+            parseChatCompleteContent(raw)
+        }
+    }
+
+    private fun parseChatCompleteContent(raw: String): String {
+        return try {
+            Json.parseToJsonElement(raw)
+                .jsonObject["choices"]
+                ?.let { it as? kotlinx.serialization.json.JsonArray }
+                ?.firstOrNull()
+                ?.jsonObject
+                ?.get("message")
+                ?.jsonObject
+                ?.get("content")
+                ?.jsonPrimitive
+                ?.contentOrNull
+                ?: raw
+        } catch (_: Exception) {
+            raw
+        }
     }
 
     private data class LocalCompletion(

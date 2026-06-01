@@ -8,14 +8,19 @@ import com.kolo.agent.core.database.repository.RoomMemoryRepository
 import com.kolo.agent.core.model.Memory
 import com.kolo.agent.core.model.ProviderConfig
 import com.kolo.agent.core.model.ProviderId
+import com.kolo.agent.core.model.ModelConfig
+import com.kolo.agent.core.model.CustomToolDef
+import com.kolo.agent.core.model.Skill
 import com.kolo.agent.core.model.ToolPermissionMode
 import com.kolo.agent.core.providers.ProviderRepository
+import com.kolo.agent.core.providers.openai.OpenAiStreamClient
 import com.kolo.agent.core.tools.permissions.ToolPermissionStore
 import com.kolo.agent.core.tools.registry.ToolRegistry
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -34,7 +39,12 @@ data class SettingsUiState(
     val memories: List<Memory> = emptyList(),
     val themeMode: AppThemeMode = AppThemeMode.SYSTEM,
     val localLlamaModelPath: String = "",
+    val localLlamaGpuLayers: Int = 0,
     val bridgeStatus: LocalModelManager.BridgeStatus = LocalModelManager.BridgeStatus.Unknown,
+    val modelFetchStatus: Map<String, String> = emptyMap(),
+    val customInstructions: String = "",
+    val customTools: List<CustomToolDef> = emptyList(),
+    val skills: List<Skill> = emptyList(),
 )
 
 enum class AppThemeMode { SYSTEM, LIGHT, DARK }
@@ -47,6 +57,7 @@ class SettingsViewModel @Inject constructor(
     private val memoryRepository: RoomMemoryRepository,
     private val appSettings: AppSettings,
     private val localModelManager: LocalModelManager,
+    private val streamClient: OpenAiStreamClient,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(SettingsUiState())
@@ -58,6 +69,8 @@ class SettingsViewModel @Inject constructor(
         loadMemories()
         loadTheme()
         loadLocalSettings()
+        loadCustomInstructions()
+        loadCustomToolsAndSkills()
     }
 
     private fun loadProviders() {
@@ -73,9 +86,10 @@ class SettingsViewModel @Inject constructor(
 
     private fun loadToolPermissions() {
         viewModelScope.launch {
-            permissionStore.allOverrides().collect { overrides ->
+            permissionStore.allOverrides().combine(appSettings.customTools) { overrides, customTools ->
+                toolRegistry.setCustomTools(customTools)
                 val tools = toolRegistry.getAllTools()
-                val permUiList = tools.map { tool ->
+                tools.map { tool ->
                     val currentMode = overrides[tool.name]
                         ?: toolRegistry.getDefaultPermissionMode(tool.name)
                     ToolPermissionUi(
@@ -86,6 +100,7 @@ class SettingsViewModel @Inject constructor(
                         isDangerous = tool.permission == com.kolo.agent.core.model.ToolPermission.dangerous,
                     )
                 }
+            }.collect { permUiList ->
                 _uiState.value = _uiState.value.copy(toolPermissions = permUiList)
             }
         }
@@ -123,6 +138,9 @@ class SettingsViewModel @Inject constructor(
             launch { appSettings.localLlamaModelPath.collect { path ->
                 _uiState.value = _uiState.value.copy(localLlamaModelPath = path.orEmpty())
             } }
+            launch { appSettings.localLlamaGpuLayers.collect { gpuLayers ->
+                _uiState.value = _uiState.value.copy(localLlamaGpuLayers = gpuLayers)
+            } }
         }
     }
 
@@ -147,6 +165,66 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
+    private fun loadCustomInstructions() {
+        viewModelScope.launch {
+            appSettings.customInstructions.collect { instructions ->
+                _uiState.value = _uiState.value.copy(customInstructions = instructions)
+            }
+        }
+    }
+
+    fun setCustomInstructions(value: String) {
+        viewModelScope.launch {
+            appSettings.setCustomInstructions(value)
+        }
+    }
+
+    private fun loadCustomToolsAndSkills() {
+        viewModelScope.launch {
+            launch {
+                appSettings.customTools.collect { tools ->
+                    _uiState.value = _uiState.value.copy(customTools = tools)
+                }
+            }
+            launch {
+                appSettings.skills.collect { skills ->
+                    toolRegistry.setSkills(skills)
+                    _uiState.value = _uiState.value.copy(skills = skills)
+                }
+            }
+        }
+    }
+
+    fun saveCustomTool(tool: CustomToolDef) {
+        viewModelScope.launch {
+            appSettings.saveCustomTool(tool)
+        }
+    }
+
+    fun deleteCustomTool(id: String) {
+        viewModelScope.launch {
+            appSettings.deleteCustomTool(id)
+        }
+    }
+
+    fun saveSkill(skill: Skill) {
+        viewModelScope.launch {
+            appSettings.saveSkill(skill)
+        }
+    }
+
+    fun deleteSkill(id: String) {
+        viewModelScope.launch {
+            appSettings.deleteSkill(id)
+        }
+    }
+
+    fun setSkillEnabled(id: String, enabled: Boolean) {
+        viewModelScope.launch {
+            appSettings.setSkillEnabled(id, enabled)
+        }
+    }
+
     fun addMemory(content: String, kind: String = "fact") {
         viewModelScope.launch {
             val memory = Memory(kind = kind, content = content)
@@ -164,14 +242,27 @@ class SettingsViewModel @Inject constructor(
 
     fun addProvider(config: ProviderConfig, apiKey: String) {
         viewModelScope.launch {
-            providerRepository.saveProvider(config, apiKey)
-            if (config.isLocal && !config.modelPath.isNullOrBlank()) {
-                appSettings.setLocalLlamaModelPath(config.modelPath)
+            var configToSave = config
+            if (!config.isLocal) {
+                configToSave = fetchModelsForProvider(config, apiKey) ?: config
             }
-            _uiState.value = _uiState.value.copy(
-                providers = providerRepository.getAllProviders(),
-                activeProviderId = providerRepository.getActiveProvider()?.id,
-            )
+            providerRepository.saveProvider(configToSave, apiKey)
+            if (configToSave.isLocal && !configToSave.modelPath.isNullOrBlank()) {
+                appSettings.setLocalLlamaModelPath(configToSave.modelPath)
+            }
+            refreshProvidersState()
+        }
+    }
+
+    fun updateProvider(config: ProviderConfig, apiKey: String? = null) {
+        viewModelScope.launch {
+            val key = apiKey ?: providerRepository.getApiKey(config.id.value)
+            var configToSave = config.copy(updatedAt = System.currentTimeMillis())
+            if (!configToSave.isLocal && configToSave.models.isEmpty()) {
+                configToSave = fetchModelsForProvider(configToSave, key) ?: configToSave
+            }
+            providerRepository.saveProvider(configToSave, key)
+            refreshProvidersState()
         }
     }
 
@@ -184,6 +275,35 @@ class SettingsViewModel @Inject constructor(
     fun setActiveProvider(id: ProviderId) {
         viewModelScope.launch {
             providerRepository.setActiveProvider(id)
+            val provider = providerRepository.getAllProviders().firstOrNull { it.id == id }
+            if (provider != null && !provider.isLocal && provider.models.isEmpty()) {
+                refreshProviderModels(id)
+            }
+        }
+    }
+
+    fun refreshProviderModels(id: ProviderId) {
+        viewModelScope.launch {
+            val provider = providerRepository.getAllProviders().firstOrNull { it.id == id } ?: return@launch
+            if (provider.isLocal) return@launch
+            val apiKey = providerRepository.getApiKey(id.value)
+            fetchModelsForProvider(provider, apiKey)?.let { updated ->
+                providerRepository.saveProvider(updated, apiKey)
+            }
+            refreshProvidersState()
+        }
+    }
+
+    fun setActiveProviderModel(providerId: ProviderId, modelId: String) {
+        viewModelScope.launch {
+            providerRepository.setActiveModel(providerId, modelId)
+            refreshProvidersState()
+        }
+    }
+
+    fun setLocalLlamaGpuMode(useGpu: Boolean) {
+        viewModelScope.launch {
+            appSettings.setLocalLlamaGpuLayers(if (useGpu) 999 else 0)
         }
     }
 
@@ -204,5 +324,47 @@ class SettingsViewModel @Inject constructor(
                 providers = providerRepository.getAllProviders(),
             )
         }
+    }
+
+    private suspend fun fetchModelsForProvider(provider: ProviderConfig, apiKey: String): ProviderConfig? {
+        setModelFetchStatus(provider.id.value, "Fetching models...")
+        com.kolo.agent.core.providers.ProviderConfigKeyStore[provider.id.value] = apiKey
+        return try {
+            val fetched = streamClient.fetchModels(provider)
+                .distinctBy { it.first }
+                .sortedBy { it.first }
+            if (fetched.isEmpty()) {
+                setModelFetchStatus(provider.id.value, "No models returned")
+                null
+            } else {
+                setModelFetchStatus(provider.id.value, "Fetched ${fetched.size} models")
+                provider.copy(
+                    models = fetched.mapIndexed { index, (id, label) ->
+                        ModelConfig(
+                            modelId = id,
+                            displayName = label?.takeIf { it.isNotBlank() && it != id },
+                            isActive = index == 0,
+                        )
+                    },
+                    updatedAt = System.currentTimeMillis(),
+                )
+            }
+        } catch (e: Exception) {
+            setModelFetchStatus(provider.id.value, "Model fetch failed: ${e.message ?: "unknown error"}")
+            null
+        }
+    }
+
+    private fun setModelFetchStatus(providerId: String, status: String) {
+        _uiState.value = _uiState.value.copy(
+            modelFetchStatus = _uiState.value.modelFetchStatus + (providerId to status),
+        )
+    }
+
+    private suspend fun refreshProvidersState() {
+        _uiState.value = _uiState.value.copy(
+            providers = providerRepository.getAllProviders(),
+            activeProviderId = providerRepository.getActiveProvider()?.id,
+        )
     }
 }

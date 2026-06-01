@@ -27,13 +27,23 @@ import com.kolo.agent.feature.settings.*
 fun SettingsScreen(
     state: SettingsUiState,
     onAddProvider: (ProviderConfig, String) -> Unit,
+    onUpdateProvider: (ProviderConfig, String?) -> Unit,
     onDeleteProvider: (ProviderId) -> Unit,
     onSetActiveProvider: (ProviderId) -> Unit,
+    onSetProviderActiveModel: (ProviderId, String) -> Unit,
     onSetProviderModelPath: (ProviderId, String) -> Unit,
+    onRefreshProviderModels: (ProviderId) -> Unit,
     onSetToolPermission: (String, ToolPermissionMode) -> Unit,
     onAddMemory: (String, String) -> Unit,
     onDeleteMemory: (String) -> Unit,
+    onSetCustomInstructions: (String) -> Unit,
+    onSaveCustomTool: (CustomToolDef) -> Unit,
+    onDeleteCustomTool: (String) -> Unit,
+    onSaveSkill: (Skill) -> Unit,
+    onDeleteSkill: (String) -> Unit,
+    onSetSkillEnabled: (String, Boolean) -> Unit,
     onSetTheme: (AppThemeMode) -> Unit = {},
+    onSetLocalLlamaGpuMode: (Boolean) -> Unit = {},
     onNavigateLocalModels: () -> Unit = {},
     onNavigateBack: () -> Unit,
 ) {
@@ -77,19 +87,40 @@ fun SettingsScreen(
                     activeProviderId = state.activeProviderId,
                     bridgeStatus = state.bridgeStatus,
                     activeModelPath = state.localLlamaModelPath,
+                    localGpuLayers = state.localLlamaGpuLayers,
+                    modelFetchStatus = state.modelFetchStatus,
                     onAddProvider = onAddProvider,
+                    onUpdateProvider = onUpdateProvider,
                     onDeleteProvider = onDeleteProvider,
                     onSetActiveProvider = onSetActiveProvider,
+                    onSetProviderActiveModel = onSetProviderActiveModel,
                     onSetProviderModelPath = onSetProviderModelPath,
+                    onRefreshProviderModels = onRefreshProviderModels,
+                    onSetLocalLlamaGpuMode = onSetLocalLlamaGpuMode,
                 )
                 SettingsSection.Tools -> ToolsSection(
                     toolPermissions = state.toolPermissions,
                     onSetPermission = onSetToolPermission,
                 )
+                SettingsSection.CustomTools -> CustomToolsSection(
+                    tools = state.customTools,
+                    onSave = onSaveCustomTool,
+                    onDelete = onDeleteCustomTool,
+                )
+                SettingsSection.Skills -> SkillsSection(
+                    skills = state.skills,
+                    onSave = onSaveSkill,
+                    onDelete = onDeleteSkill,
+                    onSetEnabled = onSetSkillEnabled,
+                )
                 SettingsSection.Memory -> MemorySection(
                     memories = state.memories,
                     onAdd = onAddMemory,
                     onDelete = onDeleteMemory,
+                )
+                SettingsSection.Instructions -> InstructionsSection(
+                    customInstructions = state.customInstructions,
+                    onSave = onSetCustomInstructions,
                 )
                 SettingsSection.PhoneControl -> PhoneControlSection()
                 SettingsSection.Appearance -> AppearanceSection(state.themeMode, onSetTheme)
@@ -117,7 +148,10 @@ private fun SettingsHome(onSectionSelected: (SettingsSection) -> Unit, onNavigat
         item {
             SectionHeader("Agent")
             SettingsItem(icon = Icons.Filled.Build, title = "Tool Permissions", subtitle = "Which tools the agent can use", onClick = { onSectionSelected(SettingsSection.Tools) })
+            SettingsItem(icon = Icons.Filled.Extension, title = "Custom Tools", subtitle = "Author reusable agent tools", onClick = { onSectionSelected(SettingsSection.CustomTools) })
+            SettingsItem(icon = Icons.Filled.AutoStories, title = "Skills", subtitle = "Reusable playbooks in prompts", onClick = { onSectionSelected(SettingsSection.Skills) })
             SettingsItem(icon = Icons.Filled.Psychology, title = "Memory", subtitle = "Agent memories", onClick = { onSectionSelected(SettingsSection.Memory) })
+            SettingsItem(icon = Icons.Filled.Rule, title = "Instructions", subtitle = "Custom system guidance", onClick = { onSectionSelected(SettingsSection.Instructions) })
         }
         item {
             SectionHeader("App")
@@ -155,10 +189,16 @@ private fun ProvidersSection(
     activeProviderId: ProviderId?,
     bridgeStatus: LocalModelManager.BridgeStatus = LocalModelManager.BridgeStatus.Unknown,
     activeModelPath: String = "",
+    localGpuLayers: Int = 0,
+    modelFetchStatus: Map<String, String> = emptyMap(),
     onAddProvider: (ProviderConfig, String) -> Unit,
+    onUpdateProvider: (ProviderConfig, String?) -> Unit,
     onDeleteProvider: (ProviderId) -> Unit,
     onSetActiveProvider: (ProviderId) -> Unit,
+    onSetProviderActiveModel: (ProviderId, String) -> Unit,
     onSetProviderModelPath: (ProviderId, String) -> Unit,
+    onRefreshProviderModels: (ProviderId) -> Unit,
+    onSetLocalLlamaGpuMode: (Boolean) -> Unit,
 ) {
     var showAddDialog by remember { mutableStateOf(false) }
     var expandedProvider by remember { mutableStateOf<ProviderId?>(null) }
@@ -172,15 +212,48 @@ private fun ProvidersSection(
             }
         }
         items(providers) { provider ->
-            ProviderCard(provider = provider, isActive = provider.id == activeProviderId, isExpanded = provider.id == expandedProvider, bridgeStatus = bridgeStatus, activeModelPath = activeModelPath, onToggleExpand = { expandedProvider = if (expandedProvider == provider.id) null else provider.id }, onSetActive = { onSetActiveProvider(provider.id) }, onDelete = { onDeleteProvider(provider.id) }, onSetModelPath = { onSetProviderModelPath(provider.id, it) })
+            ProviderCard(
+                provider = provider,
+                isActive = provider.id == activeProviderId,
+                isExpanded = provider.id == expandedProvider,
+                bridgeStatus = bridgeStatus,
+                activeModelPath = activeModelPath,
+                localGpuLayers = localGpuLayers,
+                modelFetchStatus = modelFetchStatus[provider.id.value],
+                onToggleExpand = { expandedProvider = if (expandedProvider == provider.id) null else provider.id },
+                onUpdateProvider = onUpdateProvider,
+                onSetActive = { onSetActiveProvider(provider.id) },
+                onSetActiveModel = { modelId -> onSetProviderActiveModel(provider.id, modelId) },
+                onDelete = { onDeleteProvider(provider.id) },
+                onSetModelPath = { onSetProviderModelPath(provider.id, it) },
+                onRefreshModels = { onRefreshProviderModels(provider.id) },
+                onSetLocalLlamaGpuMode = onSetLocalLlamaGpuMode,
+            )
         }
     }
     if (showAddDialog) { AddProviderDialog(bridgeStatus = bridgeStatus, onDismiss = { showAddDialog = false }, onConfirm = { config, apiKey -> onAddProvider(config, apiKey); showAddDialog = false }) }
 }
 
 @Composable
-private fun ProviderCard(provider: ProviderConfig, isActive: Boolean, isExpanded: Boolean, bridgeStatus: LocalModelManager.BridgeStatus = LocalModelManager.BridgeStatus.Unknown, activeModelPath: String = "", onToggleExpand: () -> Unit, onSetActive: () -> Unit, onDelete: () -> Unit, onSetModelPath: (String) -> Unit) {
+private fun ProviderCard(
+    provider: ProviderConfig,
+    isActive: Boolean,
+    isExpanded: Boolean,
+    bridgeStatus: LocalModelManager.BridgeStatus = LocalModelManager.BridgeStatus.Unknown,
+    activeModelPath: String = "",
+    localGpuLayers: Int = 0,
+    modelFetchStatus: String? = null,
+    onToggleExpand: () -> Unit,
+    onUpdateProvider: (ProviderConfig, String?) -> Unit,
+    onSetActive: () -> Unit,
+    onSetActiveModel: (String) -> Unit,
+    onDelete: () -> Unit,
+    onSetModelPath: (String) -> Unit,
+    onRefreshModels: () -> Unit,
+    onSetLocalLlamaGpuMode: (Boolean) -> Unit,
+) {
     var modelPathDraft by remember(provider.id, provider.modelPath) { mutableStateOf(provider.modelPath.orEmpty()) }
+    var showEditDialog by remember { mutableStateOf(false) }
     Card(onClick = onToggleExpand, colors = CardDefaults.cardColors(containerColor = if (isActive) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface), shape = MaterialTheme.shapes.small) {
         Column(modifier = Modifier.padding(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -202,6 +275,28 @@ private fun ProviderCard(provider: ProviderConfig, isActive: Boolean, isExpanded
                     provider.activeModel?.let { model -> Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Model", style = MaterialTheme.typography.labelSmall); Text(model.label, style = MaterialTheme.typography.bodySmall) } }
                     Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Type", style = MaterialTheme.typography.labelSmall); Text(when (provider.kind) { ProviderKind.openaiCompat -> "OpenAI-Compatible"; ProviderKind.localLlama -> "Local llama.cpp" }, style = MaterialTheme.typography.bodySmall) }
                     if (provider.isLocal) {
+                        Spacer(Modifier.height(8.dp))
+                        Text("Runtime", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            FilterChip(
+                                selected = localGpuLayers == 0,
+                                onClick = { onSetLocalLlamaGpuMode(false) },
+                                leadingIcon = { Icon(Icons.Filled.Memory, contentDescription = null, modifier = Modifier.size(16.dp)) },
+                                label = { Text("CPU") },
+                            )
+                            FilterChip(
+                                selected = localGpuLayers > 0,
+                                onClick = { onSetLocalLlamaGpuMode(true) },
+                                leadingIcon = { Icon(Icons.Filled.Speed, contentDescription = null, modifier = Modifier.size(16.dp)) },
+                                label = { Text("GPU") },
+                            )
+                        }
+                        Text(
+                            if (localGpuLayers > 0) "GPU uses Vulkan full-layer offload when the driver supports it. Switch back to CPU if a model is slow or unstable."
+                            else "CPU keeps llama.cpp fully on processor cores.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                         Spacer(Modifier.height(8.dp))
                         // Show active inherited model or manual override status
                         if (!provider.modelPath.isNullOrBlank()) {
@@ -248,15 +343,71 @@ private fun ProviderCard(provider: ProviderConfig, isActive: Boolean, isExpanded
                             enabled = modelPathDraft.trim() != provider.modelPath.orEmpty(),
                             contentPadding = PaddingValues(horizontal = 12.dp),
                         ) { Text("Save Path", style = MaterialTheme.typography.labelSmall) }
-                    }
+	                    } else {
+	                        Spacer(Modifier.height(8.dp))
+	                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text("${provider.models.size} models", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                modelFetchStatus?.let {
+                                    Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2)
+                                }
+                            }
+                            OutlinedButton(
+                                onClick = onRefreshModels,
+                                contentPadding = PaddingValues(horizontal = 12.dp),
+                            ) {
+                                Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(14.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("Fetch Models", style = MaterialTheme.typography.labelSmall)
+	                            }
+	                        }
+	                        if (provider.models.isNotEmpty()) {
+	                            Spacer(Modifier.height(8.dp))
+	                            Text("Model", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+	                            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+	                                provider.models.take(8).forEach { model ->
+	                                    Row(
+	                                        modifier = Modifier.fillMaxWidth(),
+	                                        verticalAlignment = Alignment.CenterVertically,
+	                                    ) {
+	                                        RadioButton(
+	                                            selected = model.modelId == provider.activeModel?.modelId,
+	                                            onClick = { onSetActiveModel(model.modelId) },
+	                                        )
+	                                        Text(
+	                                            model.label,
+	                                            style = MaterialTheme.typography.bodySmall,
+	                                            maxLines = 1,
+	                                            overflow = TextOverflow.Ellipsis,
+	                                            modifier = Modifier.weight(1f),
+	                                        )
+	                                    }
+	                                }
+	                                if (provider.models.size > 8) {
+	                                    Text("+${provider.models.size - 8} more available in chat picker", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+	                                }
+	                            }
+	                        }
+	                    }
                     Spacer(Modifier.height(6.dp))
                     Row(Modifier.fillMaxWidth(), Arrangement.spacedBy(6.dp)) {
                         if (!isActive) { OutlinedButton(onClick = onSetActive, contentPadding = PaddingValues(horizontal = 12.dp)) { Text("Set Active", style = MaterialTheme.typography.labelSmall) } }
+                        OutlinedButton(onClick = { showEditDialog = true }, contentPadding = PaddingValues(horizontal = 12.dp)) { Text("Edit", style = MaterialTheme.typography.labelSmall) }
                         FilledTonalButton(onClick = onDelete, colors = ButtonDefaults.filledTonalButtonColors(containerColor = MaterialTheme.colorScheme.errorContainer, contentColor = MaterialTheme.colorScheme.onErrorContainer), contentPadding = PaddingValues(horizontal = 12.dp)) { Text("Delete", style = MaterialTheme.typography.labelSmall) }
                     }
                 }
             }
         }
+    }
+    if (showEditDialog) {
+        ProviderDetailDialog(
+            provider = provider,
+            onDismiss = { showEditDialog = false },
+            onSave = { updated, apiKey ->
+                onUpdateProvider(updated, apiKey)
+                showEditDialog = false
+            },
+        )
     }
 }
 
@@ -268,6 +419,7 @@ private fun AddProviderDialog(bridgeStatus: LocalModelManager.BridgeStatus = Loc
     var modelPath by remember { mutableStateOf("") }
     var providerKind by remember { mutableStateOf(ProviderKind.openaiCompat) }
     var selectedPreset by remember { mutableStateOf(-1) }
+    val presets = remember { ProviderPresets.defaults }
     AlertDialog(onDismissRequest = onDismiss, title = { Text("Add Provider") }, text = {
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -277,8 +429,18 @@ private fun AddProviderDialog(bridgeStatus: LocalModelManager.BridgeStatus = Loc
             Text("Quick Setup", style = MaterialTheme.typography.labelMedium)
             if (providerKind == ProviderKind.openaiCompat) {
                 LazyColumn(modifier = Modifier.heightIn(max = 100.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                    items(ProviderPresets.defaults) { preset ->
-                        FilterChip(selected = ProviderPresets.defaults.indexOf(preset) == selectedPreset, onClick = { selectedPreset = ProviderPresets.defaults.indexOf(preset); name = preset.name; baseUrl = preset.baseUrl }, label = { Text(preset.name, style = MaterialTheme.typography.bodySmall) }, modifier = Modifier.fillMaxWidth())
+                    items(presets) { preset ->
+                        val index = presets.indexOf(preset)
+                        FilterChip(
+                            selected = index == selectedPreset,
+                            onClick = {
+                                selectedPreset = index
+                                name = preset.name
+                                baseUrl = preset.baseUrl
+                            },
+                            label = { Text(preset.name, style = MaterialTheme.typography.bodySmall) },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
                     }
                 }
             }
@@ -312,10 +474,94 @@ private fun AddProviderDialog(bridgeStatus: LocalModelManager.BridgeStatus = Loc
                 models = listOf(ModelConfig(modelId = "local-gguf", displayName = "Local GGUF", maxTokens = 1024, contextWindow = 4096, isActive = true)),
             )
         } else {
-            ProviderConfig(name = name.ifBlank { "Custom Provider" }, baseUrl = baseUrl.ifBlank { "https://api.openai.com/v1" }, isActive = true, kind = ProviderKind.openaiCompat)
+            val preset = presets.getOrNull(selectedPreset)
+            val cleanBaseUrl = baseUrl.ifBlank { preset?.baseUrl ?: "https://api.openai.com/v1" }.trimEnd('/')
+            preset?.copy(
+                name = name.ifBlank { preset.name },
+                baseUrl = cleanBaseUrl,
+                modelsEndpoint = if (cleanBaseUrl == preset.baseUrl.trimEnd('/')) preset.modelsEndpoint else "$cleanBaseUrl/models",
+                isActive = true,
+                updatedAt = System.currentTimeMillis(),
+            ) ?: ProviderConfig(
+                name = name.ifBlank { "Custom Provider" },
+                baseUrl = cleanBaseUrl,
+                modelsEndpoint = "$cleanBaseUrl/models",
+                isActive = true,
+                kind = ProviderKind.openaiCompat,
+            )
         }
         onConfirm(config, apiKey)
     }, enabled = name.isNotBlank() && (providerKind == ProviderKind.localLlama || baseUrl.isNotBlank())) { Text("Add") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
+}
+
+@Composable
+private fun ProviderDetailDialog(
+    provider: ProviderConfig,
+    onDismiss: () -> Unit,
+    onSave: (ProviderConfig, String?) -> Unit,
+) {
+    var name by remember(provider.id) { mutableStateOf(provider.name) }
+    var baseUrl by remember(provider.id) { mutableStateOf(provider.baseUrl) }
+    var modelsEndpoint by remember(provider.id) { mutableStateOf(provider.modelsEndpoint.orEmpty()) }
+    var apiKey by remember(provider.id) { mutableStateOf("") }
+    var headers by remember(provider.id) {
+        mutableStateOf(provider.customHeaders.entries.joinToString("\n") { "${it.key}: ${it.value}" })
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Provider Details") },
+        text = {
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.heightIn(max = 440.dp)) {
+                item { OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Name") }, singleLine = true, modifier = Modifier.fillMaxWidth()) }
+                item { OutlinedTextField(value = baseUrl, onValueChange = { baseUrl = it }, label = { Text("Base URL") }, singleLine = true, modifier = Modifier.fillMaxWidth(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri)) }
+                if (!provider.isLocal) {
+                    item { OutlinedTextField(value = modelsEndpoint, onValueChange = { modelsEndpoint = it }, label = { Text("Models endpoint") }, singleLine = true, modifier = Modifier.fillMaxWidth(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri)) }
+                    item { OutlinedTextField(value = apiKey, onValueChange = { apiKey = it }, label = { Text("API key (leave blank to keep)") }, singleLine = true, modifier = Modifier.fillMaxWidth(), visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password)) }
+                    item {
+                        OutlinedTextField(
+                            value = headers,
+                            onValueChange = { headers = it },
+                            label = { Text("Custom headers") },
+                            placeholder = { Text("HTTP-Referer: https://example.com\nX-Title: Kolo") },
+                            minLines = 3,
+                            maxLines = 6,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    onSave(
+                        provider.copy(
+                            name = name.ifBlank { provider.name },
+                            baseUrl = baseUrl.trim().trimEnd('/'),
+                            modelsEndpoint = modelsEndpoint.trim().ifBlank { null },
+                            customHeaders = parseHeaderLines(headers),
+                        ),
+                        apiKey.trim().ifBlank { null },
+                    )
+                },
+                enabled = name.isNotBlank() && baseUrl.isNotBlank(),
+            ) { Text("Save") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+private fun parseHeaderLines(value: String): Map<String, String> {
+    return value.lineSequence()
+        .map { it.trim() }
+        .filter { it.isNotBlank() && it.contains(":") }
+        .associate { line ->
+            val key = line.substringBefore(":").trim()
+            val headerValue = line.substringAfter(":").trim()
+            key to headerValue
+        }
+        .filterKeys { it.isNotBlank() }
+        .filterValues { it.isNotBlank() }
 }
 
 // ──── Tools ────
@@ -350,6 +596,229 @@ private fun ToolPermissionRow(perm: ToolPermissionUi, onSetPermission: (String, 
             DropdownMenuItem(text = { Text("Never Allow") }, onClick = { onSetPermission(perm.name, ToolPermissionMode.neverAllow); expanded = false })
         }
     }
+}
+
+// ---- Custom Tools ----
+
+@Composable
+private fun CustomToolsSection(
+    tools: List<CustomToolDef>,
+    onSave: (CustomToolDef) -> Unit,
+    onDelete: (String) -> Unit,
+) {
+    var showDialog by remember { mutableStateOf(false) }
+    LazyColumn(modifier = Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        item {
+            Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
+                Column {
+                    Text("Custom Tools", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                    Text("${tools.size} saved", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                FilledTonalButton(onClick = { showDialog = true }, contentPadding = PaddingValues(horizontal = 10.dp)) {
+                    Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Add", style = MaterialTheme.typography.labelMedium)
+                }
+            }
+        }
+        if (tools.isEmpty()) {
+            item { Text("No custom tools yet.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        }
+        items(tools, key = { it.id.value }) { tool ->
+            ListItem(
+                headlineContent = { Text(tool.name, fontWeight = FontWeight.SemiBold) },
+                supportingContent = { Text("${tool.kind.name} / ${tool.permission.name} - ${tool.description}", maxLines = 2, overflow = TextOverflow.Ellipsis) },
+                leadingContent = { Icon(Icons.Filled.Extension, contentDescription = null) },
+                trailingContent = {
+                    IconButton(onClick = { onDelete(tool.id.value) }) {
+                        Icon(Icons.Filled.Delete, contentDescription = "Delete", tint = MaterialTheme.colorScheme.error)
+                    }
+                },
+            )
+        }
+    }
+    if (showDialog) {
+        CustomToolDialog(
+            onDismiss = { showDialog = false },
+            onSave = {
+                onSave(it)
+                showDialog = false
+            },
+        )
+    }
+}
+
+@Composable
+private fun CustomToolDialog(onDismiss: () -> Unit, onSave: (CustomToolDef) -> Unit) {
+    var name by remember { mutableStateOf("") }
+    var description by remember { mutableStateOf("") }
+    var schema by remember { mutableStateOf("""{"type":"object","properties":{"input":{"type":"string"}},"required":["input"]}""") }
+    var systemPrompt by remember { mutableStateOf("") }
+    var userTemplate by remember { mutableStateOf("{{input}}") }
+    var kind by remember { mutableStateOf(CustomToolKind.prompt) }
+    var steps by remember { mutableStateOf("") }
+    var permission by remember { mutableStateOf(ToolPermission.sensitive) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Add Custom Tool") },
+        text = {
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.heightIn(max = 460.dp)) {
+                item { OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Tool name") }, placeholder = { Text("summarize_notes") }, singleLine = true, modifier = Modifier.fillMaxWidth()) }
+                item { OutlinedTextField(value = description, onValueChange = { description = it }, label = { Text("Description") }, minLines = 2, modifier = Modifier.fillMaxWidth()) }
+                item { OutlinedTextField(value = schema, onValueChange = { schema = it }, label = { Text("Parameter JSON schema") }, minLines = 3, maxLines = 5, modifier = Modifier.fillMaxWidth()) }
+                item {
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        FilterChip(selected = kind == CustomToolKind.prompt, onClick = { kind = CustomToolKind.prompt }, label = { Text("Prompt") })
+                        FilterChip(selected = kind == CustomToolKind.composed, onClick = { kind = CustomToolKind.composed }, label = { Text("Composed") })
+                    }
+                }
+                if (kind == CustomToolKind.prompt) {
+                    item { OutlinedTextField(value = systemPrompt, onValueChange = { systemPrompt = it }, label = { Text("System prompt") }, minLines = 3, maxLines = 5, modifier = Modifier.fillMaxWidth()) }
+                    item { OutlinedTextField(value = userTemplate, onValueChange = { userTemplate = it }, label = { Text("User template") }, minLines = 2, maxLines = 4, modifier = Modifier.fillMaxWidth()) }
+                } else {
+                    item {
+                        OutlinedTextField(
+                            value = steps,
+                            onValueChange = { steps = it },
+                            label = { Text("Steps") },
+                            placeholder = { Text("calculator expression={{input}}\nweb_search query={{_previous}}") },
+                            minLines = 4,
+                            maxLines = 8,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                }
+                item {
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        listOf(ToolPermission.safe, ToolPermission.sensitive, ToolPermission.dangerous).forEach { option ->
+                            FilterChip(selected = permission == option, onClick = { permission = option }, label = { Text(option.name) })
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    onSave(
+                        CustomToolDef(
+                            name = name.trim(),
+                            description = description.trim(),
+                            kind = kind,
+                            parameterSchema = schema.trim(),
+                            systemPrompt = systemPrompt.trim(),
+                            userMessage = userTemplate,
+                            steps = if (kind == CustomToolKind.composed) parseComposedStepLines(steps) else emptyList(),
+                            permission = permission,
+                        )
+                    )
+                },
+                enabled = name.isNotBlank() &&
+                    description.isNotBlank() &&
+                    (kind == CustomToolKind.composed || systemPrompt.isNotBlank()) &&
+                    (kind == CustomToolKind.prompt || parseComposedStepLines(steps).isNotEmpty()),
+            ) { Text("Save") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+private fun parseComposedStepLines(value: String): List<ComposedStep> {
+    return value.lineSequence()
+        .map { it.trim() }
+        .filter { it.isNotBlank() }
+        .mapNotNull { line ->
+            val pieces = line.split(Regex("""\s+""")).filter { it.isNotBlank() }
+            val toolName = pieces.firstOrNull()?.trim().orEmpty()
+            if (toolName.isBlank()) return@mapNotNull null
+            val params = pieces.drop(1).mapNotNull { token ->
+                val index = token.indexOf('=')
+                if (index <= 0) null else token.substring(0, index) to token.substring(index + 1)
+            }.toMap()
+            ComposedStep(toolName = toolName, params = params)
+        }
+        .toList()
+}
+
+// ---- Skills ----
+
+@Composable
+private fun SkillsSection(
+    skills: List<Skill>,
+    onSave: (Skill) -> Unit,
+    onDelete: (String) -> Unit,
+    onSetEnabled: (String, Boolean) -> Unit,
+) {
+    var showDialog by remember { mutableStateOf(false) }
+    LazyColumn(modifier = Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        item {
+            Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
+                Column {
+                    Text("Skills", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                    Text("${skills.count { it.isEnabled }} enabled / ${skills.size} saved", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                FilledTonalButton(onClick = { showDialog = true }, contentPadding = PaddingValues(horizontal = 10.dp)) {
+                    Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Add", style = MaterialTheme.typography.labelMedium)
+                }
+            }
+        }
+        if (skills.isEmpty()) {
+            item { Text("No skills yet.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        }
+        items(skills, key = { it.id.value }) { skill ->
+            ListItem(
+                headlineContent = { Text(skill.name, fontWeight = FontWeight.SemiBold) },
+                supportingContent = { Text(skill.description, maxLines = 2, overflow = TextOverflow.Ellipsis) },
+                leadingContent = { Icon(Icons.Filled.AutoStories, contentDescription = null) },
+                trailingContent = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Switch(checked = skill.isEnabled, onCheckedChange = { onSetEnabled(skill.id.value, it) })
+                        IconButton(onClick = { onDelete(skill.id.value) }) {
+                            Icon(Icons.Filled.Delete, contentDescription = "Delete", tint = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                },
+            )
+        }
+    }
+    if (showDialog) {
+        SkillDialog(
+            onDismiss = { showDialog = false },
+            onSave = {
+                onSave(it)
+                showDialog = false
+            },
+        )
+    }
+}
+
+@Composable
+private fun SkillDialog(onDismiss: () -> Unit, onSave: (Skill) -> Unit) {
+    var name by remember { mutableStateOf("") }
+    var description by remember { mutableStateOf("") }
+    var content by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Add Skill") },
+        text = {
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.heightIn(max = 420.dp)) {
+                item { OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Name") }, singleLine = true, modifier = Modifier.fillMaxWidth()) }
+                item { OutlinedTextField(value = description, onValueChange = { description = it }, label = { Text("Description") }, minLines = 2, modifier = Modifier.fillMaxWidth()) }
+                item { OutlinedTextField(value = content, onValueChange = { content = it }, label = { Text("Instructions") }, minLines = 8, maxLines = 12, modifier = Modifier.fillMaxWidth()) }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    onSave(Skill(name = name.trim(), description = description.trim(), content = content.trim()))
+                },
+                enabled = name.isNotBlank() && description.isNotBlank() && content.isNotBlank(),
+            ) { Text("Save") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }
 
 // ──── Memory ────
@@ -423,6 +892,51 @@ private fun MemorySection(memories: List<Memory>, onAdd: (String, String) -> Uni
                 TextButton(onClick = { showAddDialog = false }) { Text("Cancel") }
             },
         )
+    }
+}
+
+// ──── Instructions ────
+
+@Composable
+private fun InstructionsSection(
+    customInstructions: String,
+    onSave: (String) -> Unit,
+) {
+    var draft by remember(customInstructions) { mutableStateOf(customInstructions) }
+    LazyColumn(modifier = Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        item {
+            Text("Custom Instructions", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+            Text("These instructions are added to every chat turn.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        item {
+            OutlinedTextField(
+                value = draft,
+                onValueChange = { draft = it },
+                label = { Text("Instructions") },
+                minLines = 6,
+                maxLines = 10,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+        item {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilledTonalButton(
+                    onClick = { onSave(draft) },
+                    enabled = draft.trim() != customInstructions.trim(),
+                ) {
+                    Text("Save")
+                }
+                OutlinedButton(
+                    onClick = {
+                        draft = ""
+                        onSave("")
+                    },
+                    enabled = customInstructions.isNotBlank() || draft.isNotBlank(),
+                ) {
+                    Text("Clear")
+                }
+            }
+        }
     }
 }
 
@@ -536,5 +1050,5 @@ private fun AboutSection(bridgeStatus: LocalModelManager.BridgeStatus = LocalMod
 }
 
 private enum class SettingsSection(val title: String) {
-    Providers("Providers"), Tools("Tool Permissions"), Memory("Memory"), PhoneControl("Phone Control"), Appearance("Appearance"), About("About"),
+    Providers("Providers"), Tools("Tool Permissions"), CustomTools("Custom Tools"), Skills("Skills"), Memory("Memory"), Instructions("Instructions"), PhoneControl("Phone Control"), Appearance("Appearance"), About("About"),
 }

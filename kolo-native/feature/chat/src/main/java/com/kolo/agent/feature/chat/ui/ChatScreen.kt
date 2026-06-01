@@ -3,7 +3,11 @@ package com.kolo.agent.feature.chat.ui
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.net.Uri
+import android.provider.OpenableColumns
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -43,13 +47,21 @@ import java.util.Date
 @Composable
 fun ChatScreen(
     state: ChatUiState,
-    onSendMessage: (String) -> Unit,
+    onSendMessage: (String, List<MessageAttachment>) -> Unit,
     onCancel: () -> Unit,
     onClearError: () -> Unit = {},
     onSelectChat: (ChatId) -> Unit = {},
     onNewChat: () -> Unit = {},
     onDeleteChat: (ChatId) -> Unit = {},
+    onSetChatSearchQuery: (String) -> Unit = {},
+    onSetActiveFolder: (FolderId?) -> Unit = {},
+    onCreateFolder: (String) -> Unit = {},
+    onDeleteFolder: (FolderId) -> Unit = {},
+    onMoveChat: (ChatId, FolderId?) -> Unit = { _, _ -> },
+    onSetPinned: (ChatId, Boolean) -> Unit = { _, _ -> },
     onNavigateSettings: () -> Unit = {},
+    onSetActiveModel: (String) -> Unit = {},
+    onUsePromptTemplate: (TemplateId) -> Unit = {},
     onAllowOnce: (ToolPermissionApproval) -> Unit = {},
     onAlwaysAllow: (ToolPermissionApproval) -> Unit = {},
     onDenyOnce: (ToolPermissionApproval) -> Unit = {},
@@ -63,6 +75,9 @@ fun ChatScreen(
         drawerContent = {
             ChatDrawer(
                 chats = state.chatList,
+                folders = state.folders,
+                activeFolderId = state.activeFolderId,
+                searchQuery = state.chatSearchQuery,
                 currentChatId = state.currentChatId,
                 onSelectChat = { chatId ->
                     onSelectChat(chatId)
@@ -73,6 +88,12 @@ fun ChatScreen(
                     scope.launch { drawerState.close() }
                 },
                 onDeleteChat = onDeleteChat,
+                onSetSearchQuery = onSetChatSearchQuery,
+                onSetActiveFolder = onSetActiveFolder,
+                onCreateFolder = onCreateFolder,
+                onDeleteFolder = onDeleteFolder,
+                onMoveChat = onMoveChat,
+                onSetPinned = onSetPinned,
                 onNavigateSettings = onNavigateSettings,
                 drawerState = drawerState,
             )
@@ -85,6 +106,8 @@ fun ChatScreen(
             onClearError = onClearError,
             onOpenDrawer = { scope.launch { drawerState.open() } },
             onNavigateSettings = onNavigateSettings,
+            onSetActiveModel = onSetActiveModel,
+            onUsePromptTemplate = onUsePromptTemplate,
             onAllowOnce = onAllowOnce,
             onAlwaysAllow = onAlwaysAllow,
             onDenyOnce = onDenyOnce,
@@ -96,13 +119,24 @@ fun ChatScreen(
 @Composable
 private fun ChatDrawer(
     chats: List<Chat>,
+    folders: List<Folder>,
+    activeFolderId: FolderId?,
+    searchQuery: String,
     currentChatId: ChatId?,
     onSelectChat: (ChatId) -> Unit,
     onNewChat: () -> Unit,
     onDeleteChat: (ChatId) -> Unit,
+    onSetSearchQuery: (String) -> Unit,
+    onSetActiveFolder: (FolderId?) -> Unit,
+    onCreateFolder: (String) -> Unit,
+    onDeleteFolder: (FolderId) -> Unit,
+    onMoveChat: (ChatId, FolderId?) -> Unit,
+    onSetPinned: (ChatId, Boolean) -> Unit,
     onNavigateSettings: () -> Unit,
     drawerState: DrawerState,
 ) {
+    var showFolderDialog by remember { mutableStateOf(false) }
+    var folderDraft by remember { mutableStateOf("") }
     ModalDrawerSheet(
         modifier = Modifier.width(280.dp),
     ) {
@@ -135,6 +169,54 @@ private fun ChatDrawer(
             Text("New Chat", style = MaterialTheme.typography.bodyMedium)
         }
 
+        OutlinedTextField(
+            value = searchQuery,
+            onValueChange = onSetSearchQuery,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+            placeholder = { Text("Search chats") },
+            singleLine = true,
+            leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null, modifier = Modifier.size(18.dp)) },
+            textStyle = MaterialTheme.typography.bodySmall,
+        )
+
+        LazyColumn(
+            modifier = Modifier.fillMaxWidth().heightIn(max = 116.dp),
+            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+        ) {
+            item {
+                NavigationDrawerItem(
+                    label = { Text("All chats", style = MaterialTheme.typography.bodySmall) },
+                    icon = { Icon(Icons.Filled.Forum, contentDescription = null, modifier = Modifier.size(16.dp)) },
+                    selected = activeFolderId == null,
+                    onClick = { onSetActiveFolder(null) },
+                    modifier = Modifier.padding(vertical = 1.dp),
+                )
+            }
+            items(folders, key = { it.id.value }) { folder ->
+                NavigationDrawerItem(
+                    label = { Text(folder.name, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    icon = { Icon(Icons.Filled.Folder, contentDescription = null, modifier = Modifier.size(16.dp)) },
+                    selected = activeFolderId == folder.id,
+                    onClick = { onSetActiveFolder(folder.id) },
+                    badge = {
+                        IconButton(onClick = { onDeleteFolder(folder.id) }, modifier = Modifier.size(24.dp)) {
+                            Icon(Icons.Filled.Close, contentDescription = "Delete folder", modifier = Modifier.size(12.dp))
+                        }
+                    },
+                    modifier = Modifier.padding(vertical = 1.dp),
+                )
+            }
+        }
+        TextButton(
+            onClick = { showFolderDialog = true },
+            modifier = Modifier.padding(horizontal = 8.dp),
+            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+        ) {
+            Icon(Icons.Filled.CreateNewFolder, contentDescription = null, modifier = Modifier.size(16.dp))
+            Spacer(Modifier.width(4.dp))
+            Text("New Folder", style = MaterialTheme.typography.labelMedium)
+        }
+
         // Chat list
         LazyColumn(
             modifier = Modifier.weight(1f).fillMaxWidth(),
@@ -142,6 +224,7 @@ private fun ChatDrawer(
         ) {
             items(chats, key = { it.id.value }) { chat ->
                 val isCurrent = chat.id == currentChatId
+                var menuExpanded by remember { mutableStateOf(false) }
                 NavigationDrawerItem(
                     label = {
                         Column(modifier = Modifier.weight(1f)) {
@@ -161,11 +244,54 @@ private fun ChatDrawer(
                     },
                     icon = {
                         Icon(
-                            Icons.Filled.ChatBubbleOutline,
+                            if (chat.isPinned) Icons.Filled.PushPin else Icons.Filled.ChatBubbleOutline,
                             contentDescription = null,
                             modifier = Modifier.size(18.dp),
                             tint = if (isCurrent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                         )
+                    },
+                    badge = {
+                        Box {
+                            IconButton(onClick = { menuExpanded = true }, modifier = Modifier.size(28.dp)) {
+                                Icon(Icons.Filled.MoreVert, contentDescription = "Chat actions", modifier = Modifier.size(15.dp))
+                            }
+                            DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
+                                DropdownMenuItem(
+                                    text = { Text(if (chat.isPinned) "Unpin" else "Pin") },
+                                    leadingIcon = { Icon(Icons.Filled.PushPin, contentDescription = null) },
+                                    onClick = {
+                                        menuExpanded = false
+                                        onSetPinned(chat.id, !chat.isPinned)
+                                    },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("No folder") },
+                                    leadingIcon = { Icon(Icons.Filled.FolderOff, contentDescription = null) },
+                                    onClick = {
+                                        menuExpanded = false
+                                        onMoveChat(chat.id, null)
+                                    },
+                                )
+                                folders.forEach { folder ->
+                                    DropdownMenuItem(
+                                        text = { Text(folder.name) },
+                                        leadingIcon = { Icon(Icons.Filled.Folder, contentDescription = null) },
+                                        onClick = {
+                                            menuExpanded = false
+                                            onMoveChat(chat.id, folder.id)
+                                        },
+                                    )
+                                }
+                                DropdownMenuItem(
+                                    text = { Text("Delete") },
+                                    leadingIcon = { Icon(Icons.Filled.Delete, contentDescription = null) },
+                                    onClick = {
+                                        menuExpanded = false
+                                        onDeleteChat(chat.id)
+                                    },
+                                )
+                            }
+                        }
                     },
                     selected = isCurrent,
                     onClick = { onSelectChat(chat.id) },
@@ -185,22 +311,51 @@ private fun ChatDrawer(
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp).navigationBarsPadding(),
         )
     }
+
+    if (showFolderDialog) {
+        AlertDialog(
+            onDismissRequest = { showFolderDialog = false },
+            title = { Text("New Folder") },
+            text = {
+                OutlinedTextField(
+                    value = folderDraft,
+                    onValueChange = { folderDraft = it },
+                    label = { Text("Folder name") },
+                    singleLine = true,
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onCreateFolder(folderDraft)
+                        folderDraft = ""
+                        showFolderDialog = false
+                    },
+                    enabled = folderDraft.isNotBlank(),
+                ) { Text("Create") }
+            },
+            dismissButton = { TextButton(onClick = { showFolderDialog = false }) { Text("Cancel") } },
+        )
+    }
 }
 
 @Composable
 private fun ChatContent(
     state: ChatUiState,
-    onSendMessage: (String) -> Unit,
+    onSendMessage: (String, List<MessageAttachment>) -> Unit,
     onCancel: () -> Unit,
     onClearError: () -> Unit,
     onOpenDrawer: () -> Unit,
     onNavigateSettings: () -> Unit,
+    onSetActiveModel: (String) -> Unit,
+    onUsePromptTemplate: (TemplateId) -> Unit,
     onAllowOnce: (ToolPermissionApproval) -> Unit,
     onAlwaysAllow: (ToolPermissionApproval) -> Unit,
     onDenyOnce: (ToolPermissionApproval) -> Unit,
     onBlock: (ToolPermissionApproval) -> Unit,
 ) {
     var inputText by remember { mutableStateOf("") }
+    var pendingAttachments by remember { mutableStateOf<List<MessageAttachment>>(emptyList()) }
     val listState = rememberLazyListState()
 
     // Auto-scroll to bottom on new messages
@@ -215,22 +370,32 @@ private fun ChatContent(
             ChatHeader(
                 provider = state.activeProvider,
                 model = state.activeModel,
+                providerConfig = state.activeProviderConfig,
                 onOpenDrawer = onOpenDrawer,
                 onSettings = onNavigateSettings,
+                onSetActiveModel = onSetActiveModel,
             )
         },
         bottomBar = {
             ChatInputBar(
                 value = inputText,
                 onValueChange = { inputText = it },
+                attachments = pendingAttachments,
+                onAttachmentsChanged = { pendingAttachments = it },
                 onSend = {
-                    if (inputText.isNotBlank()) {
-                        onSendMessage(inputText.trim())
+                    if (inputText.isNotBlank() || pendingAttachments.isNotEmpty()) {
+                        onSendMessage(inputText.trim(), pendingAttachments)
                         inputText = ""
+                        pendingAttachments = emptyList()
                     }
                 },
                 isStreaming = state.isStreaming,
                 onCancel = onCancel,
+                promptTemplates = state.promptTemplates,
+                onInsertPrompt = { template ->
+                    inputText = if (inputText.isBlank()) template.body else "${inputText.trimEnd()}\n\n${template.body}"
+                    onUsePromptTemplate(template.id)
+                },
             )
         },
         contentWindowInsets = WindowInsets(0),
@@ -310,9 +475,14 @@ private fun ChatContent(
 private fun ChatHeader(
     provider: String?,
     model: String?,
+    providerConfig: ProviderConfig?,
     onOpenDrawer: () -> Unit,
     onSettings: () -> Unit,
+    onSetActiveModel: (String) -> Unit,
 ) {
+    var expanded by remember { mutableStateOf(false) }
+    val models = providerConfig?.models.orEmpty()
+    val showModelPicker = models.size > 1
     Surface(
         tonalElevation = 2.dp,
         shadowElevation = 1.dp,
@@ -344,6 +514,34 @@ private fun ChatHeader(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         lineHeight = 14.sp,
                     )
+                }
+            }
+            if (showModelPicker) {
+                Box {
+                    IconButton(onClick = { expanded = true }, modifier = Modifier.size(40.dp)) {
+                        Icon(Icons.Filled.ArrowDropDown, contentDescription = "Switch model", modifier = Modifier.size(24.dp))
+                    }
+                    DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                        models.forEach { option ->
+                            DropdownMenuItem(
+                                text = {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        if (option.modelId == providerConfig?.activeModel?.modelId) {
+                                            Icon(Icons.Filled.Check, contentDescription = null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+                                        } else {
+                                            Spacer(modifier = Modifier.width(16.dp))
+                                        }
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(option.label, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    }
+                                },
+                                onClick = {
+                                    expanded = false
+                                    onSetActiveModel(option.modelId)
+                                },
+                            )
+                        }
+                    }
                 }
             }
             IconButton(onClick = onSettings, modifier = Modifier.size(40.dp)) {
@@ -516,6 +714,38 @@ private fun MessageBubble(message: Message) {
                     style = MaterialTheme.typography.bodyMedium,
                     color = if (isUser) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                if (message.attachments.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        message.attachments.forEach { attachment ->
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(
+                                        if (isUser) MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.14f)
+                                        else MaterialTheme.colorScheme.surface.copy(alpha = 0.72f)
+                                    )
+                                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                            ) {
+                                Icon(
+                                    if (attachment.kind == "image") Icons.Filled.Image else Icons.Filled.AttachFile,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(14.dp),
+                                    tint = if (isUser) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                                Spacer(Modifier.width(4.dp))
+                                Text(
+                                    attachment.name,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (isUser) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
+                    }
+                }
                 val messageError = message.error
                 if (messageError != null) {
                     Text(
@@ -544,6 +774,27 @@ private fun copyMessageToClipboard(context: Context, text: String) {
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     clipboard.setPrimaryClip(ClipData.newPlainText("Kolo message", text))
     Toast.makeText(context, "Message copied", Toast.LENGTH_SHORT).show()
+}
+
+private fun Context.toMessageAttachment(uri: Uri): MessageAttachment {
+    var name = uri.lastPathSegment?.substringAfterLast('/').orEmpty()
+    var size = -1L
+    contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+        if (cursor.moveToFirst()) {
+            val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
+            if (nameIndex >= 0) name = cursor.getString(nameIndex).orEmpty()
+            if (sizeIndex >= 0) size = cursor.getLong(sizeIndex)
+        }
+    }
+    val mimeType = contentResolver.getType(uri) ?: "application/octet-stream"
+    return MessageAttachment(
+        name = name.ifBlank { "attachment" },
+        mimeType = mimeType,
+        uri = uri.toString(),
+        kind = if (mimeType.lowercase().startsWith("image/")) "image" else "file",
+        sizeBytes = size,
+    )
 }
 
 @Composable
@@ -715,10 +966,23 @@ private fun TokenUsageBar(usage: TokenUsage) {
 private fun ChatInputBar(
     value: String,
     onValueChange: (String) -> Unit,
+    attachments: List<MessageAttachment>,
+    onAttachmentsChanged: (List<MessageAttachment>) -> Unit,
     onSend: () -> Unit,
     isStreaming: Boolean,
     onCancel: () -> Unit,
+    promptTemplates: List<PromptTemplate>,
+    onInsertPrompt: (PromptTemplate) -> Unit,
 ) {
+    var showPromptLibrary by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    val attachmentPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetMultipleContents(),
+    ) { uris ->
+        if (uris.isNotEmpty()) {
+            onAttachmentsChanged((attachments + uris.map { context.toMessageAttachment(it) }).take(8))
+        }
+    }
     Surface(
         tonalElevation = 2.dp,
         shadowElevation = 4.dp,
@@ -732,23 +996,68 @@ private fun ChatInputBar(
             verticalAlignment = Alignment.Bottom,
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            OutlinedTextField(
-                value = value,
-                onValueChange = onValueChange,
-                modifier = Modifier.weight(1f),
-                placeholder = { Text("Message…") },
-                maxLines = 4,
-                shape = RoundedCornerShape(20.dp),
-                textStyle = MaterialTheme.typography.bodyMedium,
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                keyboardActions = KeyboardActions(
-                    onSend = {
-                        if (value.isNotBlank() && !isStreaming) {
-                            onSend()
+            IconButton(
+                onClick = { showPromptLibrary = true },
+                modifier = Modifier.size(36.dp),
+                enabled = promptTemplates.isNotEmpty(),
+            ) {
+                Icon(
+                    Icons.Filled.Article,
+                    contentDescription = "Prompt library",
+                    tint = if (promptTemplates.isNotEmpty()) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f),
+                    modifier = Modifier.size(20.dp),
+                )
+            }
+            IconButton(
+                onClick = { attachmentPicker.launch("*/*") },
+                modifier = Modifier.size(36.dp),
+                enabled = !isStreaming,
+            ) {
+                Icon(Icons.Filled.AttachFile, contentDescription = "Attach", modifier = Modifier.size(20.dp))
+            }
+            Column(modifier = Modifier.weight(1f)) {
+                if (attachments.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        attachments.take(3).forEach { attachment ->
+                            AssistChip(
+                                onClick = {},
+                                label = { Text(attachment.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                leadingIcon = { Icon(if (attachment.kind == "image") Icons.Filled.Image else Icons.Filled.AttachFile, contentDescription = null, modifier = Modifier.size(14.dp)) },
+                                trailingIcon = {
+                                    IconButton(
+                                        onClick = { onAttachmentsChanged(attachments - attachment) },
+                                        modifier = Modifier.size(18.dp),
+                                    ) { Icon(Icons.Filled.Close, contentDescription = "Remove", modifier = Modifier.size(12.dp)) }
+                                },
+                                modifier = Modifier.weight(1f, fill = false).height(32.dp),
+                            )
                         }
-                    },
-                ),
-            )
+                        if (attachments.size > 3) {
+                            AssistChip(onClick = {}, label = { Text("+${attachments.size - 3}") }, modifier = Modifier.height(32.dp))
+                        }
+                    }
+                }
+                OutlinedTextField(
+                    value = value,
+                    onValueChange = onValueChange,
+                    modifier = Modifier.fillMaxWidth(),
+                    placeholder = { Text("Message…") },
+                    maxLines = 4,
+                    shape = RoundedCornerShape(20.dp),
+                    textStyle = MaterialTheme.typography.bodyMedium,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                    keyboardActions = KeyboardActions(
+                        onSend = {
+                            if ((value.isNotBlank() || attachments.isNotEmpty()) && !isStreaming) {
+                                onSend()
+                            }
+                        },
+                    ),
+                )
+            }
 
             if (isStreaming) {
                 FilledIconButton(
@@ -767,7 +1076,7 @@ private fun ChatInputBar(
                     onClick = onSend,
                     modifier = Modifier.size(36.dp),
                     shape = CircleShape,
-                    enabled = value.isNotBlank(),
+                    enabled = value.isNotBlank() || attachments.isNotEmpty(),
                     colors = IconButtonDefaults.filledIconButtonColors(
                         containerColor = MaterialTheme.colorScheme.primary,
                         contentColor = MaterialTheme.colorScheme.onPrimary,
@@ -778,6 +1087,56 @@ private fun ChatInputBar(
                     Icon(Icons.Filled.ArrowUpward, contentDescription = "Send", modifier = Modifier.size(18.dp))
                 }
             }
+        }
+    }
+
+    if (showPromptLibrary) {
+        PromptLibrarySheet(
+            templates = promptTemplates,
+            onDismiss = { showPromptLibrary = false },
+            onSelect = { template ->
+                onInsertPrompt(template)
+                showPromptLibrary = false
+            },
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun PromptLibrarySheet(
+    templates: List<PromptTemplate>,
+    onDismiss: () -> Unit,
+    onSelect: (PromptTemplate) -> Unit,
+) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+        ) {
+            Text("Prompt Library", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            Spacer(modifier = Modifier.height(8.dp))
+            LazyColumn(
+                modifier = Modifier.heightIn(max = 360.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                items(templates, key = { it.id.value }) { template ->
+                    Surface(
+                        onClick = { onSelect(template) },
+                        shape = MaterialTheme.shapes.small,
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Column(modifier = Modifier.padding(10.dp)) {
+                            Text(template.name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(template.body, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(12.dp))
         }
     }
 }

@@ -12,13 +12,18 @@ import kotlinx.serialization.json.*
 data class ApiMessage(
     val role: String,
     val content: String? = null,
+    val contentParts: List<ApiContentPart>? = null,
     val name: String? = null,
     val toolCalls: List<ApiToolCall>? = null,
     val toolCallId: String? = null,
 ) {
     fun toJson(): JsonObject = buildJsonObject {
         put("role", role)
-        if (content != null) {
+        if (!contentParts.isNullOrEmpty()) {
+            put("content", buildJsonArray {
+                contentParts.forEach { add(it.toJson()) }
+            })
+        } else if (content != null) {
             put("content", content)
         } else {
             put("content", JsonNull)
@@ -32,6 +37,23 @@ data class ApiMessage(
             })
         }
         toolCallId?.let { put("tool_call_id", it) }
+    }
+}
+
+@Serializable
+data class ApiContentPart(
+    val type: String,
+    val text: String? = null,
+    val imageUrl: String? = null,
+) {
+    fun toJson(): JsonObject = buildJsonObject {
+        put("type", type)
+        when (type) {
+            "text" -> put("text", text.orEmpty())
+            "image_url" -> put("image_url", buildJsonObject {
+                put("url", imageUrl.orEmpty())
+            })
+        }
     }
 }
 

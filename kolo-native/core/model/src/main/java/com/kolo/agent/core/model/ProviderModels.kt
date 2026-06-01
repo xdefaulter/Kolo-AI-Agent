@@ -34,6 +34,7 @@ data class ProviderConfig(
     val modelsEndpoint: String? = null,
     val kind: ProviderKind = ProviderKind.openaiCompat,
     val modelPath: String? = null,
+    val localGpuLayers: Int = 0,
     val disabledTools: Set<String> = emptySet(),
     val smallModelMode: Boolean = false,
     val models: List<ModelConfig> = emptyList(),
@@ -122,6 +123,7 @@ data class Skill(
 /**
  * Tool permission levels.
  */
+@Serializable
 enum class ToolPermission {
     safe, sensitive, dangerous
 }
@@ -129,6 +131,7 @@ enum class ToolPermission {
 /**
  * Per-tool permission modes.
  */
+@Serializable
 enum class ToolPermissionMode {
     alwaysAllow, askEveryTime, neverAllow
 }
@@ -177,7 +180,7 @@ object ProviderPresets {
         ProviderConfig(
             name = "Fireworks AI",
             baseUrl = "https://api.fireworks.ai/inference/v1",
-            modelsEndpoint = "https://api.fireworks.ai/inference/v1/models",
+            modelsEndpoint = "https://api.fireworks.ai/v1/accounts/fireworks/models?filter=supports_serverless%3Dtrue&pageSize=100",
             models = listOf(
                 ModelConfig(modelId = "accounts/fireworks/models/llama-v3p3-70b-instruct", displayName = "Llama 3.3 70B", maxTokens = 4096),
             ),
@@ -188,6 +191,17 @@ object ProviderPresets {
             modelsEndpoint = "https://api.together.xyz/v1/models",
             models = listOf(
                 ModelConfig(modelId = "meta-llama/Llama-3.3-70B-Instruct-Turbo", displayName = "Llama 3.3 70B", maxTokens = 4096),
+            ),
+        ),
+        ProviderConfig(
+            name = "Ollama Cloud",
+            baseUrl = "https://ollama.com/v1",
+            modelsEndpoint = "https://ollama.com/v1/models",
+            models = listOf(
+                ModelConfig(modelId = "glm-5.1:cloud", displayName = "GLM 5.1 Cloud", maxTokens = 4096, contextWindow = 128000, description = "Zhipu GLM 5.1 via Ollama Cloud"),
+                ModelConfig(modelId = "kimi-k2.6", displayName = "Kimi K2.6", maxTokens = 4096, contextWindow = 128000, description = "Moonshot Kimi K2.6"),
+                ModelConfig(modelId = "deepseek-v3.2", displayName = "DeepSeek V3.2", maxTokens = 4096, contextWindow = 128000, description = "DeepSeek V3.2"),
+                ModelConfig(modelId = "qwen3.5:397b", displayName = "Qwen 3.5 397B", maxTokens = 4096, contextWindow = 128000, description = "Alibaba Qwen 3.5"),
             ),
         ),
         ProviderConfig(

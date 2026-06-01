@@ -22,6 +22,7 @@ data class MessageEntity(
     val chat_id: String,
     val role: String,
     val content: String,
+    val attachments_json: String? = null,
     val tool_call_id: String? = null,
     val tool_name: String? = null,
     val tool_success: Boolean? = null,
@@ -36,11 +37,15 @@ fun MessageEntity.toDomain(): Message {
     val toolCalls = tool_calls_json?.let {
         kotlinx.serialization.json.Json.decodeFromString<List<ToolCallInfo>>(it)
     }
+    val attachments = attachments_json?.let {
+        kotlinx.serialization.json.Json.decodeFromString<List<MessageAttachment>>(it)
+    }.orEmpty()
     return Message(
         id = MessageId(id),
         chatId = ChatId(chat_id),
         role = MessageRole.fromWire(role),
         content = content,
+        attachments = attachments,
         toolCallId = tool_call_id?.let(::ToolCallId),
         toolName = tool_name,
         toolSuccess = tool_success,
@@ -57,6 +62,12 @@ fun Message.toEntity() = MessageEntity(
     chat_id = chatId.value,
     role = role.wire,
     content = content,
+    attachments_json = attachments.takeIf { it.isNotEmpty() }?.let {
+        kotlinx.serialization.json.Json.encodeToString(
+            kotlinx.serialization.builtins.ListSerializer(MessageAttachment.serializer()),
+            it
+        )
+    },
     tool_call_id = toolCallId?.value,
     tool_name = toolName,
     tool_success = toolSuccess,

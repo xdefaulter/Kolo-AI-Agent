@@ -30,7 +30,12 @@ interface LocalLlmEngine {
      * @param contextSize Context window size in tokens.
      * @param threads Number of threads for inference.
      */
-    suspend fun loadModel(modelPath: String, contextSize: Int = 4096, threads: Int = 4)
+    suspend fun loadModel(
+        modelPath: String,
+        contextSize: Int = 4096,
+        threads: Int = 4,
+        gpuLayers: Int = 0,
+    )
 
     /** Unload the current model and free memory. */
     suspend fun unloadModel()
@@ -233,14 +238,16 @@ class LlamaCppEngine : LocalLlmEngine {
     private var nativeHandle: Long = 0L
     private var loadedContextSize: Int = 0
     private var loadedThreads: Int = 0
+    private var loadedGpuLayers: Int = 0
 
-    override suspend fun loadModel(modelPath: String, contextSize: Int, threads: Int) {
+    override suspend fun loadModel(modelPath: String, contextSize: Int, threads: Int, gpuLayers: Int) {
         if (
             nativeHandle != 0L &&
             isModelLoaded &&
             loadedModelPath == modelPath &&
             loadedContextSize == contextSize &&
-            loadedThreads == threads
+            loadedThreads == threads &&
+            loadedGpuLayers == gpuLayers
         ) {
             Log.i(TAG, "Reusing loaded model/context: $modelPath")
             return
@@ -264,7 +271,7 @@ class LlamaCppEngine : LocalLlmEngine {
                     "llama.cpp runtime is unavailable. Reinstall the app to enable local inference."
                 )
             }
-            LlamaCppBridge.loadModel(modelPath, contextSize, threads)
+            LlamaCppBridge.loadModel(modelPath, contextSize, threads, gpuLayers)
         }
         if (nativeHandle == 0L) {
             Log.e(TAG, "llama.cpp failed to load model: $modelPath")
@@ -274,6 +281,7 @@ class LlamaCppEngine : LocalLlmEngine {
         loadedModelPath = modelPath
         loadedContextSize = contextSize
         loadedThreads = threads
+        loadedGpuLayers = gpuLayers
         Log.i(TAG, "Model loaded: $modelPath")
     }
 
@@ -291,6 +299,7 @@ class LlamaCppEngine : LocalLlmEngine {
         loadedModelPath = null
         loadedContextSize = 0
         loadedThreads = 0
+        loadedGpuLayers = 0
     }
 
     override fun completeStream(
@@ -346,7 +355,7 @@ class StubLocalLlmEngine : LocalLlmEngine {
     override var loadedModelPath: String? = null
         private set
 
-    override suspend fun loadModel(modelPath: String, contextSize: Int, threads: Int) {
+    override suspend fun loadModel(modelPath: String, contextSize: Int, threads: Int, gpuLayers: Int) {
         if (!GgufHelpers.isValidModel(modelPath)) {
             throw IllegalArgumentException("Model file not found or not a valid GGUF file: $modelPath")
         }

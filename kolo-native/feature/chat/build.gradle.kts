@@ -46,6 +46,7 @@ dependencies {
     implementation(libs.compose.runtime)
 
     implementation(libs.lifecycle.runtime.compose)
+    implementation(libs.activity.compose)
     implementation(libs.lifecycle.viewmodel.compose)
     implementation(libs.navigation.compose)
     implementation(libs.kotlinx.coroutines.android)

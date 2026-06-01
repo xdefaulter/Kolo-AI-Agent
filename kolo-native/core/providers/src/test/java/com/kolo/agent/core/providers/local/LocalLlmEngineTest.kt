@@ -17,7 +17,7 @@ class LocalLlmEngineTest {
     private fun createTestEngine() = object : LocalLlmEngine {
         override val isModelLoaded get() = false
         override val loadedModelPath get() = null
-        override suspend fun loadModel(modelPath: String, contextSize: Int, threads: Int) {}
+        override suspend fun loadModel(modelPath: String, contextSize: Int, threads: Int, gpuLayers: Int) {}
         override suspend fun unloadModel() {}
         override fun completeStream(prompt: String, maxTokens: Int, temperature: Float, topP: Float, repeatPenalty: Float): Flow<String> = flowOf()
     }
