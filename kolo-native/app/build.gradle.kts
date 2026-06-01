@@ -6,6 +6,30 @@ plugins {
     alias(libs.plugins.hilt)
 }
 
+val releaseStoreFile = providers.gradleProperty("KOLO_RELEASE_STORE_FILE")
+    .orElse(providers.environmentVariable("KOLO_RELEASE_STORE_FILE"))
+val releaseStorePassword = providers.gradleProperty("KOLO_RELEASE_STORE_PASSWORD")
+    .orElse(providers.environmentVariable("KOLO_RELEASE_STORE_PASSWORD"))
+val releaseKeyAlias = providers.gradleProperty("KOLO_RELEASE_KEY_ALIAS")
+    .orElse(providers.environmentVariable("KOLO_RELEASE_KEY_ALIAS"))
+val releaseKeyPassword = providers.gradleProperty("KOLO_RELEASE_KEY_PASSWORD")
+    .orElse(providers.environmentVariable("KOLO_RELEASE_KEY_PASSWORD"))
+val releaseSigningValues = listOf(
+    releaseStoreFile.orNull,
+    releaseStorePassword.orNull,
+    releaseKeyAlias.orNull,
+    releaseKeyPassword.orNull,
+)
+val hasAnyReleaseSigningValue = releaseSigningValues.any { !it.isNullOrBlank() }
+val hasReleaseSigning = releaseSigningValues.all { !it.isNullOrBlank() }
+
+if (hasAnyReleaseSigningValue && !hasReleaseSigning) {
+    throw GradleException(
+        "Release signing requires KOLO_RELEASE_STORE_FILE, KOLO_RELEASE_STORE_PASSWORD, " +
+            "KOLO_RELEASE_KEY_ALIAS, and KOLO_RELEASE_KEY_PASSWORD.",
+    )
+}
+
 android {
     namespace = "com.kolo.agent"
     compileSdk = libs.versions.compileSdk.get().toInt()
@@ -25,11 +49,29 @@ android {
         }
     }
 
+    if (hasReleaseSigning) {
+        val releaseKeystore = file(releaseStoreFile.get())
+        if (!releaseKeystore.isFile) {
+            throw GradleException("Release signing store file does not exist: ${releaseKeystore.path}")
+        }
+        signingConfigs {
+            create("release") {
+                storeFile = releaseKeystore
+                storePassword = releaseStorePassword.get()
+                keyAlias = releaseKeyAlias.get()
+                keyPassword = releaseKeyPassword.get()
+            }
+        }
+    }
+
     buildTypes {
         release {
             manifestPlaceholders["usesCleartextTraffic"] = "false"
             isMinifyEnabled = true
             isShrinkResources = true
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",

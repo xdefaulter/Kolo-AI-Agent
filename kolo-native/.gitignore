@@ -11,6 +11,9 @@
 *.aab
 *.ap_
 *.dex
+*.jks
+*.keystore
+signing.properties
 
 # Kotlin
 *.class

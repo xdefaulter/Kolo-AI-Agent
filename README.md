@@ -86,6 +86,30 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 The debug app package is `com.kolo.agent.debug`.
 
+## Release Builds
+
+Release builds enable minification, resource shrinking, backup hardening, and
+disable cleartext traffic by default:
+
+```sh
+cd kolo-native
+./gradlew :app:assembleRelease
+```
+
+Without signing configuration, Gradle writes an unsigned release APK for local
+verification. To produce a signed release artifact, provide these values through
+environment variables or Gradle properties outside Git:
+
+```sh
+KOLO_RELEASE_STORE_FILE=/absolute/path/to/release.jks
+KOLO_RELEASE_STORE_PASSWORD=...
+KOLO_RELEASE_KEY_ALIAS=...
+KOLO_RELEASE_KEY_PASSWORD=...
+```
+
+The build fails if only part of the signing configuration is present. Do not
+commit keystores, passwords, generated APKs, or generated AABs.
+
 ## Tests
 
 Run the main native unit tests:
