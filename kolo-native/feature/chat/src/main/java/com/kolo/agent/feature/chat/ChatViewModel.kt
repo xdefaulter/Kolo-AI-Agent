@@ -417,6 +417,7 @@ class ChatViewModel @Inject constructor(
         }
 
         viewModelScope.launch {
+            var draftAccepted = false
             isCancelled = false
             val persisted = persistAttachments(attachments)
             if (persisted.failed.isNotEmpty()) {
@@ -450,7 +451,6 @@ class ChatViewModel @Inject constructor(
                 error = null, activeToolCalls = emptyList(), toolResults = emptyMap(),
                 pendingApproval = null,
             )}
-            onAccepted(true)
 
             try {
                 val rawProvider = providerRep.getActiveProvider()
@@ -511,6 +511,8 @@ class ChatViewModel @Inject constructor(
                     },
                 )
 
+                draftAccepted = true
+                onAccepted(true)
                 agentLoop.run(config = provider, messages = fullMessages, chatId = chatId.value).collect { event ->
                     if (isCancelled) return@collect
                     when (event) {
@@ -541,6 +543,9 @@ class ChatViewModel @Inject constructor(
                 }
                 loadChatList()
             } catch (e: Exception) {
+                if (!draftAccepted) {
+                    onAccepted(false)
+                }
                 _uiState.update { it.copy(error = e.message, isStreaming = false, isLoading = false) }
             }
         }
