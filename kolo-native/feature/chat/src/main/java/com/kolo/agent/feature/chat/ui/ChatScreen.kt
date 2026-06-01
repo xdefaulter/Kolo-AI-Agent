@@ -831,87 +831,113 @@ private fun ChatHeader(
         tonalElevation = 2.dp,
         shadowElevation = 1.dp,
     ) {
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(start = 2.dp, end = 2.dp, top = 0.dp, bottom = 0.dp)
                 .statusBarsPadding(),
-            verticalAlignment = Alignment.CenterVertically,
         ) {
-            IconButton(onClick = onOpenDrawer, modifier = Modifier.size(40.dp)) {
-                Icon(Icons.Filled.Menu, contentDescription = "Chat list", modifier = Modifier.size(22.dp))
-            }
-            Spacer(modifier = Modifier.width(4.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = model ?: "Kolo AI",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    lineHeight = 18.sp,
-                )
-                if (provider != null) {
-                    Text(
-                        text = "$provider • $activeModelDisplay",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        lineHeight = 14.sp,
-                    )
-                } else {
-                    Text(
-                        text = "No provider configured",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.error,
-                        lineHeight = 14.sp,
-                    )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconButton(onClick = onOpenDrawer, modifier = Modifier.size(40.dp)) {
+                    Icon(Icons.Filled.Menu, contentDescription = "Chat list", modifier = Modifier.size(22.dp))
                 }
-                modelFetchStatus?.takeIf { it.isNotBlank() }?.let {
+                Spacer(modifier = Modifier.width(4.dp))
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = it,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        text = provider ?: "Kolo AI",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
+                        lineHeight = 18.sp,
                     )
-                }
-            }
-
-            if (providerConfig?.isLocal == true) {
-                AssistChip(
-                    onClick = onSettings,
-                    label = {
+                    if (provider != null) {
                         Text(
-                            "$runtimeLabel · $localRuntimeStatusLabel",
+                            text = activeModelDisplay,
                             style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            lineHeight = 14.sp,
                             maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                         )
-                    },
-                    leadingIcon = {
-                        Icon(Icons.Filled.Speed, contentDescription = null, modifier = Modifier.size(12.dp))
-                    },
-                )
+                    } else {
+                        Text(
+                            text = "No provider configured",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.error,
+                            lineHeight = 14.sp,
+                        )
+                    }
+                    modelFetchStatus?.takeIf { it.isNotBlank() }?.let {
+                        Text(
+                            text = it,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+
+                if (!hasProvider) {
+                    FilledTonalButton(
+                        onClick = onSettings,
+                        contentPadding = PaddingValues(horizontal = 8.dp),
+                    ) {
+                        Icon(Icons.Filled.Settings, contentDescription = null, modifier = Modifier.size(14.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Setup", style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+                IconButton(onClick = onSettings, modifier = Modifier.size(40.dp)) {
+                    Icon(Icons.Filled.Settings, contentDescription = "Settings", modifier = Modifier.size(22.dp))
+                }
             }
 
             if (hasProvider) {
-                BadgedBox(
-                    modifier = Modifier.padding(start = 2.dp),
-                    badge = {
-                        if (isRefreshingModels) {
-                            Badge { Icon(Icons.Filled.CloudSync, contentDescription = "Syncing", modifier = Modifier.size(10.dp)) }
-                        }
-                    }
-                    ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 8.dp, end = 8.dp, bottom = 6.dp),
+                ) {
                     OutlinedButton(
                         onClick = { expanded = true },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 38.dp),
                         contentPadding = PaddingValues(horizontal = 10.dp),
                     ) {
-                        Text(activeModelDisplay, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Spacer(Modifier.width(2.dp))
+                        Icon(
+                            if (isLocalProvider) Icons.Filled.Memory else Icons.Filled.Cloud,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            text = if (models.isEmpty()) "Model: no models loaded" else "Model: $activeModelDisplay",
+                            style = MaterialTheme.typography.labelSmall,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
+                        if (isRefreshingModels) {
+                            CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(6.dp))
+                        }
+                        if (providerConfig?.isLocal == true) {
+                            Text(
+                                "$runtimeLabel · $localRuntimeStatusLabel",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                            )
+                            Spacer(Modifier.width(6.dp))
+                        }
                         Icon(Icons.Filled.ArrowDropDown, contentDescription = "Model picker", modifier = Modifier.size(16.dp))
                     }
-                }
-                Box {
                     DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
                         if (isRefreshingModels) {
                             DropdownMenuItem(
@@ -1008,18 +1034,6 @@ private fun ChatHeader(
                         )
                     }
                 }
-            } else {
-                FilledTonalButton(
-                    onClick = onSettings,
-                    contentPadding = PaddingValues(horizontal = 8.dp),
-                ) {
-                    Icon(Icons.Filled.Settings, contentDescription = null, modifier = Modifier.size(14.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("Setup", style = MaterialTheme.typography.labelSmall)
-                }
-            }
-            IconButton(onClick = onSettings, modifier = Modifier.size(40.dp)) {
-                Icon(Icons.Filled.Settings, contentDescription = "Settings", modifier = Modifier.size(22.dp))
             }
         }
     }
