@@ -221,11 +221,14 @@ class LocalModelManager @Inject constructor(
         val file = File(model.path)
         val deleted = file.deleteSafely()
         if (deleted) {
-            // If this was the active model, clear it and persist
-            if (_activeModelPath.value == model.path) {
-                setActiveModel(null)
-            }
             refreshModelList()
+            if (_activeModelPath.value == model.path) {
+                val fallback = _importedModels.value
+                    .filter { it.path != model.path }
+                    .sortedBy { it.name }
+                    .firstOrNull()
+                setActiveModel(fallback?.path)
+            }
             Log.i(TAG, "Deleted model: ${model.fileName}")
         } else {
             Log.w(TAG, "Failed to delete model: ${model.fileName}")

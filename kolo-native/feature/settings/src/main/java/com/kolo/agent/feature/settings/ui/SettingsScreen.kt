@@ -1184,6 +1184,16 @@ private fun SkillsSection(
     var showDialog by remember { mutableStateOf(false) }
     var selectedSkill by remember { mutableStateOf<Skill?>(null) }
     var pendingDeleteSkill by remember { mutableStateOf<Skill?>(null) }
+    var query by remember { mutableStateOf("") }
+    val filteredSkills by remember(skills, query) {
+        val normalized = query.trim().lowercase()
+        mutableStateOf(
+            if (normalized.isBlank()) skills else skills.filter {
+                it.name.lowercase().contains(normalized) ||
+                    it.description.lowercase().contains(normalized)
+            },
+        )
+    }
     LazyColumn(modifier = Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         item {
             Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
@@ -1200,11 +1210,20 @@ private fun SkillsSection(
                     Text("Add", style = MaterialTheme.typography.labelMedium)
                 }
             }
+            Spacer(Modifier.height(6.dp))
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it },
+                label = { Text("Search skills") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(Modifier.height(4.dp))
         }
         if (skills.isEmpty()) {
             item { Text("No skills yet.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         }
-        items(skills, key = { it.id.value }) { skill ->
+        items(filteredSkills, key = { it.id.value }) { skill ->
             ListItem(
                 headlineContent = { Text(skill.name, fontWeight = FontWeight.SemiBold) },
                 supportingContent = { Text(skill.description, maxLines = 2, overflow = TextOverflow.Ellipsis) },
@@ -1224,6 +1243,9 @@ private fun SkillsSection(
                     }
                 },
             )
+        }
+        if (filteredSkills.isEmpty() && query.isNotBlank()) {
+            item { Text("No skills match \"$query\".", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         }
     }
     if (showDialog) {

@@ -603,10 +603,22 @@ private fun ChatContent(
             state.pendingApproval?.let { approval ->
                 ToolApprovalBanner(
                     approval = approval,
-                    onAllowOnce = { onAllowOnce(approval) },
-                    onAlwaysAllow = { onAlwaysAllow(approval) },
-                    onDenyOnce = { onDenyOnce(approval) },
-                    onBlock = { onBlock(approval) },
+                    onAllowOnce = {
+                        Toast.makeText(context, "Allowed ${approval.toolName} once", Toast.LENGTH_SHORT).show()
+                        onAllowOnce(approval)
+                    },
+                    onAlwaysAllow = {
+                        Toast.makeText(context, "Always allowed ${approval.toolName}", Toast.LENGTH_SHORT).show()
+                        onAlwaysAllow(approval)
+                    },
+                    onDenyOnce = {
+                        Toast.makeText(context, "Denied ${approval.toolName} for this request", Toast.LENGTH_SHORT).show()
+                        onDenyOnce(approval)
+                    },
+                    onBlock = {
+                        Toast.makeText(context, "Blocked ${approval.toolName}", Toast.LENGTH_SHORT).show()
+                        onBlock(approval)
+                    },
                 )
             }
 

@@ -29,6 +29,9 @@ fun LocalModelScreen(
     onImportModel: (Uri) -> Unit,
     onDeleteModel: (ImportedModel) -> Unit,
     onSetActiveModel: (ImportedModel?) -> Unit,
+    onSetActiveModelPath: (String) -> Unit,
+    onManualPathChanged: (String) -> Unit,
+    onClearManualPathError: () -> Unit,
     onClearImportStatus: () -> Unit,
     onConfirmDelete: (ImportedModel) -> Unit,
     onDismissDeleteConfirm: () -> Unit,
@@ -39,6 +42,15 @@ fun LocalModelScreen(
         contract = ActivityResultContracts.OpenDocument(),
     ) { uri: Uri? ->
         uri?.let { onImportModel(it) }
+    }
+    var modelSearch by remember { mutableStateOf("") }
+    val filteredModels by remember(state.importedModels, modelSearch) {
+        val normalized = modelSearch.trim().lowercase()
+        mutableStateOf(
+            if (normalized.isBlank()) state.importedModels else state.importedModels.filter {
+                it.name.lowercase().contains(normalized) || it.fileName.lowercase().contains(normalized)
+            },
+        )
     }
 
     // Delete confirmation dialog
@@ -106,8 +118,51 @@ fun LocalModelScreen(
                 ActiveModelCard(
                     activeModel = activeModel,
                     activeModelName = state.activeModelName,
+                    activeModelPath = state.activeModelPath,
                     onClear = { onSetActiveModel(null) },
                 )
+            }
+
+            item {
+                Card(shape = MaterialTheme.shapes.small) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text("Use manual GGUF path", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+                        Text("Use a local file path when your model is stored outside app private storage.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        OutlinedTextField(
+                            value = state.manualPathDraft,
+                            onValueChange = onManualPathChanged,
+                            label = { Text("GGUF file path") },
+                            placeholder = { Text("/sdcard/Download/model.gguf") },
+                            modifier = Modifier.fillMaxWidth(),
+                            supportingText = state.manualPathError?.let { { Text(it) } },
+                            isError = state.manualPathError != null,
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            FilledTonalButton(
+                                onClick = { onSetActiveModelPath(state.manualPathDraft) },
+                                enabled = state.manualPathError == null && state.manualPathDraft.isNotBlank(),
+                            ) {
+                                Text("Use Path")
+                            }
+                            OutlinedButton(
+                                onClick = { onSetActiveModelPath("") },
+                                enabled = state.activeModelPath?.isNotBlank() == true,
+                            ) {
+                                Text("Clear")
+                            }
+                            if (state.manualPathError != null) {
+                                TextButton(onClick = onClearManualPathError) {
+                                    Text("Clear error")
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             // "Use for Local Chat" action when no local provider and there's an active model
@@ -149,8 +204,24 @@ fun LocalModelScreen(
                         Text("Imported Models", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 6.dp, bottom = 4.dp))
                         Text(state.totalModelsSize, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
+                    OutlinedTextField(
+                        value = modelSearch,
+                        onValueChange = { modelSearch = it },
+                        label = { Text("Search models") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
                 }
-                items(state.importedModels, key = { it.path }) { model ->
+                if (filteredModels.isEmpty()) {
+                    item {
+                        Text(
+                            if (modelSearch.isBlank()) "No models imported yet" else "No models match \"$modelSearch\"",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                items(filteredModels, key = { it.path }) { model ->
                     ImportedModelCard(
                         model = model,
                         isActive = model.path == state.activeModelPath,
@@ -302,7 +373,12 @@ private fun ImportStatusCard(status: LocalModelManager.ImportStatus, onDismiss: 
 }
 
 @Composable
-private fun ActiveModelCard(activeModel: ImportedModel?, activeModelName: String?, onClear: () -> Unit) {
+private fun ActiveModelCard(
+    activeModel: ImportedModel?,
+    activeModelName: String?,
+    activeModelPath: String?,
+    onClear: () -> Unit,
+) {
     Card(shape = MaterialTheme.shapes.small) {
         Column(modifier = Modifier.padding(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -320,7 +396,16 @@ private fun ActiveModelCard(activeModel: ImportedModel?, activeModelName: String
                     Text("Clear Active Model", style = MaterialTheme.typography.labelSmall)
                 }
             } else {
-                Text("No active model. Import a GGUF file and set it as active to enable local inference.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (!activeModelPath.isNullOrBlank()) {
+                    Text("Active custom path:", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(activeModelPath.substringAfterLast('/'), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Spacer(modifier = Modifier.height(6.dp))
+                    OutlinedButton(onClick = onClear, contentPadding = PaddingValues(horizontal = 12.dp)) {
+                        Text("Clear Active Model", style = MaterialTheme.typography.labelSmall)
+                    }
+                } else {
+                    Text("No active model. Import a GGUF file or set a manual path to enable local inference.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
             }
         }
     }

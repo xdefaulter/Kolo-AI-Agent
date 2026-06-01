@@ -13,11 +13,14 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import javax.inject.Inject
+import java.io.File
 
 data class LocalModelUiState(
     val importedModels: List<ImportedModel> = emptyList(),
     val activeModelPath: String? = null,
     val activeModelName: String? = null,
+    val manualPathDraft: String = "",
+    val manualPathError: String? = null,
     val bridgeStatus: LocalModelManager.BridgeStatus = LocalModelManager.BridgeStatus.Unknown,
     val importStatus: LocalModelManager.ImportStatus = LocalModelManager.ImportStatus.Idle,
     val totalModelsSize: String = "",
@@ -50,7 +53,13 @@ class LocalModelViewModel @Inject constructor(
             } }
             launch { localModelManager.activeModelPath.collect { path ->
                 val activeName = _uiState.value.importedModels.firstOrNull { it.path == path }?.name
-                _uiState.value = _uiState.value.copy(activeModelPath = path, activeModelName = activeName)
+                val manualPath = path.orEmpty()
+                _uiState.value = _uiState.value.copy(
+                    activeModelPath = path,
+                    activeModelName = activeName,
+                    manualPathDraft = if (manualPath.isNotBlank()) manualPath else "",
+                    manualPathError = null,
+                )
             } }
             launch { localModelManager.bridgeStatus.collect { status ->
                 _uiState.value = _uiState.value.copy(bridgeStatus = status)
@@ -93,6 +102,49 @@ class LocalModelViewModel @Inject constructor(
 
     fun setActiveModel(model: ImportedModel?) {
         viewModelScope.launch { localModelManager.setActiveModel(model?.path) }
+    }
+
+    fun setActiveModelPath(path: String) {
+        val trimmed = path.trim()
+        if (trimmed.isBlank()) {
+            _uiState.value = _uiState.value.copy(manualPathDraft = "", manualPathError = null)
+            viewModelScope.launch { localModelManager.setActiveModel(null) }
+            return
+        }
+
+        val error = when {
+            !File(trimmed).exists() -> "Path does not exist"
+            !File(trimmed).isFile -> "Path must be a file"
+            !trimmed.lowercase().endsWith(".gguf") -> "Path must point to a .gguf file"
+            else -> null
+        }
+
+        if (error != null) {
+            _uiState.value = _uiState.value.copy(manualPathDraft = trimmed, manualPathError = error)
+            return
+        }
+
+        _uiState.value = _uiState.value.copy(manualPathDraft = trimmed, manualPathError = null)
+        viewModelScope.launch { localModelManager.setActiveModel(trimmed) }
+    }
+
+    fun updateManualPathDraft(path: String) {
+        val trimmed = path.trim()
+        val error = if (trimmed.isBlank()) {
+            null
+        } else {
+            when {
+                !File(trimmed).exists() -> "Path does not exist"
+                !File(trimmed).isFile -> "Path must be a file"
+                !trimmed.lowercase().endsWith(".gguf") -> "Path must point to a .gguf file"
+                else -> null
+            }
+        }
+        _uiState.value = _uiState.value.copy(manualPathDraft = path, manualPathError = error)
+    }
+
+    fun clearManualPathError() {
+        _uiState.value = _uiState.value.copy(manualPathError = null)
     }
 
     fun clearImportStatus() {
