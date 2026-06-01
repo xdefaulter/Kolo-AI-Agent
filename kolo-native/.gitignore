@@ -18,9 +18,6 @@ signing.properties
 # Kotlin
 *.class
 
-# Room schemas
-/core/database/schemas/
-
 # Generated files
 **/build/
 **/.gradle/
