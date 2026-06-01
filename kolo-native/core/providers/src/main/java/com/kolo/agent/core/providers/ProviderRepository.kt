@@ -6,7 +6,9 @@ import androidx.datastore.preferences.core.*
 import androidx.datastore.preferences.preferencesDataStore
 import com.kolo.agent.core.model.*
 import com.kolo.agent.core.providers.secure.SecureKeyStore
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.serialization.json.Json
 
 /**
@@ -29,9 +31,21 @@ class ProviderRepository(
     /** Get API key for a provider from secure storage + in-memory cache. */
     fun getApiKey(providerId: String): String = ProviderConfigKeyStore[providerId]
 
+    val providersFlow: Flow<List<ProviderConfig>> = context.dataStore.data.map { prefs ->
+        decodeProviders(prefs[PROVIDERS_KEY])
+    }
+
+    val activeProviderFlow: Flow<ProviderConfig?> = providersFlow.map { providers ->
+        providers.firstOrNull { it.isActive }
+    }
+
     suspend fun getAllProviders(): List<ProviderConfig> {
         val prefs = context.dataStore.data.first()
-        val raw = prefs[PROVIDERS_KEY] ?: return emptyList()
+        return decodeProviders(prefs[PROVIDERS_KEY])
+    }
+
+    private fun decodeProviders(raw: String?): List<ProviderConfig> {
+        if (raw.isNullOrBlank()) return emptyList()
         return try {
             val list = json.decodeFromString<List<ProviderConfig>>(raw)
             // Re-attach API keys from secure storage into the in-memory store
@@ -62,13 +76,25 @@ class ProviderRepository(
         val providers = getAllProviders().toMutableList()
         val idx = providers.indexOfFirst { it.id == provider.id }
         if (idx >= 0) providers[idx] = provider else providers.add(provider)
-        writeProviders(providers)
+        val normalized = if (provider.isActive) {
+            providers.map { it.copy(isActive = it.id == provider.id) }
+        } else {
+            providers
+        }
+        writeProviders(normalized)
     }
 
     suspend fun deleteProvider(id: ProviderId) {
         secureKeyStore.deleteApiKey(id.value)
         ProviderConfigKeyStore.remove(id.value)
         val providers = getAllProviders().filter { it.id != id }
+        writeProviders(providers)
+    }
+
+    suspend fun setActiveProvider(id: ProviderId) {
+        val providers = getAllProviders().map { config ->
+            config.copy(isActive = config.id == id)
+        }
         writeProviders(providers)
     }
 

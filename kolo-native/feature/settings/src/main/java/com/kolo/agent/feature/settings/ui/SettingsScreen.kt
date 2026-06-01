@@ -19,6 +19,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.kolo.agent.core.model.*
 import com.kolo.agent.core.model.ToolPermission
+import com.kolo.agent.core.providers.local.LocalModelManager
 import com.kolo.agent.feature.settings.*
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -33,6 +34,7 @@ fun SettingsScreen(
     onAddMemory: (String, String) -> Unit,
     onDeleteMemory: (String) -> Unit,
     onSetTheme: (AppThemeMode) -> Unit = {},
+    onNavigateLocalModels: () -> Unit = {},
     onNavigateBack: () -> Unit,
 ) {
     var selectedSection by remember { mutableStateOf<SettingsSection?>(null) }
@@ -73,6 +75,8 @@ fun SettingsScreen(
                 SettingsSection.Providers -> ProvidersSection(
                     providers = state.providers,
                     activeProviderId = state.activeProviderId,
+                    bridgeStatus = state.bridgeStatus,
+                    activeModelPath = state.localLlamaModelPath,
                     onAddProvider = onAddProvider,
                     onDeleteProvider = onDeleteProvider,
                     onSetActiveProvider = onSetActiveProvider,
@@ -89,8 +93,8 @@ fun SettingsScreen(
                 )
                 SettingsSection.PhoneControl -> PhoneControlSection()
                 SettingsSection.Appearance -> AppearanceSection(state.themeMode, onSetTheme)
-                SettingsSection.About -> AboutSection()
-                null -> SettingsHome(onSectionSelected = { selectedSection = it })
+                SettingsSection.About -> AboutSection(state.bridgeStatus)
+                null -> SettingsHome(onSectionSelected = { selectedSection = it }, onNavigateLocalModels = onNavigateLocalModels)
             }
         }
     }
@@ -99,7 +103,7 @@ fun SettingsScreen(
 // ──── Home ────
 
 @Composable
-private fun SettingsHome(onSectionSelected: (SettingsSection) -> Unit) {
+private fun SettingsHome(onSectionSelected: (SettingsSection) -> Unit, onNavigateLocalModels: () -> Unit = {}) {
     LazyColumn(
         modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
         verticalArrangement = Arrangement.spacedBy(0.dp),
@@ -108,6 +112,7 @@ private fun SettingsHome(onSectionSelected: (SettingsSection) -> Unit) {
         item {
             SectionHeader("Providers & Models")
             SettingsItem(icon = Icons.Filled.Cloud, title = "Providers", subtitle = "API providers and models", onClick = { onSectionSelected(SettingsSection.Providers) })
+            SettingsItem(icon = Icons.Filled.Memory, title = "Local Models", subtitle = "Import & manage GGUF models", onClick = onNavigateLocalModels)
         }
         item {
             SectionHeader("Agent")
@@ -148,6 +153,8 @@ private fun SettingsItem(icon: androidx.compose.ui.graphics.vector.ImageVector, 
 private fun ProvidersSection(
     providers: List<ProviderConfig>,
     activeProviderId: ProviderId?,
+    bridgeStatus: LocalModelManager.BridgeStatus = LocalModelManager.BridgeStatus.Unknown,
+    activeModelPath: String = "",
     onAddProvider: (ProviderConfig, String) -> Unit,
     onDeleteProvider: (ProviderId) -> Unit,
     onSetActiveProvider: (ProviderId) -> Unit,
@@ -165,14 +172,14 @@ private fun ProvidersSection(
             }
         }
         items(providers) { provider ->
-            ProviderCard(provider = provider, isActive = provider.id == activeProviderId, isExpanded = provider.id == expandedProvider, onToggleExpand = { expandedProvider = if (expandedProvider == provider.id) null else provider.id }, onSetActive = { onSetActiveProvider(provider.id) }, onDelete = { onDeleteProvider(provider.id) }, onSetModelPath = { onSetProviderModelPath(provider.id, it) })
+            ProviderCard(provider = provider, isActive = provider.id == activeProviderId, isExpanded = provider.id == expandedProvider, bridgeStatus = bridgeStatus, activeModelPath = activeModelPath, onToggleExpand = { expandedProvider = if (expandedProvider == provider.id) null else provider.id }, onSetActive = { onSetActiveProvider(provider.id) }, onDelete = { onDeleteProvider(provider.id) }, onSetModelPath = { onSetProviderModelPath(provider.id, it) })
         }
     }
-    if (showAddDialog) { AddProviderDialog(onDismiss = { showAddDialog = false }, onConfirm = { config, apiKey -> onAddProvider(config, apiKey); showAddDialog = false }) }
+    if (showAddDialog) { AddProviderDialog(bridgeStatus = bridgeStatus, onDismiss = { showAddDialog = false }, onConfirm = { config, apiKey -> onAddProvider(config, apiKey); showAddDialog = false }) }
 }
 
 @Composable
-private fun ProviderCard(provider: ProviderConfig, isActive: Boolean, isExpanded: Boolean, onToggleExpand: () -> Unit, onSetActive: () -> Unit, onDelete: () -> Unit, onSetModelPath: (String) -> Unit) {
+private fun ProviderCard(provider: ProviderConfig, isActive: Boolean, isExpanded: Boolean, bridgeStatus: LocalModelManager.BridgeStatus = LocalModelManager.BridgeStatus.Unknown, activeModelPath: String = "", onToggleExpand: () -> Unit, onSetActive: () -> Unit, onDelete: () -> Unit, onSetModelPath: (String) -> Unit) {
     var modelPathDraft by remember(provider.id, provider.modelPath) { mutableStateOf(provider.modelPath.orEmpty()) }
     Card(onClick = onToggleExpand, colors = CardDefaults.cardColors(containerColor = if (isActive) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface), shape = MaterialTheme.shapes.small) {
         Column(modifier = Modifier.padding(12.dp)) {
@@ -181,7 +188,12 @@ private fun ProviderCard(provider: ProviderConfig, isActive: Boolean, isExpanded
                 Spacer(modifier = Modifier.width(10.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text(provider.name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, maxLines = 1)
-                    Text(if (provider.isLocal) provider.modelPath ?: "No GGUF model selected" else provider.baseUrl, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (provider.isLocal) {
+                        val displayPath = provider.modelPath ?: activeModelPath.ifBlank { null }
+                        Text(displayPath?.substringAfterLast("/") ?: "No model selected", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    } else {
+                        Text(provider.baseUrl, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
                 }
                 if (isActive) { Badge { Text("Active") } }
             }
@@ -191,10 +203,41 @@ private fun ProviderCard(provider: ProviderConfig, isActive: Boolean, isExpanded
                     Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Type", style = MaterialTheme.typography.labelSmall); Text(when (provider.kind) { ProviderKind.openaiCompat -> "OpenAI-Compatible"; ProviderKind.localLlama -> "Local llama.cpp" }, style = MaterialTheme.typography.bodySmall) }
                     if (provider.isLocal) {
                         Spacer(Modifier.height(8.dp))
+                        // Show active inherited model or manual override status
+                        if (!provider.modelPath.isNullOrBlank()) {
+                            // Manual path override
+                            Card(shape = MaterialTheme.shapes.small, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.3f))) {
+                                Row(modifier = Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(Icons.Filled.Edit, contentDescription = null, tint = MaterialTheme.colorScheme.tertiary, modifier = Modifier.size(14.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Manual path overrides active imported model", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
+                        } else if (activeModelPath.isNotBlank()) {
+                            Card(shape = MaterialTheme.shapes.small, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.2f))) {
+                                Row(modifier = Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(Icons.Filled.CheckCircle, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(14.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Using active model from Local Models", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
+                        } else {
+                            // No active model and no override - clear warning
+                            Card(shape = MaterialTheme.shapes.small, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.2f))) {
+                                Row(modifier = Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(Icons.Filled.Warning, contentDescription = null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(14.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("No active model set. Import a GGUF model in Local Models first.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onErrorContainer)
+                                }
+                            }
+                        }
+                        Text("Manage models in Settings > Local Models.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(Modifier.height(4.dp))
+                        Text("Advanced: manual path override", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f))
                         OutlinedTextField(
                             value = modelPathDraft,
                             onValueChange = { modelPathDraft = it },
-                            label = { Text("GGUF model path") },
+                            label = { Text("Manual GGUF path") },
                             singleLine = true,
                             modifier = Modifier.fillMaxWidth(),
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
@@ -204,7 +247,7 @@ private fun ProviderCard(provider: ProviderConfig, isActive: Boolean, isExpanded
                             onClick = { onSetModelPath(modelPathDraft) },
                             enabled = modelPathDraft.trim() != provider.modelPath.orEmpty(),
                             contentPadding = PaddingValues(horizontal = 12.dp),
-                        ) { Text("Save Model Path", style = MaterialTheme.typography.labelSmall) }
+                        ) { Text("Save Path", style = MaterialTheme.typography.labelSmall) }
                     }
                     Spacer(Modifier.height(6.dp))
                     Row(Modifier.fillMaxWidth(), Arrangement.spacedBy(6.dp)) {
@@ -218,7 +261,7 @@ private fun ProviderCard(provider: ProviderConfig, isActive: Boolean, isExpanded
 }
 
 @Composable
-private fun AddProviderDialog(onDismiss: () -> Unit, onConfirm: (ProviderConfig, String) -> Unit) {
+private fun AddProviderDialog(bridgeStatus: LocalModelManager.BridgeStatus = LocalModelManager.BridgeStatus.Unknown, onDismiss: () -> Unit, onConfirm: (ProviderConfig, String) -> Unit) {
     var name by remember { mutableStateOf("") }
     var baseUrl by remember { mutableStateOf("") }
     var apiKey by remember { mutableStateOf("") }
@@ -242,7 +285,17 @@ private fun AddProviderDialog(onDismiss: () -> Unit, onConfirm: (ProviderConfig,
             Spacer(Modifier.height(6.dp))
             OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             if (providerKind == ProviderKind.localLlama) {
-                OutlinedTextField(value = modelPath, onValueChange = { modelPath = it }, label = { Text("GGUF model path") }, singleLine = true, modifier = Modifier.fillMaxWidth(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri))
+                Card(shape = MaterialTheme.shapes.small, colors = CardDefaults.cardColors(containerColor = if (bridgeStatus == LocalModelManager.BridgeStatus.Available) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f) else MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.3f))) {
+                    Row(modifier = Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(if (bridgeStatus == LocalModelManager.BridgeStatus.Available) Icons.Filled.CheckCircle else Icons.Filled.Warning, contentDescription = null, tint = if (bridgeStatus == LocalModelManager.BridgeStatus.Available) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(if (bridgeStatus == LocalModelManager.BridgeStatus.Available) "llama.cpp runtime available" else "llama.cpp runtime NOT available", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+                Spacer(Modifier.height(4.dp))
+                Text("Import GGUF models via Settings \u2192 Local Models, or enter path manually:", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.height(4.dp))
+                OutlinedTextField(value = modelPath, onValueChange = { modelPath = it }, label = { Text("GGUF model path (optional)") }, singleLine = true, modifier = Modifier.fillMaxWidth(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri))
             } else {
                 OutlinedTextField(value = baseUrl, onValueChange = { baseUrl = it }, label = { Text("Base URL") }, singleLine = true, modifier = Modifier.fillMaxWidth(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri))
                 OutlinedTextField(value = apiKey, onValueChange = { apiKey = it }, label = { Text("API Key") }, singleLine = true, modifier = Modifier.fillMaxWidth(), visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password))
@@ -427,7 +480,7 @@ private fun AppearanceSection(themeMode: AppThemeMode, onSetTheme: (AppThemeMode
             }
         }
         item {
-            Card(shape = MaterialTheme.shapes.small, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) { Column(Modifier.padding(12.dp)) { Row(verticalAlignment = Alignment.CenterVertically) { Icon(Icons.Filled.Memory, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("Local Model", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold) }; Spacer(Modifier.height(4.dp)); Text("llama.cpp JNI/CMake bridge is built. Real inference requires packaging the official libllama.so and setting a GGUF model path. No local inference is functional yet.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) } }
+            Card(shape = MaterialTheme.shapes.small, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) { Column(Modifier.padding(12.dp)) { Row(verticalAlignment = Alignment.CenterVertically) { Icon(Icons.Filled.Memory, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("Local Model", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold) }; Spacer(Modifier.height(4.dp)); Text("llama.cpp JNI/CMake bridge is built into this build. Import GGUF models via Settings > Local Models to start local inference.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) } }
         }
         item { SwitchPreference("Show Token Usage", "Token count bar in chat", true, { }, false) }
     }
@@ -471,14 +524,14 @@ private fun ThemeOptionButton(label: String, mode: AppThemeMode, current: AppThe
 // ──── About ────
 
 @Composable
-private fun AboutSection() {
+private fun AboutSection(bridgeStatus: LocalModelManager.BridgeStatus = LocalModelManager.BridgeStatus.Unknown) {
     LazyColumn(modifier = Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item { Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) { Icon(Icons.Filled.SmartToy, contentDescription = null, modifier = Modifier.size(36.dp), tint = MaterialTheme.colorScheme.primary); Spacer(Modifier.height(4.dp)); Text("Kolo AI Agent", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold); Text("v1.0.0 (Native)", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) } }
         item { HorizontalDivider() }
-        item { Card(shape = MaterialTheme.shapes.small) { Column(Modifier.padding(10.dp)) { Text("What Works", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold); Spacer(Modifier.height(4.dp)); Text("• OpenAI-compatible streaming chat with tool use", style = MaterialTheme.typography.bodySmall); Text("• Tool permission gating (allow once / always / deny / block)", style = MaterialTheme.typography.bodySmall); Text("• Room-backed memory system", style = MaterialTheme.typography.bodySmall); Text("• Phone control with session safety & system overlay", style = MaterialTheme.typography.bodySmall); Text("• Chat list drawer for switching conversations", style = MaterialTheme.typography.bodySmall); Text("• Web search via DuckDuckGo (no API key needed)", style = MaterialTheme.typography.bodySmall); Text("• Theme switching (system / light / dark via DataStore)", style = MaterialTheme.typography.bodySmall) } } }
-        item { Card(shape = MaterialTheme.shapes.small) { Column(Modifier.padding(10.dp)) { Text("Partially Integrated", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.tertiary); Spacer(Modifier.height(4.dp)); Text("• Local LLM — JNI/CMake bridge compiles; package official libllama.so + GGUF model to enable inference", style = MaterialTheme.typography.bodySmall); Text("• Pixel screenshot — working on Android 11+ with active phone-control session; needs device verification", style = MaterialTheme.typography.bodySmall) } } }
+        item { Card(shape = MaterialTheme.shapes.small) { Column(Modifier.padding(10.dp)) { Text("What Works", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold); Spacer(Modifier.height(4.dp)); Text("\u2022 OpenAI-compatible streaming chat with tool use", style = MaterialTheme.typography.bodySmall); Text("\u2022 Tool permission gating (allow once / always / deny / block)", style = MaterialTheme.typography.bodySmall); Text("\u2022 Room-backed memory system", style = MaterialTheme.typography.bodySmall); Text("\u2022 Phone control with session safety \u0026 system overlay", style = MaterialTheme.typography.bodySmall); Text("\u2022 Chat list drawer for switching conversations", style = MaterialTheme.typography.bodySmall); Text("\u2022 Web search via DuckDuckGo (no API key needed)", style = MaterialTheme.typography.bodySmall); Text("\u2022 Theme switching (system / light / dark via DataStore)", style = MaterialTheme.typography.bodySmall); Text("\u2022 Local model import \u0026 management via file picker", style = MaterialTheme.typography.bodySmall); Text("\u2022 llama.cpp ${if (bridgeStatus == LocalModelManager.BridgeStatus.Available) "runtime available" else "bridge built but runtime not loaded"}", style = MaterialTheme.typography.bodySmall, color = if (bridgeStatus == LocalModelManager.BridgeStatus.Available) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.tertiary) } } }
+        item { Card(shape = MaterialTheme.shapes.small) { Column(Modifier.padding(10.dp)) { Text("Partially Integrated", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.tertiary); Spacer(Modifier.height(4.dp)); Text("\u2022 Pixel screenshot \u2014 working on Android 11+ with active phone-control session; needs device verification", style = MaterialTheme.typography.bodySmall) } } }
         item { Card(shape = MaterialTheme.shapes.small) { Column(Modifier.padding(10.dp)) { Text("Needs Device Verification", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.outline); Spacer(Modifier.height(4.dp)); Text("• Pixel screenshot — code path uses Android 11+ Accessibility screenshot; not verified on device yet", style = MaterialTheme.typography.bodySmall); Text("• System overlay STOP button — overlay layout works but not testable without active session", style = MaterialTheme.typography.bodySmall) } } }
-        item { Card(shape = MaterialTheme.shapes.small) { Column(Modifier.padding(10.dp)) { Text("Diagnostics", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold); Spacer(Modifier.height(4.dp)); Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Platform", style = MaterialTheme.typography.bodySmall); Text("Android Native", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary) }; Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Min SDK", style = MaterialTheme.typography.bodySmall); Text("26", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary) } } } }
+        item { Card(shape = MaterialTheme.shapes.small) { Column(Modifier.padding(10.dp)) { Text("Diagnostics", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold); Spacer(Modifier.height(4.dp)); Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Platform", style = MaterialTheme.typography.bodySmall); Text("Android Native", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary) }; Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Min SDK", style = MaterialTheme.typography.bodySmall); Text("26", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary) }; Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("llama.cpp Bridge", style = MaterialTheme.typography.bodySmall); Text(if (bridgeStatus == LocalModelManager.BridgeStatus.Available) "Available" else when (bridgeStatus) { LocalModelManager.BridgeStatus.Unavailable -> "Not Loaded"; else -> "Unknown" }, style = MaterialTheme.typography.bodySmall, color = if (bridgeStatus == LocalModelManager.BridgeStatus.Available) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error) } } } }
     }
 }
 

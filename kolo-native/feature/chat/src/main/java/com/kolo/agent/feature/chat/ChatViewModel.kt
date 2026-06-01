@@ -11,6 +11,7 @@ import com.kolo.agent.core.database.entity.toEntity
 import com.kolo.agent.core.model.*
 import com.kolo.agent.core.model.api.ApiMessage
 import com.kolo.agent.core.providers.ProviderRepository
+import com.kolo.agent.core.providers.local.LocalModelManager
 import com.kolo.agent.core.providers.openai.OpenAiStreamClient
 import com.kolo.agent.core.settings.AppSettings
 import com.kolo.agent.core.tools.permissions.ToolPermissionStore
@@ -63,6 +64,7 @@ class ChatViewModel @Inject constructor(
     private val streamClient: OpenAiStreamClient,
     private val permStore: ToolPermissionStore,
     private val appSettings: AppSettings,
+    private val localModelManager: LocalModelManager,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(ChatUiState())
@@ -80,12 +82,15 @@ class ChatViewModel @Inject constructor(
             chatDao.getAll().let { chats ->
                 _uiState.update { it.copy(chatList = chats.map { c -> c.toDomain() }) }
             }
-            val provider = providerRep.getActiveProvider()
-            provider?.let { p ->
-                _uiState.update { it.copy(
-                    activeProvider = p.name,
-                    activeModel = p.activeModel?.label ?: p.activeModel?.modelId,
-                ) }
+        }
+        viewModelScope.launch {
+            providerRep.activeProviderFlow.collect { provider ->
+                _uiState.update {
+                    it.copy(
+                        activeProvider = provider?.name,
+                        activeModel = provider?.displayModelName(),
+                    )
+                }
             }
         }
     }
@@ -201,9 +206,12 @@ class ChatViewModel @Inject constructor(
                 val rawProvider = providerRep.getActiveProvider()
                     ?: throw IllegalStateException("No active provider configured")
                 val provider = if (rawProvider.isLocal && rawProvider.modelPath.isNullOrBlank()) {
-                    rawProvider.copy(modelPath = appSettings.localLlamaModelPath.first())
+                    rawProvider.copy(modelPath = appSettings.localLlamaModelPath.first()?.takeIf { it.isNotBlank() })
                 } else {
                     rawProvider
+                }
+                if (provider.isLocal && provider.modelPath.isNullOrBlank()) {
+                    throw IllegalStateException("Import a GGUF model in Settings > Local Models and set it active.")
                 }
                 if (!provider.isLocal && provider.activeModel == null) {
                     throw IllegalStateException("No model selected")
@@ -218,6 +226,7 @@ class ChatViewModel @Inject constructor(
                 val agentLoop = AgentLoop(
                     client = streamClient,
                     toolRegistry = toolRegistry,
+                    localModelManager = localModelManager,
                     permissionChecker = { toolName ->
                         val tool = toolRegistry.getTool(toolName)
                         val perm = tool?.permission ?: ToolPermission.sensitive
@@ -278,5 +287,17 @@ class ChatViewModel @Inject constructor(
             messages.add(ApiMessage(role = "user", content = newUserContent))
         }
         return messages
+    }
+
+    private fun ProviderConfig.displayModelName(): String {
+        if (isLocal) {
+            val path = modelPath
+            return when {
+                !path.isNullOrBlank() -> path.substringAfterLast('/')
+                activeModel != null -> activeModel?.label.orEmpty()
+                else -> "Local GGUF"
+            }
+        }
+        return activeModel?.label ?: activeModel?.modelId ?: name
     }
 }

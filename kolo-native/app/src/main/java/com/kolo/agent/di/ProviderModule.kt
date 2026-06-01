@@ -4,6 +4,7 @@ import android.content.Context
 import com.kolo.agent.core.database.dao.MemoryDao
 import com.kolo.agent.core.database.repository.RoomMemoryRepository
 import com.kolo.agent.core.model.MemoryRepository
+import com.kolo.agent.core.providers.local.LocalModelManager
 import com.kolo.agent.core.providers.ProviderRepository
 import com.kolo.agent.core.providers.openai.OpenAiStreamClient
 import com.kolo.agent.core.providers.secure.SecureKeyStore
@@ -37,4 +38,11 @@ object ProviderModule {
     @Provides
     @Singleton
     fun provideOpenAiStreamClient(): OpenAiStreamClient = OpenAiStreamClient()
+
+    @Provides
+    @Singleton
+    fun provideLocalModelManager(
+        @ApplicationContext context: Context,
+        appSettings: AppSettings,
+    ): LocalModelManager = LocalModelManager(context, appSettings)
 }

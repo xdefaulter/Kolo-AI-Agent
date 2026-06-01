@@ -1,7 +1,7 @@
 [versions]
 # SDK
 compileSdk = "35"
-minSdk = "26"
+minSdk = "28"
 targetSdk = "35"
 
 # Kotlin & Android

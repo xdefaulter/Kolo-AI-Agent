@@ -6,7 +6,10 @@ import com.kolo.agent.core.model.api.ApiFunctionCall
 import com.kolo.agent.core.model.api.ApiToolCall
 import com.kolo.agent.core.model.api.ApiToolDefinition
 import com.kolo.agent.core.providers.openai.OpenAiStreamClient
+import com.kolo.agent.core.providers.local.GgufHelpers
 import com.kolo.agent.core.providers.local.LlmEngineFactory
+import com.kolo.agent.core.providers.local.LocalModelManager
+import com.kolo.agent.core.providers.local.StubLocalLlmEngine
 import com.kolo.agent.core.agent.parser.StreamingToolCallParser
 import com.kolo.agent.core.tools.registry.ToolRegistry
 import com.kolo.agent.core.tools.registry.ToolPermissionCheckResult
@@ -23,6 +26,18 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlin.coroutines.resume
 
+private const val LOCAL_CONTEXT_SIZE = 512
+private const val LOCAL_MAX_TOKENS = 16
+private const val LOCAL_PROMPT_MESSAGE_LIMIT = 1
+private const val LOCAL_MIN_SENTENCE_CHARS = 6
+private val LOCAL_STOP_SEQUENCES = listOf(
+    "\nuser:",
+    "\nassistant:",
+    "\nsystem:",
+    "\ntool:",
+    "\nconversation:",
+)
+
 /**
  * The core agent think-act-observe loop.
  *
@@ -36,6 +51,7 @@ import kotlin.coroutines.resume
 class AgentLoop(
     private val client: OpenAiStreamClient,
     private val toolRegistry: ToolRegistry,
+    private val localModelManager: LocalModelManager? = null,
     private val permissionChecker: suspend (toolName: String) -> ToolPermissionMode = { ToolPermissionMode.alwaysAllow },
     private val approvalCallback: suspend (ToolPermissionApproval) -> Boolean = { true },
     private val maxIterations: Int = 20,
@@ -274,18 +290,41 @@ class AgentLoop(
     ) {
         val modelPath = config.modelPath
         if (modelPath.isNullOrBlank()) {
-            emit(AgentEvent.Error("Local llama.cpp provider requires a GGUF modelPath."))
+            emit(AgentEvent.Error("No model path. Import a GGUF model in Settings > Local Models and set it active."))
             return
         }
 
-        val localEngine = LlmEngineFactory.create(config)
-        val currentMessages = messages.toMutableList()
-        val toolDefinitions = toolRegistry.getToolDefinitionsForProvider(config)
+        // Check if model file still exists and is valid
+        if (!GgufHelpers.isValidModel(modelPath)) {
+            if (!java.io.File(modelPath).exists()) {
+                emit(AgentEvent.Error("Model file not found: $modelPath. It may have been moved or deleted. Import a GGUF model in Settings > Local Models."))
+            } else {
+                emit(AgentEvent.Error("Invalid GGUF file: $modelPath. The file exists but is not a valid GGUF model. Re-import it in Settings > Local Models."))
+            }
+            return
+        }
+
+        val localEngine = if (localModelManager != null) {
+            LlmEngineFactory.ensureAndCreate(config, localModelManager)
+        } else {
+            LlmEngineFactory.create(config)
+        }
+
+        // If we got a stub engine despite having a valid model path, the bridge is unavailable
+        if (localEngine is StubLocalLlmEngine) {
+            emit(AgentEvent.Error("llama.cpp runtime unavailable. Cannot run local inference. Reinstall the app or check Settings > Local Models for status."))
+            return
+        }
+        val currentMessages = messages
+            .filter { it.role == "user" || it.role == "assistant" }
+            .takeLast(LOCAL_PROMPT_MESSAGE_LIMIT)
+            .toMutableList()
+        val toolDefinitions = emptyList<ApiToolDefinition>()
 
         try {
             localEngine.loadModel(
                 modelPath = modelPath,
-                contextSize = config.activeModel?.contextWindow ?: 4096,
+                contextSize = (config.activeModel?.contextWindow ?: LOCAL_CONTEXT_SIZE).coerceAtMost(LOCAL_CONTEXT_SIZE),
                 threads = Runtime.getRuntime().availableProcessors().coerceIn(1, 8),
             )
 
@@ -410,16 +449,13 @@ class AgentLoop(
     ): LocalCompletion {
         val raw = StringBuilder()
         val pending = StringBuilder()
+        var processedLength = 0
         var decided = false
         var withholding = true
         var streamed = false
 
-        engine.completeStream(
-            prompt = prompt,
-            maxTokens = config.activeModel?.maxTokens ?: 1024,
-            temperature = (config.activeModel?.temperature ?: 0.7).toFloat(),
-        ).collect { token ->
-            raw.append(token)
+        suspend fun consumeToken(token: String) {
+            if (token.isEmpty()) return
             if (!decided) {
                 pending.append(token)
                 val trimmed = pending.toString().trimStart()
@@ -443,6 +479,28 @@ class AgentLoop(
             }
         }
 
+        try {
+            engine.completeStream(
+                prompt = prompt,
+                maxTokens = (config.activeModel?.maxTokens ?: LOCAL_MAX_TOKENS).coerceAtMost(LOCAL_MAX_TOKENS),
+                temperature = (config.activeModel?.temperature ?: 0.7).toFloat(),
+            ).collect { token ->
+                raw.append(token)
+                val stopIndex = findLocalStopIndex(raw.toString())
+                val acceptedLength = stopIndex ?: raw.length
+                if (acceptedLength > processedLength) {
+                    consumeToken(raw.substring(processedLength, acceptedLength))
+                }
+                processedLength = acceptedLength
+                if (stopIndex != null || shouldStopAfterLocalSentence(raw.toString())) {
+                    raw.setLength(acceptedLength)
+                    throw LocalStopGeneration
+                }
+            }
+        } catch (_: LocalStopGeneration) {
+            // Expected local stop when the model starts a new chat role marker.
+        }
+
         return LocalCompletion(
             content = raw.toString(),
             streamedToUi = streamed,
@@ -454,8 +512,16 @@ class AgentLoop(
         toolDefinitions: List<ApiToolDefinition>,
     ): String {
         val builder = StringBuilder()
-        builder.appendLine("You are Kolo AI Agent running locally with llama.cpp.")
-        builder.appendLine("Answer directly unless a tool is needed.")
+        if (toolDefinitions.isEmpty()) {
+            messages.forEach { msg ->
+                val role = if (msg.role == "assistant") "Assistant" else "User"
+                builder.append(role).append(": ").appendLine(msg.content.orEmpty().trim())
+            }
+            builder.append("Assistant:")
+            return builder.toString()
+        }
+
+        builder.appendLine("You are Kolo AI Agent. Reply briefly and directly.")
         if (toolDefinitions.isNotEmpty()) {
             builder.appendLine()
             builder.appendLine("When a tool is needed, output exactly one tool call and no prose:")
@@ -490,13 +556,29 @@ class AgentLoop(
         val content: String,
         val streamedToUi: Boolean,
     )
+
+    private object LocalStopGeneration : CancellationException()
+
+    private fun findLocalStopIndex(text: String): Int? {
+        val lower = text.lowercase()
+        return LOCAL_STOP_SEQUENCES
+            .map { lower.indexOf(it, startIndex = 1) }
+            .filter { it >= 0 }
+            .minOrNull()
+    }
+
+    private fun shouldStopAfterLocalSentence(text: String): Boolean {
+        val trimmed = text.trim()
+        if (trimmed.length < LOCAL_MIN_SENTENCE_CHARS) return false
+        return trimmed.last() == '.' || trimmed.last() == '!' || trimmed.last() == '?'
+    }
 }
 
 private object LocalToolCallParser {
     private val json = Json { ignoreUnknownKeys = true }
     private val blockPatterns = listOf(
-        Regex("""(?s)<tool_call>\s*(\{.*?})\s*</tool_call>"""),
-        Regex("""(?s)```tool_call\s*(\{.*?})\s*```"""),
+        Regex("""(?s)<tool_call>\s*([{].*?[}])\s*</tool_call>"""),
+        Regex("""(?s)```tool_call\s*([{].*?[}])\s*```"""),
     )
 
     fun resolve(content: String): List<ResolvedToolCall> {

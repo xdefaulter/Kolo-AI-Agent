@@ -16,7 +16,7 @@
 
 namespace {
 
-constexpr int BATCH_SIZE = 512;
+constexpr int BATCH_SIZE = 64;
 constexpr int CONTEXT_HEADROOM = 4;
 
 std::once_flag backend_init_flag;
@@ -92,9 +92,17 @@ int decode_tokens(
             common_batch_add(batch, tokens[i + j], start_pos + i + j, {0}, logits);
         }
 
+        const int64_t decode_start_us = llama_time_us();
         if (llama_decode(context, batch) != 0) {
             return 2;
         }
+        __android_log_print(
+                ANDROID_LOG_INFO,
+                LOG_TAG,
+                "completion_prompt_decode_chunk_done: offset=%d tokens=%d elapsed_ms=%.2f",
+                i,
+                cur_batch_size,
+                static_cast<double>(llama_time_us() - decode_start_us) / 1000.0);
     }
     return 0;
 }
@@ -132,6 +140,16 @@ std::string run_completion(
         return "";
     }
 
+    __android_log_print(
+            ANDROID_LOG_INFO,
+            LOG_TAG,
+            "completion_start: prompt_chars=%zu max_tokens=%d temp=%.3f top_p=%.3f repeat_penalty=%.3f",
+            prompt.size(),
+            static_cast<int>(max_tokens),
+            static_cast<double>(temperature),
+            static_cast<double>(top_p),
+            static_cast<double>(repeat_penalty));
+
     llama_memory_clear(llama_get_memory(state->context), false);
 
     llama_tokens prompt_tokens = common_tokenize(state->context, prompt, true, true);
@@ -139,13 +157,31 @@ std::string run_completion(
         return "";
     }
 
+    __android_log_print(
+            ANDROID_LOG_INFO,
+            LOG_TAG,
+            "completion_tokenized: prompt_tokens=%zu n_ctx=%d",
+            prompt_tokens.size(),
+            state->n_ctx);
+
     const int max_prompt_tokens = state->n_ctx - CONTEXT_HEADROOM - 1;
     if (static_cast<int>(prompt_tokens.size()) > max_prompt_tokens) {
         prompt_tokens.erase(
                 prompt_tokens.begin(),
                 prompt_tokens.end() - max_prompt_tokens);
+        __android_log_print(
+                ANDROID_LOG_WARN,
+                LOG_TAG,
+                "completion_prompt_truncated: prompt_tokens=%zu max_prompt_tokens=%d",
+                prompt_tokens.size(),
+                max_prompt_tokens);
     }
 
+    __android_log_print(
+            ANDROID_LOG_INFO,
+            LOG_TAG,
+            "completion_prompt_decode_start: prompt_tokens=%zu",
+            prompt_tokens.size());
     const int decode_result = decode_tokens(
             state->context,
             state->batch,
@@ -155,6 +191,7 @@ std::string run_completion(
     if (decode_result != 0) {
         return "llama.cpp prompt decode failed: " + std::to_string(decode_result);
     }
+    __android_log_write(ANDROID_LOG_INFO, LOG_TAG, "completion_prompt_decode_done");
 
     common_params_sampling sampling_params;
     sampling_params.temp = temperature;
@@ -168,6 +205,12 @@ std::string run_completion(
     std::string pending_utf8;
     llama_pos current_pos = static_cast<llama_pos>(prompt_tokens.size());
     const int n_predict = std::max(1, static_cast<int>(max_tokens));
+    __android_log_print(
+            ANDROID_LOG_INFO,
+            LOG_TAG,
+            "completion_generate_start: n_predict=%d current_pos=%d",
+            n_predict,
+            static_cast<int>(current_pos));
 
     for (int i = 0; i < n_predict; ++i) {
         if (current_pos >= state->n_ctx - CONTEXT_HEADROOM) {
@@ -183,6 +226,15 @@ std::string run_completion(
 
         pending_utf8 += common_token_to_piece(state->context, token);
         if (is_valid_utf8(pending_utf8)) {
+            if (i == 0) {
+                __android_log_write(ANDROID_LOG_INFO, LOG_TAG, "completion_first_token");
+            } else if ((i + 1) % 16 == 0) {
+                __android_log_print(
+                        ANDROID_LOG_INFO,
+                        LOG_TAG,
+                        "completion_generated_tokens=%d",
+                        i + 1);
+            }
             if (!on_token(pending_utf8)) {
                 break;
             }
@@ -191,8 +243,16 @@ std::string run_completion(
 
         common_batch_clear(state->batch);
         common_batch_add(state->batch, token, current_pos, {0}, true);
+        const int64_t token_decode_start_us = llama_time_us();
         if (llama_decode(state->context, state->batch) != 0) {
             break;
+        }
+        if ((i + 1) % 8 == 0) {
+            __android_log_print(
+                    ANDROID_LOG_INFO,
+                    LOG_TAG,
+                    "completion_token_decode_elapsed_ms=%.2f",
+                    static_cast<double>(llama_time_us() - token_decode_start_us) / 1000.0);
         }
         current_pos++;
     }
@@ -202,6 +262,7 @@ std::string run_completion(
     }
 
     common_sampler_free(sampler);
+    __android_log_write(ANDROID_LOG_INFO, LOG_TAG, "completion_done");
     return "";
 }
 
@@ -212,6 +273,11 @@ Java_com_kolo_agent_core_providers_local_LlamaCppBridge_nativeRuntimeAvailable(
         JNIEnv *,
         jobject) {
     init_backend_once();
+    __android_log_print(
+            ANDROID_LOG_INFO,
+            LOG_TAG,
+            "llama.cpp gpu_offload_supported=%s",
+            llama_supports_gpu_offload() ? "true" : "false");
     return JNI_TRUE;
 }
 
@@ -221,11 +287,25 @@ Java_com_kolo_agent_core_providers_local_LlamaCppBridge_nativeLoadModel(
         jobject,
         jstring jmodel_path,
         jint context_size,
-        jint threads) {
+        jint threads,
+        jint gpu_layers) {
     init_backend_once();
 
     const std::string model_path = get_jstring(env, jmodel_path);
     llama_model_params model_params = llama_model_default_params();
+    model_params.n_gpu_layers = std::max(0, static_cast<int>(gpu_layers));
+    if (model_params.n_gpu_layers == 0) {
+        model_params.split_mode = LLAMA_SPLIT_MODE_NONE;
+        model_params.main_gpu = -1;
+    } else {
+        model_params.split_mode = LLAMA_SPLIT_MODE_LAYER;
+    }
+    __android_log_print(
+            ANDROID_LOG_INFO,
+            LOG_TAG,
+            "load_model_start: gpu_offload_supported=%s requested_gpu_layers=%d",
+            llama_supports_gpu_offload() ? "true" : "false",
+            model_params.n_gpu_layers);
     llama_model * model = llama_model_load_from_file(model_path.c_str(), model_params);
     if (model == nullptr) {
         __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, "Failed to load model: %s", model_path.c_str());
@@ -241,6 +321,8 @@ Java_com_kolo_agent_core_providers_local_LlamaCppBridge_nativeLoadModel(
     ctx_params.n_ubatch = BATCH_SIZE;
     ctx_params.n_threads = n_threads;
     ctx_params.n_threads_batch = n_threads;
+    ctx_params.offload_kqv = model_params.n_gpu_layers > 0;
+    ctx_params.op_offload = model_params.n_gpu_layers > 0;
 
     llama_context * context = llama_init_from_model(model, ctx_params);
     if (context == nullptr) {
@@ -256,6 +338,11 @@ Java_com_kolo_agent_core_providers_local_LlamaCppBridge_nativeLoadModel(
     state->batch_initialized = true;
     state->n_ctx = n_ctx;
     state->n_threads = n_threads;
+    __android_log_print(
+            ANDROID_LOG_INFO,
+            LOG_TAG,
+            "load_model_done: requested_gpu_layers=%d",
+            model_params.n_gpu_layers);
     return reinterpret_cast<jlong>(state);
 }
 

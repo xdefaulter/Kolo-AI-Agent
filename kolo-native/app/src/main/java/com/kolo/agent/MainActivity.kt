@@ -12,7 +12,9 @@ import com.kolo.agent.feature.chat.ui.ChatScreen
 import com.kolo.agent.feature.chat.ChatViewModel
 import com.kolo.agent.feature.chat.ToolApprovalAction
 import com.kolo.agent.feature.settings.ui.SettingsScreen
+import com.kolo.agent.feature.settings.ui.LocalModelScreen
 import com.kolo.agent.feature.settings.SettingsViewModel
+import com.kolo.agent.feature.settings.LocalModelViewModel
 import dagger.hilt.android.AndroidEntryPoint
 
 @AndroidEntryPoint
@@ -68,6 +70,22 @@ fun KoloNavApp() {
                 onAddMemory = { content, kind -> settingsViewModel.addMemory(content, kind) },
                 onDeleteMemory = { id -> settingsViewModel.deleteMemory(id) },
                 onSetTheme = { mode -> settingsViewModel.setThemeMode(mode) },
+                onNavigateLocalModels = { navController.navigate("local_models") },
+                onNavigateBack = { navController.popBackStack() },
+            )
+        }
+        composable("local_models") {
+            val localModelViewModel: LocalModelViewModel = hiltViewModel()
+            val state by localModelViewModel.uiState.collectAsState()
+            LocalModelScreen(
+                state = state,
+                onImportModel = { uri -> localModelViewModel.importModel(uri) },
+                onDeleteModel = { model -> localModelViewModel.deleteModel(model) },
+                onSetActiveModel = { model -> localModelViewModel.setActiveModel(model) },
+                onClearImportStatus = { localModelViewModel.clearImportStatus() },
+                onConfirmDelete = { model -> localModelViewModel.confirmDelete(model) },
+                onDismissDeleteConfirm = { localModelViewModel.dismissDeleteConfirm() },
+                onEnsureLocalProvider = { localModelViewModel.ensureLocalProvider() },
                 onNavigateBack = { navController.popBackStack() },
             )
         }

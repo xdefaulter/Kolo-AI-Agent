@@ -2,6 +2,7 @@ package com.kolo.agent.feature.settings
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.kolo.agent.core.providers.local.LocalModelManager
 import com.kolo.agent.core.settings.AppSettings
 import com.kolo.agent.core.database.repository.RoomMemoryRepository
 import com.kolo.agent.core.model.Memory
@@ -15,7 +16,6 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -34,6 +34,7 @@ data class SettingsUiState(
     val memories: List<Memory> = emptyList(),
     val themeMode: AppThemeMode = AppThemeMode.SYSTEM,
     val localLlamaModelPath: String = "",
+    val bridgeStatus: LocalModelManager.BridgeStatus = LocalModelManager.BridgeStatus.Unknown,
 )
 
 enum class AppThemeMode { SYSTEM, LIGHT, DARK }
@@ -45,6 +46,7 @@ class SettingsViewModel @Inject constructor(
     private val permissionStore: ToolPermissionStore,
     private val memoryRepository: RoomMemoryRepository,
     private val appSettings: AppSettings,
+    private val localModelManager: LocalModelManager,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(SettingsUiState())
@@ -55,23 +57,22 @@ class SettingsViewModel @Inject constructor(
         loadToolPermissions()
         loadMemories()
         loadTheme()
-        loadLocalLlamaModelPath()
+        loadLocalSettings()
     }
 
     private fun loadProviders() {
         viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(
-                providers = providerRepository.getAllProviders(),
-            )
-            providerRepository.getActiveProvider()?.let {
-                _uiState.value = _uiState.value.copy(activeProviderId = it.id)
+            providerRepository.providersFlow.collect { providers ->
+                _uiState.value = _uiState.value.copy(
+                    providers = providers,
+                    activeProviderId = providers.firstOrNull { it.isActive }?.id,
+                )
             }
         }
     }
 
     private fun loadToolPermissions() {
         viewModelScope.launch {
-            // Collect permission overrides and combine with defaults
             permissionStore.allOverrides().collect { overrides ->
                 val tools = toolRegistry.getAllTools()
                 val permUiList = tools.map { tool ->
@@ -110,11 +111,18 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
-    private fun loadLocalLlamaModelPath() {
+    private fun loadLocalSettings() {
         viewModelScope.launch {
-            appSettings.localLlamaModelPath.collect { path ->
+            // Check bridge off main thread
+            localModelManager.checkBridgeAvailability()
+            // Collect bridge status
+            launch { localModelManager.bridgeStatus.collect { status ->
+                _uiState.value = _uiState.value.copy(bridgeStatus = status)
+            } }
+            // Collect active model path
+            launch { appSettings.localLlamaModelPath.collect { path ->
                 _uiState.value = _uiState.value.copy(localLlamaModelPath = path.orEmpty())
-            }
+            } }
         }
     }
 
@@ -132,7 +140,6 @@ class SettingsViewModel @Inject constructor(
     fun setToolPermission(toolName: String, mode: ToolPermissionMode) {
         viewModelScope.launch {
             if (mode == toolRegistry.getDefaultPermissionMode(toolName)) {
-                // Reset to default — remove override
                 permissionStore.resetMode(toolName)
             } else {
                 permissionStore.setMode(toolName, mode)
@@ -142,10 +149,7 @@ class SettingsViewModel @Inject constructor(
 
     fun addMemory(content: String, kind: String = "fact") {
         viewModelScope.launch {
-            val memory = Memory(
-                kind = kind,
-                content = content,
-            )
+            val memory = Memory(kind = kind, content = content)
             memoryRepository.save(memory)
             loadMemories()
         }
@@ -161,13 +165,11 @@ class SettingsViewModel @Inject constructor(
     fun addProvider(config: ProviderConfig, apiKey: String) {
         viewModelScope.launch {
             providerRepository.saveProvider(config, apiKey)
-            if (config.isLocal) {
+            if (config.isLocal && !config.modelPath.isNullOrBlank()) {
                 appSettings.setLocalLlamaModelPath(config.modelPath)
             }
             _uiState.value = _uiState.value.copy(
                 providers = providerRepository.getAllProviders(),
-            )
-            _uiState.value = _uiState.value.copy(
                 activeProviderId = providerRepository.getActiveProvider()?.id,
             )
         }
@@ -176,31 +178,12 @@ class SettingsViewModel @Inject constructor(
     fun deleteProvider(id: ProviderId) {
         viewModelScope.launch {
             providerRepository.deleteProvider(id)
-            _uiState.value = _uiState.value.copy(
-                providers = providerRepository.getAllProviders(),
-            )
-            if (_uiState.value.activeProviderId == id) {
-                _uiState.value = _uiState.value.copy(
-                    activeProviderId = providerRepository.getActiveProvider()?.id,
-                )
-            }
         }
     }
 
     fun setActiveProvider(id: ProviderId) {
         viewModelScope.launch {
-            val currentProviders = providerRepository.getAllProviders()
-            val updated = currentProviders.map { config ->
-                config.copy(isActive = config.id == id)
-            }
-            for (config in updated) {
-                val key = providerRepository.getApiKey(config.id.value)
-                providerRepository.saveProvider(config, key)
-            }
-            _uiState.value = _uiState.value.copy(
-                providers = providerRepository.getAllProviders(),
-                activeProviderId = id,
-            )
+            providerRepository.setActiveProvider(id)
         }
     }
 
