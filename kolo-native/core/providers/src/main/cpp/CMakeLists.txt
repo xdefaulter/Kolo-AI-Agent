@@ -8,6 +8,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED true)
 
 set(LLAMA_SRC ${CMAKE_CURRENT_LIST_DIR}/../../../../../third_party/llama.cpp)
+set(LLAMA_BUILD_SRC ${LLAMA_SRC})
 set(VULKAN_HEADERS_SRC ${CMAKE_CURRENT_LIST_DIR}/../../../../../third_party/Vulkan-Headers)
 
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
@@ -64,7 +65,28 @@ if(ANDROID)
     endif()
 endif()
 
-add_subdirectory(${LLAMA_SRC} build-llama)
+if(ANDROID)
+    set(LLAMA_BUILD_SRC "${CMAKE_CURRENT_BINARY_DIR}/llama.cpp-patched")
+    file(REMOVE_RECURSE "${LLAMA_BUILD_SRC}")
+    file(COPY "${LLAMA_SRC}/" DESTINATION "${LLAMA_BUILD_SRC}" PATTERN ".git" EXCLUDE)
+
+    set(_GGML_VULKAN_CMAKE "${LLAMA_BUILD_SRC}/ggml/src/ggml-vulkan/CMakeLists.txt")
+    file(READ "${_GGML_VULKAN_CMAKE}" _GGML_VULKAN_CMAKE_CONTENT)
+    if(NOT _GGML_VULKAN_CMAKE_CONTENT MATCHES "CMAKE_MAKE_PROGRAM=\\$\\{CMAKE_MAKE_PROGRAM\\}")
+        string(REPLACE
+            "                   -DCMAKE_BUILD_TYPE=$<CONFIG>\n                   \${VULKAN_SHADER_GEN_CMAKE_ARGS}"
+            "                   -DCMAKE_BUILD_TYPE=$<CONFIG>\n                   -DCMAKE_MAKE_PROGRAM=\${CMAKE_MAKE_PROGRAM}\n                   \${VULKAN_SHADER_GEN_CMAKE_ARGS}"
+            _GGML_VULKAN_CMAKE_PATCHED
+            "${_GGML_VULKAN_CMAKE_CONTENT}"
+        )
+        if(_GGML_VULKAN_CMAKE_PATCHED STREQUAL _GGML_VULKAN_CMAKE_CONTENT)
+            message(FATAL_ERROR "Unable to patch llama.cpp Vulkan shader generator CMake arguments.")
+        endif()
+        file(WRITE "${_GGML_VULKAN_CMAKE}" "${_GGML_VULKAN_CMAKE_PATCHED}")
+    endif()
+endif()
+
+add_subdirectory(${LLAMA_BUILD_SRC} build-llama)
 
 add_library(
     kolo_llama_bridge
@@ -75,11 +97,11 @@ add_library(
 target_include_directories(
     kolo_llama_bridge
     PRIVATE
-    ${LLAMA_SRC}
-    ${LLAMA_SRC}/common
-    ${LLAMA_SRC}/include
-    ${LLAMA_SRC}/ggml/include
-    ${LLAMA_SRC}/ggml/src
+    ${LLAMA_BUILD_SRC}
+    ${LLAMA_BUILD_SRC}/common
+    ${LLAMA_BUILD_SRC}/include
+    ${LLAMA_BUILD_SRC}/ggml/include
+    ${LLAMA_BUILD_SRC}/ggml/src
 )
 
 find_library(log-lib log)
