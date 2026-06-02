@@ -117,7 +117,12 @@ class ChatViewModel @Inject constructor(
             loadChatList()
         }
         viewModelScope.launch {
-            combine(providerRep.providersFlow, appSettings.localLlamaModelPath) { providers, localModelPath ->
+            combine(
+                providerRep.providersFlow,
+                appSettings.localLlamaModelPath,
+            ) { providers, localModelPath ->
+                providers to localModelPath
+            }.collect { (providers, localModelPath) ->
                 val activeProvider = providers.firstOrNull { it.isActive }
                 val readinessError = evaluateProviderReadinessError(activeProvider, localModelPath)
                 _uiState.update {

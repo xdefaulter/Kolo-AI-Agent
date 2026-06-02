@@ -46,7 +46,7 @@ class ProviderRepository(
     private fun decodeProviders(raw: String?): List<ProviderConfig> {
         if (raw.isNullOrBlank()) return emptyList()
         return try {
-            val list = json.decodeFromString<List<ProviderConfig>>(raw)
+            val list = normalizeActiveProviders(json.decodeFromString<List<ProviderConfig>>(raw))
             // Re-attach API keys from secure storage into the in-memory store
             list.map { config ->
                 val key = secureKeyStore.getApiKey(config.id.value) ?: ""
@@ -78,7 +78,7 @@ class ProviderRepository(
         val normalized = if (provider.isActive) {
             providers.map { it.copy(isActive = it.id == provider.id) }
         } else {
-            providers
+            normalizeActiveProviders(providers)
         }
         writeProviders(normalized)
     }
@@ -91,22 +91,19 @@ class ProviderRepository(
             writeProviders(emptyList())
             return
         }
-        val noActiveLeft = providers.none { it.isActive }
-        val normalized = if (noActiveLeft) {
-            providers.mapIndexed { index, config ->
-                if (index == 0) config.copy(isActive = true) else config.copy(isActive = false)
-            }
-        } else {
-            providers
-        }
-        writeProviders(normalized)
+        writeProviders(normalizeActiveProviders(providers))
     }
 
     suspend fun setActiveProvider(id: ProviderId) {
-        val providers = getAllProviders().map { config ->
+        val providers = getAllProviders()
+        if (providers.none { it.id == id }) {
+            writeProviders(normalizeActiveProviders(providers))
+            return
+        }
+        val normalized = providers.map { config ->
             config.copy(isActive = config.id == id)
         }
-        writeProviders(providers)
+        writeProviders(normalized)
     }
 
     suspend fun setActiveModel(providerId: ProviderId, modelId: String) {
@@ -128,10 +125,21 @@ class ProviderRepository(
     private suspend fun writeProviders(providers: List<ProviderConfig>) {
         val serialized = json.encodeToString(
             kotlinx.serialization.builtins.ListSerializer(ProviderConfig.serializer()),
-            providers,
+            normalizeActiveProviders(providers),
         )
         context.dataStore.edit { prefs ->
             prefs[PROVIDERS_KEY] = serialized
+        }
+    }
+
+    internal companion object {
+        fun normalizeActiveProviders(providers: List<ProviderConfig>): List<ProviderConfig> {
+            if (providers.isEmpty()) return emptyList()
+
+            val firstActiveIndex = providers.indexOfFirst { it.isActive }.takeIf { it >= 0 } ?: 0
+            return providers.mapIndexed { index, config ->
+                config.copy(isActive = index == firstActiveIndex)
+            }
         }
     }
 }
