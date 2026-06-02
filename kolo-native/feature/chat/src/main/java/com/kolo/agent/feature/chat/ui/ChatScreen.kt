@@ -806,6 +806,7 @@ private fun ChatHeader(
     }
     val hasProvider = providerConfig != null
     val isLocalProvider = providerConfig?.isLocal == true
+    val menuWidth = (LocalConfiguration.current.screenWidthDp - 32).coerceIn(260, 360).dp
     val activeModelId = providerConfig?.activeModel?.modelId
     val activeModelDisplay = providerConfig?.activeModel?.label
         ?.ifBlank { providerConfig.activeModel?.modelId }
@@ -938,7 +939,11 @@ private fun ChatHeader(
                         }
                         Icon(Icons.Filled.ArrowDropDown, contentDescription = "Model picker", modifier = Modifier.size(16.dp))
                     }
-                    DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                    DropdownMenu(
+                        expanded = expanded,
+                        onDismissRequest = { expanded = false },
+                        modifier = Modifier.width(menuWidth),
+                    ) {
                         if (isRefreshingModels) {
                             DropdownMenuItem(
                                 enabled = false,
@@ -967,7 +972,7 @@ private fun ChatHeader(
                                 OutlinedTextField(
                                     modifier = Modifier
                                         .padding(horizontal = 8.dp)
-                                        .width(220.dp),
+                                        .fillMaxWidth(),
                                     value = modelSearch,
                                     onValueChange = { modelSearch = it },
                                     singleLine = true,
@@ -988,12 +993,13 @@ private fun ChatHeader(
                                 DropdownMenuItem(text = { Text("No models match") }, onClick = {}, enabled = false)
                             } else {
                                 DropdownMenuItem(enabled = false, text = { Text("${filteredModels.size} model${if (filteredModels.size != 1) "s" else ""} available", style = MaterialTheme.typography.labelSmall) }, onClick = {})
-                                LazyColumn(
+                                Column(
                                     modifier = Modifier
                                         .heightIn(max = 220.dp)
-                                        .fillMaxWidth(),
+                                        .fillMaxWidth()
+                                        .verticalScroll(rememberScrollState()),
                                 ) {
-                                    items(filteredModels) { option ->
+                                    filteredModels.forEach { option ->
                                         DropdownMenuItem(
                                             text = { Text(option.label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                                             leadingIcon = {
