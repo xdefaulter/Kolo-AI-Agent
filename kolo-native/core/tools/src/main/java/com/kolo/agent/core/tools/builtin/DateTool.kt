@@ -18,8 +18,8 @@ class DateTool : KoloTool() {
         val format = params["format"] ?: "yyyy-MM-dd HH:mm:ss z"
         val formatted = try {
             now.format(DateTimeFormatter.ofPattern(format))
-        } catch (_: Exception) {
-            now.format(DateTimeFormatter.ISO_LOCAL_DATE_TIME)
+        } catch (e: Exception) {
+            return ToolExecutionResult.err("Invalid date format pattern '$format': ${e.message}. Use standard Java DateTimeFormatter patterns (e.g. 'yyyy-MM-dd HH:mm:ss').")
         }
         return ToolExecutionResult.ok(buildString {
             appendLine("Current date and time: $formatted")

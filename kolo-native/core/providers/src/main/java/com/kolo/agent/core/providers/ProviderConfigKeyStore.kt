@@ -7,7 +7,7 @@ package com.kolo.agent.core.providers
  * so they can be looked up by provider ID at runtime.
  */
 object ProviderConfigKeyStore {
-    private val store = mutableMapOf<String, String>()
+    private val store = java.util.concurrent.ConcurrentHashMap<String, String>()
 
     operator fun get(id: String): String = store[id] ?: ""
     operator fun set(id: String, value: String) { store[id] = value }

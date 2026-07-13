@@ -64,19 +64,23 @@ interface LocalLlmEngine {
      */
     fun listAvailableModels(): List<ModelInfo> {
         return LEGACY_MODEL_DIRS.flatMap { dir ->
-            val directory = File(dir)
-            if (directory.exists() && directory.isDirectory) {
-                directory.walkTopDown()
-                    .filter { it.extension == "gguf" }
-                    .map { file ->
-                        ModelInfo(
-                            path = file.absolutePath,
-                            name = file.nameWithoutExtension,
-                            sizeBytes = file.length(),
-                        )
-                    }
-                    .toList()
-            } else emptyList()
+            try {
+                val directory = File(dir)
+                if (directory.exists() && directory.isDirectory) {
+                    directory.walkTopDown()
+                        .filter { it.extension == "gguf" }
+                        .map { file ->
+                            ModelInfo(
+                                path = file.absolutePath,
+                                name = file.nameWithoutExtension,
+                                sizeBytes = file.length(),
+                            )
+                        }
+                        .toList()
+                } else emptyList()
+            } catch (_: Exception) {
+                emptyList()
+            }
         }
     }
 
@@ -231,11 +235,12 @@ class LlamaCppEngine : LocalLlmEngine {
         private const val TAG = "LlamaCppEngine"
     }
 
-    override var isModelLoaded: Boolean = false
+    @Volatile override var isModelLoaded: Boolean = false
         private set
-    override var loadedModelPath: String? = null
+    @Volatile override var loadedModelPath: String? = null
         private set
-    private var nativeHandle: Long = 0L
+    @Volatile private var nativeHandle: Long = 0L
+    @Volatile private var activeGenerations = 0
     private var loadedContextSize: Int = 0
     private var loadedThreads: Int = 0
     private var loadedGpuLayers: Int = 0
@@ -286,9 +291,12 @@ class LlamaCppEngine : LocalLlmEngine {
     }
 
     override suspend fun unloadModel() {
+        // Wait for any in-flight generation to complete before freeing native resources
+        while (activeGenerations > 0) {
+            kotlinx.coroutines.delay(50)
+        }
         if (nativeHandle != 0L) {
             withContext(Dispatchers.IO) {
-                // After first check, bridge availability is cached — safe even without re-check
                 if (LlamaCppBridge.isAvailable()) {
                     LlamaCppBridge.unloadModel(nativeHandle)
                 }
@@ -315,22 +323,32 @@ class LlamaCppEngine : LocalLlmEngine {
             return@channelFlow
         }
         val error = withContext(Dispatchers.IO) {
-            if (!LlamaCppBridge.isAvailable()) {
-                Log.e(TAG, "Bridge unavailable at completeStream time")
-                return@withContext "llama.cpp runtime unavailable"
-            }
-            LlamaCppBridge.completeStream(
-                handle = nativeHandle,
-                prompt = prompt,
-                maxTokens = maxTokens,
-                temperature = temperature,
-                topP = topP,
-                repeatPenalty = repeatPenalty,
-            ) { token ->
-                trySend(token).isSuccess
+            activeGenerations++
+            try {
+                if (!LlamaCppBridge.isAvailable()) {
+                    Log.e(TAG, "Bridge unavailable at completeStream time")
+                    return@withContext "llama.cpp runtime unavailable"
+                }
+                // Re-check handle — it may have been unloaded by another coroutine
+                val handle = nativeHandle
+                if (handle == 0L) {
+                    return@withContext "Model was unloaded during generation"
+                }
+                LlamaCppBridge.completeStream(
+                    handle = handle,
+                    prompt = prompt,
+                    maxTokens = maxTokens,
+                    temperature = temperature,
+                    topP = topP,
+                    repeatPenalty = repeatPenalty,
+                ) { token ->
+                    trySend(token).isSuccess
+                }
+            } finally {
+                activeGenerations--
             }
         }
-        if (error.isNotBlank() && error != "ok") {
+        if (error.isNotBlank() && !error.equals("ok", ignoreCase = true)) {
             Log.e(TAG, "Inference error: $error")
             send("[Local LLM inference error: $error]")
         }

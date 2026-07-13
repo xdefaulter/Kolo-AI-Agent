@@ -20,24 +20,28 @@ class JsonParseTool : KoloTool() {
             val element = json.parseToJsonElement(jsonStr)
 
             val result = if (path != null) {
-                extractPath(element, path)
+                val extracted = extractPath(element, path)
+                // Check for error-like results
+                if (extracted.startsWith("Path not found") || extracted.startsWith("Invalid") ||
+                    extracted.startsWith("Cannot") || extracted.startsWith("Index out")) {
+                    return ToolExecutionResult.err(extracted)
+                }
+                extracted
             } else {
                 json.encodeToString(kotlinx.serialization.json.JsonElement.serializer(), element)
             }
-
-            ToolExecutionResult.ok(result.toString())
+            ToolExecutionResult.ok(result)
         } catch (e: Exception) {
             ToolExecutionResult.err("JSON parse error: ${e.message}")
         }
     }
 
-    private fun extractPath(element: kotlinx.serialization.json.JsonElement, path: String): Any {
+    private fun extractPath(element: kotlinx.serialization.json.JsonElement, path: String): String {
         var current = element
         for (key in path.split(".")) {
             when (current) {
                 is kotlinx.serialization.json.JsonObject -> {
-                    current = current[key]
-                        ?: return "Path not found: $key"
+                    current = current[key] ?: return "Path not found: $key"
                 }
                 is kotlinx.serialization.json.JsonArray -> {
                     val index = key.toIntOrNull()
@@ -48,6 +52,10 @@ class JsonParseTool : KoloTool() {
                 else -> return "Cannot traverse into primitive at $key"
             }
         }
-        return current
+        // Use content for primitives to avoid quoted strings in output
+        return when (current) {
+            is kotlinx.serialization.json.JsonPrimitive -> current.content
+            else -> current.toString()
+        }
     }
 }

@@ -22,8 +22,9 @@ import kotlinx.serialization.json.JsonPrimitive
  */
 class ToolRegistry {
 
-    private val tools = mutableMapOf<String, KoloTool>()
+    private val tools = java.util.concurrent.ConcurrentHashMap<String, KoloTool>()
     private val builtinNames = mutableSetOf<String>()
+    private val customToolNames = mutableSetOf<String>()
     private var customTools: List<CustomToolDef> = emptyList()
     private var skills: List<Skill> = emptyList()
 
@@ -69,11 +70,16 @@ class ToolRegistry {
     }
 
     fun setCustomTools(definitions: List<CustomToolDef>) {
-        customTools.forEach { tools.remove(it.name) }
+        // Remove only previously-registered custom tools, not builtins
+        customToolNames.forEach { tools.remove(it) }
+        customToolNames.clear()
         customTools = definitions
         definitions
             .filter { it.name.isNotBlank() && it.name !in builtinNames }
-            .forEach { register(CustomToolAdapter(it)) }
+            .forEach {
+                register(CustomToolAdapter(it))
+                customToolNames.add(it.name)
+            }
     }
 
     fun setSkills(definitions: List<Skill>) {
@@ -84,7 +90,7 @@ class ToolRegistry {
 
     fun getAllTools(): List<KoloTool> = tools.values.toList()
 
-    /** Get the default permission mode for a tool based on its permission level. */
+    /** Source of truth for default permission modes — see also ToolPermissionStore.defaultMode (must stay in sync). */
     fun getDefaultPermissionMode(toolName: String): ToolPermissionMode {
         val tool = tools[toolName] ?: return ToolPermissionMode.askEveryTime
         return when (tool.permission) {
@@ -119,6 +125,7 @@ class ToolRegistry {
         subLlmCall: (suspend (String, String) -> String)? = null,
     ): ToolExecutionResult {
         val params = parseArguments(arguments)
+            ?: return ToolExecutionResult.err("Malformed arguments JSON for '$name': ${arguments.take(200)}")
         return executeParsedTool(name, params, chatId, providerConfig, context, subLlmCall, depth = 0)
     }
 
@@ -152,8 +159,9 @@ class ToolRegistry {
         }
     }
 
-    private fun parseArguments(arguments: String): Map<String, String> {
-        val params = try {
+    private fun parseArguments(arguments: String): Map<String, String>? {
+        if (arguments.isBlank()) return emptyMap()
+        return try {
             val json = Json { ignoreUnknownKeys = true }
             val element = json.parseToJsonElement(arguments)
             if (element is JsonObject) {
@@ -163,11 +171,10 @@ class ToolRegistry {
                         else -> v.toString()
                     }
                 }
-            } else emptyMap()
+            } else null
         } catch (_: Exception) {
-            emptyMap()
+            null
         }
-        return params
     }
 }
 
@@ -199,7 +206,6 @@ private class CustomToolAdapter(private val def: CustomToolDef) : KoloTool() {
         val runTool = context.runToolByName
             ?: return ToolExecutionResult.err("Composed custom tool cannot call sub-tools in this context.")
         if (def.steps.isEmpty()) return ToolExecutionResult.err("Custom tool has no composed steps.")
-        val values = params.toMutableMap()
         val outputs = mutableListOf<String>()
         def.steps.forEachIndexed { index, step ->
             val subTool = context.getToolByName?.invoke(step.toolName)
@@ -209,13 +215,17 @@ private class CustomToolAdapter(private val def: CustomToolDef) : KoloTool() {
             if (subTool?.permission == ToolPermission.sensitive && permission == ToolPermission.safe) {
                 return ToolExecutionResult.err("Step ${index + 1} (${step.toolName}) is sensitive; mark this custom tool as sensitive or dangerous.")
             }
-            val rendered = step.params.mapValues { (_, value) -> renderTemplate(value, values) }
+            val rendered = step.params.mapValues { (_, value) ->
+                // Only template against original user params, not untrusted tool outputs
+                // Remove {{_previous}} references — untrusted tool output must not be templated
+                val sanitized = value.replace(Regex("""\{\{\s*_previous\s*}}"""), "[previous output]")
+                renderTemplate(sanitized, params)
+            }
             val result = runTool(step.toolName, rendered)
             if (!result.success) {
                 return ToolExecutionResult.err("Step ${index + 1} (${step.toolName}) failed: ${result.error}")
             }
             outputs.add("[${index + 1}] ${step.toolName}\n${result.output}")
-            values["_previous"] = result.output
         }
         return ToolExecutionResult.ok(outputs.joinToString("\n\n"), mapOf("custom_tool_id" to def.id.value, "kind" to "composed"))
     }

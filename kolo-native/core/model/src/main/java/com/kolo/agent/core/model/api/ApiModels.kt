@@ -26,7 +26,8 @@ data class ApiMessage(
         } else if (content != null) {
             put("content", content)
         } else {
-            put("content", JsonNull)
+            // Some providers reject null content on user/system messages — emit empty string instead
+            put("content", if (role == "assistant") JsonNull else "")
         }
         name?.let { put("name", it) }
         toolCalls?.let { calls ->
@@ -53,6 +54,9 @@ data class ApiContentPart(
             "image_url" -> put("image_url", buildJsonObject {
                 put("url", imageUrl.orEmpty())
             })
+            else -> {
+                // Unknown content part type — emit type only
+            }
         }
     }
 }

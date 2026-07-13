@@ -14,7 +14,8 @@ import com.kolo.agent.core.agent.parser.StreamingToolCallParser
 import com.kolo.agent.core.tools.registry.ToolRegistry
 import com.kolo.agent.core.tools.registry.ToolPermissionCheckResult
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.coroutines.flow.flow
@@ -24,10 +25,9 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import kotlin.coroutines.resume
 
-private const val LOCAL_CONTEXT_SIZE = 512
-private const val LOCAL_MAX_TOKENS = 8
+private const val LOCAL_CONTEXT_SIZE = 2048
+private const val LOCAL_MAX_TOKENS = 512
 private const val LOCAL_PROMPT_MESSAGE_LIMIT = 12
 private const val LOCAL_MIN_SENTENCE_CHARS = 6
 private val LOCAL_STOP_SEQUENCES = listOf(
@@ -205,25 +205,27 @@ class AgentLoop(
                 val permResult = if (tool != null) {
                     val mode = permissionChecker(call.name)
                     when {
-                        ToolPermissionStore_companion.canAutoApprove(mode) -> ToolPermissionCheckResult.Allowed
-                        ToolPermissionStore_companion.isBlocked(mode) -> ToolPermissionCheckResult.Blocked("Tool '${call.name}' is set to never allow")
+                        ToolPermissionChecks.canAutoApprove(mode) -> ToolPermissionCheckResult.Allowed
+                        ToolPermissionChecks.isBlocked(mode) -> ToolPermissionCheckResult.Blocked("Tool '${call.name}' is set to never allow")
                         else -> ToolPermissionCheckResult.NeedsApproval(tool.permission)
                     }
                 } else {
-                    ToolPermissionCheckResult.Allowed // Unknown tools just go through (or return error below)
+                    ToolPermissionCheckResult.Blocked("Unknown tool '${call.name}'")
                 }
 
                 when (permResult) {
                     is ToolPermissionCheckResult.Allowed -> {
-                        // Execute directly
-                        val result = toolRegistry.executeTool(
-                            name = call.name,
-                            arguments = call.arguments,
-                            chatId = chatId,
-                            providerConfig = config,
-                            context = androidContext,
-                            subLlmCall = subLlmCall(config),
-                        )
+                        // Execute directly on IO dispatcher
+                        val result = withContext(Dispatchers.IO) {
+                            toolRegistry.executeTool(
+                                name = call.name,
+                                arguments = call.arguments,
+                                chatId = chatId,
+                                providerConfig = config,
+                                context = androidContext,
+                                subLlmCall = subLlmCall(config),
+                            )
+                        }
                         emit(AgentEvent.ToolResult(call.name, call.id, result))
                         currentMessages.add(ApiMessage(
                             role = "tool",
@@ -251,14 +253,16 @@ class AgentLoop(
                                 toolCallId = call.id,
                             ))
                         } else {
-                            val result = toolRegistry.executeTool(
-                                name = call.name,
-                                arguments = call.arguments,
-                                chatId = chatId,
-                                providerConfig = config,
-                                context = androidContext,
-                                subLlmCall = subLlmCall(config),
-                            )
+                            val result = withContext(Dispatchers.IO) {
+                                toolRegistry.executeTool(
+                                    name = call.name,
+                                    arguments = call.arguments,
+                                    chatId = chatId,
+                                    providerConfig = config,
+                                    context = androidContext,
+                                    subLlmCall = subLlmCall(config),
+                                )
+                            }
                             emit(AgentEvent.ToolResult(call.name, call.id, result))
                             currentMessages.add(ApiMessage(
                                 role = "tool",
@@ -283,7 +287,7 @@ class AgentLoop(
         if (cancelled()) {
             emit(AgentEvent.Cancelled(""))
         } else {
-            emit(AgentEvent.Error("Max iterations reached ($maxIterations)"))
+            emit(AgentEvent.Error("Reached max iterations ($maxIterations) without completion. The model may be stuck in a tool-calling loop."))
         }
     }
 
@@ -329,7 +333,7 @@ class AgentLoop(
         try {
             localEngine.loadModel(
                 modelPath = modelPath,
-                contextSize = (config.activeModel?.contextWindow ?: LOCAL_CONTEXT_SIZE).coerceAtMost(LOCAL_CONTEXT_SIZE),
+                contextSize = (config.activeModel?.contextWindow ?: LOCAL_CONTEXT_SIZE).coerceAtLeast(512),
                 threads = Runtime.getRuntime().availableProcessors().coerceIn(1, 8),
                 gpuLayers = config.localGpuLayers,
             )
@@ -403,23 +407,25 @@ class AgentLoop(
                     val permResult = if (tool != null) {
                         val mode = permissionChecker(call.name)
                         when {
-                            ToolPermissionStore_companion.canAutoApprove(mode) -> ToolPermissionCheckResult.Allowed
-                            ToolPermissionStore_companion.isBlocked(mode) -> ToolPermissionCheckResult.Blocked("Tool '${call.name}' is set to never allow")
+                            ToolPermissionChecks.canAutoApprove(mode) -> ToolPermissionCheckResult.Allowed
+                            ToolPermissionChecks.isBlocked(mode) -> ToolPermissionCheckResult.Blocked("Tool '${call.name}' is set to never allow")
                             else -> ToolPermissionCheckResult.NeedsApproval(tool.permission)
                         }
                     } else {
-                        ToolPermissionCheckResult.Allowed
+                        ToolPermissionCheckResult.Blocked("Unknown tool '${call.name}'")
                     }
 
                     val result = when (permResult) {
-                        is ToolPermissionCheckResult.Allowed -> toolRegistry.executeTool(
-                            name = call.name,
-                            arguments = call.arguments,
-                            chatId = chatId,
-                            providerConfig = config,
-                            context = androidContext,
-                            subLlmCall = null,
-                        )
+                        is ToolPermissionCheckResult.Allowed -> withContext(Dispatchers.IO) {
+                            toolRegistry.executeTool(
+                                name = call.name,
+                                arguments = call.arguments,
+                                chatId = chatId,
+                                providerConfig = config,
+                                context = androidContext,
+                                subLlmCall = null,
+                            )
+                        }
                         is ToolPermissionCheckResult.NeedsApproval -> {
                             val approval = ToolPermissionApproval(
                                 toolName = call.name,
@@ -429,14 +435,16 @@ class AgentLoop(
                             )
                             emit(AgentEvent.ToolApprovalRequest(approval))
                             if (approvalCallback(approval)) {
-                                toolRegistry.executeTool(
-                                    name = call.name,
-                                    arguments = call.arguments,
-                                    chatId = chatId,
-                                    providerConfig = config,
-                                    context = androidContext,
-                                    subLlmCall = null,
-                                )
+                                withContext(Dispatchers.IO) {
+                                    toolRegistry.executeTool(
+                                        name = call.name,
+                                        arguments = call.arguments,
+                                        chatId = chatId,
+                                        providerConfig = config,
+                                        context = androidContext,
+                                        subLlmCall = null,
+                                    )
+                                }
                             } else {
                                 ToolExecutionResult.err("Tool '${call.name}' was denied by user")
                             }
@@ -453,11 +461,21 @@ class AgentLoop(
                 }
             }
 
-            emit(AgentEvent.Error("Max iterations reached ($maxIterations)"))
+            if (cancelled()) {
+                emit(AgentEvent.Cancelled(""))
+            } else {
+                emit(AgentEvent.Error("Reached max iterations ($maxIterations) in local mode without completion."))
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             emit(AgentEvent.Error("Local llama.cpp error: ${e.message}"))
+        } finally {
+            try {
+                localEngine.unloadModel()
+            } catch (_: Exception) {
+                // Best-effort cleanup — don't mask the original error
+            }
         }
     }
 
@@ -501,7 +519,7 @@ class AgentLoop(
         try {
             engine.completeStream(
                 prompt = prompt,
-                maxTokens = (config.activeModel?.maxTokens ?: LOCAL_MAX_TOKENS).coerceAtMost(LOCAL_MAX_TOKENS),
+                maxTokens = (config.activeModel?.maxTokens ?: LOCAL_MAX_TOKENS).coerceAtLeast(LOCAL_MAX_TOKENS),
                 temperature = (config.activeModel?.temperature ?: 0.7).toFloat(),
             ).collect { token ->
                 raw.append(token)
@@ -609,9 +627,9 @@ class AgentLoop(
                 ?.get("content")
                 ?.jsonPrimitive
                 ?.contentOrNull
-                ?: raw
+                ?: "[sub-LLM call returned no content]"
         } catch (_: Exception) {
-            raw
+            "[sub-LLM call response parse error]"
         }
     }
 
@@ -620,12 +638,16 @@ class AgentLoop(
         val streamedToUi: Boolean,
     )
 
-    private object LocalStopGeneration : CancellationException()
+    /**
+     * Used to break out of the local generation flow when a stop sequence is detected.
+     * Not a CancellationException — that would interfere with coroutine cancellation machinery.
+     */
+    private object LocalStopGeneration : RuntimeException()
 
     private fun findLocalStopIndex(text: String): Int? {
         val lower = text.lowercase()
         return LOCAL_STOP_SEQUENCES
-            .map { lower.indexOf(it, startIndex = 1) }
+            .map { lower.indexOf(it) }
             .filter { it >= 0 }
             .minOrNull()
     }
@@ -641,17 +663,17 @@ class AgentLoop(
 }
 
 private object LocalPromptSessionCache {
-    private var chatId: String? = null
-    private var modelPath: String? = null
-    private var transcript: String? = null
+    private data class CacheKey(val chatId: String, val modelPath: String)
+    private data class CacheEntry(val transcript: String)
+    private val cache = java.util.concurrent.ConcurrentHashMap<CacheKey, CacheEntry>()
 
     fun tryBuildPrompt(
         chatId: String,
         modelPath: String,
         messages: List<ApiMessage>,
     ): String? {
-        if (this.chatId != chatId || this.modelPath != modelPath) return null
-        val cachedTranscript = transcript ?: return null
+        val entry = cache[CacheKey(chatId, modelPath)] ?: return null
+        val cachedTranscript = entry.transcript
         val lastUser = messages.lastOrNull { it.role == "user" }?.content?.trim()
         if (lastUser.isNullOrBlank()) return null
         return buildString {
@@ -669,68 +691,36 @@ private object LocalPromptSessionCache {
         rawAssistantContent: String,
     ) {
         if (rawAssistantContent.isBlank()) return
-        this.chatId = chatId
-        this.modelPath = modelPath
-        transcript = buildString {
-            append(prompt)
-            append(rawAssistantContent)
-            appendLine()
-        }
+        cache[CacheKey(chatId, modelPath)] = CacheEntry(
+            transcript = buildString {
+                append(prompt)
+                append(rawAssistantContent)
+                appendLine()
+            }
+        )
     }
 }
 
 private object LocalToolCallParser {
     private val json = Json { ignoreUnknownKeys = true }
-    private val blockPatterns = listOf(
-        Regex("""(?s)<tool_call>\s*([{].*?[}])\s*</tool_call>"""),
-        Regex("""(?s)```tool_call\s*([{].*?[}])\s*```"""),
-    )
+    private val fenceStart = "```tool_call"
+    private val blockStart = "<tool_call"
 
     fun resolve(content: String): List<ResolvedToolCall> {
         val calls = mutableListOf<ResolvedToolCall>()
-        for (pattern in blockPatterns) {
-            pattern.findAll(content).forEach { match ->
-                parsePayload(match.groupValues[1], calls.size)?.let { calls.add(it) }
-            }
-        }
-        if (calls.isEmpty()) {
-            parsePayload(content.trim(), 0)?.let { calls.add(it) }
-        }
-        return calls
-    }
 
-    fun stripToolCalls(content: String): String {
-        return blockPatterns.fold(content) { acc, pattern -> pattern.replace(acc, "") }
-    }
-
-    private fun parsePayload(payload: String, index: Int): ResolvedToolCall? {
-        return try {
-            val obj = json.parseToJsonElement(payload).jsonObject
-            val name = obj["name"]?.jsonPrimitive?.contentOrNull
-                ?: obj["tool_name"]?.jsonPrimitive?.contentOrNull
-                ?: return null
-            val argumentsElement = obj["arguments"] ?: obj["params"]
-            val arguments = when (argumentsElement) {
-                null -> "{}"
-                is JsonObject -> argumentsElement.toString()
-                else -> argumentsElement.jsonPrimitive.contentOrNull ?: argumentsElement.toString()
-            }
-            ResolvedToolCall(
-                id = "local_tool_${System.currentTimeMillis()}_$index",
-                name = name,
-                arguments = arguments,
-            )
-        } catch (_: Exception) {
-            null
+        // Extract from fenced blocks: ```tool_call { ... } ```
+        extractFencedBlocks(content).forEach { payload ->
+            parsePayload(payload, calls.size)?.let { calls.add(it) }
         }
-    }
-}
+
+        // Extract from <tool_call> ... { ... } ...
 
 /**
  * Companion helpers for permission checking — extracted to avoid a runtime
  * dependency on the Android context-requiring ToolPermissionStore in the agent loop.
  */
-internal object ToolPermissionStore_companion {
+internal object ToolPermissionChecks {
     fun canAutoApprove(mode: ToolPermissionMode): Boolean =
         mode == ToolPermissionMode.alwaysAllow
 

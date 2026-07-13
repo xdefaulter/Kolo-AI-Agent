@@ -19,19 +19,25 @@ class RoomMemoryRepository @Inject constructor(
 ) : MemoryRepository {
 
     override suspend fun search(query: String, limit: Int): List<Memory> {
-        return memoryDao.search("%${query.lowercase()}%", limit).map { it.toDomain() }
+        val escaped = query.lowercase()
+            .replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        return memoryDao.search("%$escaped%", limit.coerceIn(1, 50)).map { it.toDomain() }
     }
 
     override suspend fun touchBatch(ids: List<String>) {
+        if (ids.isEmpty()) return
         memoryDao.touchBatch(ids)
     }
 
     override suspend fun save(memory: Memory): Memory {
-        val entity = memory.toEntity()
+        val now = System.currentTimeMillis()
+        val entity = memory.copy(updatedAt = now).toEntity()
         memoryDao.upsert(entity)
         return memory.copy(
             createdAt = entity.created_at,
-            updatedAt = entity.updated_at,
+            updatedAt = now,
             lastUsedAt = entity.last_used_at,
         )
     }

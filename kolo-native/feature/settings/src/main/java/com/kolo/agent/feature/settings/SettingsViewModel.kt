@@ -89,7 +89,6 @@ class SettingsViewModel @Inject constructor(
     private fun loadToolPermissions() {
         viewModelScope.launch {
             permissionStore.allOverrides().combine(appSettings.customTools) { overrides, customTools ->
-                toolRegistry.setCustomTools(customTools)
                 val tools = toolRegistry.getAllTools()
                 tools.map { tool ->
                     val currentMode = overrides[tool.name]
@@ -272,7 +271,7 @@ class SettingsViewModel @Inject constructor(
 
     fun updateProvider(config: ProviderConfig, apiKey: String? = null) {
         viewModelScope.launch {
-            val key = apiKey ?: providerRepository.getApiKey(config.id.value)
+            val key = apiKey ?: com.kolo.agent.core.providers.ProviderConfigKeyStore[config.id.value]
             val existingProvider = providerRepository.getAllProviders().firstOrNull { it.id == config.id }
             var configToSave = config.copy(updatedAt = System.currentTimeMillis())
             val shouldRefreshModels = if (configToSave.isLocal) {
@@ -320,7 +319,7 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch {
             val provider = providerRepository.getAllProviders().firstOrNull { it.id == id } ?: return@launch
             if (provider.isLocal) return@launch
-            val apiKey = providerRepository.getApiKey(id.value)
+            val apiKey = com.kolo.agent.core.providers.ProviderConfigKeyStore[id.value]
             fetchModelsForProvider(provider, apiKey)?.let { updated ->
                 providerRepository.saveProvider(updated, apiKey)
             }
@@ -356,13 +355,11 @@ class SettingsViewModel @Inject constructor(
                 modelPath = cleanPath.ifBlank { null },
                 updatedAt = System.currentTimeMillis(),
             )
-            providerRepository.saveProvider(updated, providerRepository.getApiKey(id.value))
+            providerRepository.saveProvider(updated, com.kolo.agent.core.providers.ProviderConfigKeyStore[id.value])
             if (updated.isLocal) {
                 appSettings.setLocalLlamaModelPath(updated.modelPath)
             }
-            _uiState.value = _uiState.value.copy(
-                providers = providerRepository.getAllProviders(),
-            )
+            refreshProvidersState()
         }
     }
 

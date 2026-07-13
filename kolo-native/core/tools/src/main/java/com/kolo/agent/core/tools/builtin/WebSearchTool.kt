@@ -44,23 +44,28 @@ class WebSearchTool : KoloTool() {
         connection.setRequestProperty("Accept", "text/html")
         connection.instanceFollowRedirects = true
 
-        val code = connection.responseCode
-        if (code != 200) {
+        try {
+            val code = connection.responseCode
+            if (code != 200) {
+                // Log the primary failure and fall back
+                val primaryError = "Primary DDG returned HTTP $code, trying lite endpoint"
+                val liteResult = searchDuckDuckGoLite(query, maxResults)
+                return if (liteResult.startsWith("No results") || liteResult.startsWith("Web search failed")) {
+                    "$primaryError. $liteResult"
+                } else {
+                    liteResult
+                }
+            }
+
+            val html = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            val results = parseDuckDuckGoHtml(html, maxResults)
+            if (results.isEmpty()) {
+                return searchDuckDuckGoLite(query, maxResults)
+            }
+            return formatResults(query, results)
+        } finally {
             connection.disconnect()
-            // Fallback: try the lite version
-            return searchDuckDuckGoLite(query, maxResults)
         }
-
-        val html = connection.inputStream.bufferedReader().use { it.readText() }
-        connection.disconnect()
-
-        val results = parseDuckDuckGoHtml(html, maxResults)
-        if (results.isEmpty()) {
-            // Fallback to lite version
-            return searchDuckDuckGoLite(query, maxResults)
-        }
-
-        return formatResults(query, results)
     }
 
     internal fun searchDuckDuckGoLite(query: String, maxResults: Int): String {
@@ -79,7 +84,7 @@ class WebSearchTool : KoloTool() {
                 return "Web search failed (HTTP ${connection.responseCode}). Please try again later."
             }
 
-            val html = connection.inputStream.bufferedReader().use { it.readText() }
+            val html = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
             connection.disconnect()
 
             val results = parseDuckDuckGoLiteHtml(html, maxResults)

@@ -8,10 +8,12 @@ import com.kolo.agent.core.providers.local.LocalModelManager
 import com.kolo.agent.core.providers.ProviderRepository
 import com.kolo.agent.core.model.ProviderKind
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 import java.io.File
 
@@ -39,8 +41,12 @@ class LocalModelViewModel @Inject constructor(
 
     init {
         viewModelScope.launch {
-            localModelManager.initialize()
-            // Now all state flows are populated; collect them for UI
+            try {
+                localModelManager.initialize()
+            } catch (e: Exception) {
+                // Continue — collectors will still run and show appropriate status
+            }
+            // Launch collectors independently of initialize() success
             launch { localModelManager.importedModels.collect { models ->
                 val activeName = _uiState.value.activeModelPath?.let { path ->
                     models.firstOrNull { it.path == path }?.name
@@ -112,35 +118,47 @@ class LocalModelViewModel @Inject constructor(
             return
         }
 
-        val error = when {
-            !File(trimmed).exists() -> "Path does not exist"
-            !File(trimmed).isFile -> "Path must be a file"
-            !trimmed.lowercase().endsWith(".gguf") -> "Path must point to a .gguf file"
-            else -> null
-        }
+        viewModelScope.launch {
+            val (pathExists, pathIsFile) = withContext(Dispatchers.IO) {
+                val file = File(trimmed)
+                file.exists() to file.isFile
+            }
+            val error = when {
+                !pathExists -> "Path does not exist"
+                !pathIsFile -> "Path must be a file"
+                !trimmed.lowercase().endsWith(".gguf") -> "Path must point to a .gguf file"
+                else -> null
+            }
 
-        if (error != null) {
-            _uiState.value = _uiState.value.copy(manualPathDraft = trimmed, manualPathError = error)
-            return
-        }
+            if (error != null) {
+                _uiState.value = _uiState.value.copy(manualPathDraft = trimmed, manualPathError = error)
+                return@launch
+            }
 
-        _uiState.value = _uiState.value.copy(manualPathDraft = trimmed, manualPathError = null)
-        viewModelScope.launch { localModelManager.setActiveModel(trimmed) }
+            _uiState.value = _uiState.value.copy(manualPathDraft = trimmed, manualPathError = null)
+            localModelManager.setActiveModel(trimmed)
+        }
     }
 
     fun updateManualPathDraft(path: String) {
         val trimmed = path.trim()
-        val error = if (trimmed.isBlank()) {
-            null
-        } else {
-            when {
-                !File(trimmed).exists() -> "Path does not exist"
-                !File(trimmed).isFile -> "Path must be a file"
+        if (trimmed.isBlank()) {
+            _uiState.value = _uiState.value.copy(manualPathDraft = path, manualPathError = null)
+            return
+        }
+        viewModelScope.launch {
+            val (pathExists, pathIsFile) = withContext(Dispatchers.IO) {
+                val file = File(trimmed)
+                file.exists() to file.isFile
+            }
+            val error = when {
+                !pathExists -> "Path does not exist"
+                !pathIsFile -> "Path must be a file"
                 !trimmed.lowercase().endsWith(".gguf") -> "Path must point to a .gguf file"
                 else -> null
             }
+            _uiState.value = _uiState.value.copy(manualPathDraft = path, manualPathError = error)
         }
-        _uiState.value = _uiState.value.copy(manualPathDraft = path, manualPathError = error)
     }
 
     fun clearManualPathError() {

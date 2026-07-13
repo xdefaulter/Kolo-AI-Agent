@@ -51,7 +51,7 @@ class Converters {
 
     @TypeConverter
     fun toMessageStatus(value: String?): MessageStatus? =
-        value?.let { MessageStatus.valueOf(it) }
+        value?.let { v -> MessageStatus.entries.firstOrNull { it.name == v } }
 
     @TypeConverter
     fun fromToolCallList(calls: List<ToolCallInfo>?): String? =
@@ -59,7 +59,12 @@ class Converters {
 
     @TypeConverter
     fun toToolCallList(value: String?): List<ToolCallInfo>? =
-        value?.let { kotlinx.serialization.json.Json.decodeFromString(listSer, it) }
+        value?.let {
+            runCatching {
+                kotlinx.serialization.json.Json { ignoreUnknownKeys = true; isLenient = true }
+                    .decodeFromString(listSer, it)
+            }.getOrNull()
+        }
 
     @TypeConverter
     fun fromStringList(list: List<String>?): String? =
@@ -67,7 +72,7 @@ class Converters {
 
     @TypeConverter
     fun toStringList(value: String?): List<String>? =
-        value?.takeIf { it.isNotBlank() }?.split(",")?.filter { it.isNotEmpty() }
+        value?.takeIf { it.isNotBlank() }?.split(",")?.filter { it.isNotEmpty() }?.map { it.trim() }
 
     companion object {
         private val listSer = kotlinx.serialization.builtins.ListSerializer(ToolCallInfo.serializer())

@@ -10,6 +10,7 @@ class RememberThisTool : KoloTool() {
     override val parameterSchema = """{"type":"object","properties":{"content":{"type":"string","description":"The information to remember"},"kind":{"type":"string","description":"Type of memory (e.g., 'preference', 'fact', 'instruction')"}},"required":["content"]}"""
     override val permission = ToolPermission.sensitive
 
+    @Volatile
     var memoryRepository: MemoryRepository? = null
 
     override suspend fun execute(params: Map<String, String>, context: ToolExecutionContext): ToolExecutionResult {
@@ -17,7 +18,7 @@ class RememberThisTool : KoloTool() {
         val kind = params["kind"] ?: "fact"
 
         val repo = memoryRepository
-            ?: return ToolExecutionResult.ok("Memory system not yet initialized.")
+            ?: return ToolExecutionResult.err("Memory system not yet initialized.")
 
         val memory = Memory(
             kind = kind,

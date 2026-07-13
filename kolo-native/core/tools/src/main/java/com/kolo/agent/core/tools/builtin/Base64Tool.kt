@@ -18,12 +18,12 @@ class Base64Tool : KoloTool() {
 
         return when (action.lowercase()) {
             "encode" -> {
-                val encoded = JavaBase64.getEncoder().encodeToString(input.toByteArray())
+                val encoded = JavaBase64.getEncoder().encodeToString(input.toByteArray(Charsets.UTF_8))
                 ToolExecutionResult.ok(encoded)
             }
             "decode" -> {
                 try {
-                    val decoded = String(JavaBase64.getDecoder().decode(input))
+                    val decoded = String(JavaBase64.getDecoder().decode(input), Charsets.UTF_8)
                     ToolExecutionResult.ok(decoded)
                 } catch (e: Exception) {
                     ToolExecutionResult.err("Base64 decode error: ${e.message}")

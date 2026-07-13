@@ -25,10 +25,11 @@ class StreamingToolCallParser {
             .mapNotNull { (_, buf) ->
                 val id = buf.id ?: return@mapNotNull null
                 val name = buf.name ?: return@mapNotNull null
+                val arguments = buf.arguments.toString().ifBlank { "{}" }
                 ResolvedToolCall(
                     id = id,
                     name = name,
-                    arguments = buf.arguments.toString(),
+                    arguments = arguments,
                 )
             }
     }

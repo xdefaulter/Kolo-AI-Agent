@@ -70,35 +70,45 @@ class OpenAiStreamClient(
             .header("Content-Type", "application/json")
 
         val apiKey = ProviderConfigKeyStore[config.id.value]
-        if (apiKey.isNotBlank()) {
+        val hasCustomAuth = config.customHeaders.keys.any { it.equals("Authorization", ignoreCase = true) }
+        if (apiKey.isNotBlank() && !hasCustomAuth) {
             requestBuilder.header("Authorization", "Bearer $apiKey")
         }
         config.customHeaders.forEach { (k, v) ->
             requestBuilder.header(k, v)
         }
 
+        var closed = false
+
         val eventSource = EventSources.createFactory(client)
             .newEventSource(requestBuilder.build(), object : EventSourceListener() {
                 override fun onEvent(eventSource: EventSource, id: String?, type: String?, data: String) {
+                    if (closed) return
                     if (data == "[DONE]") {
-                        channel.trySend(StreamChunk(finishReason = "stop"))
+                        if (!closed) channel.trySend(StreamChunk(finishReason = "stop"))
                         return
                     }
                     try {
                         val chunk = parseChunk(data)
-                        channel.trySend(chunk)
-                    } catch (_: Exception) {
-                        // Skip malformed chunks
+                        if (!closed) channel.trySend(chunk)
+                    } catch (e: Exception) {
+                        if (!closed) channel.trySend(StreamChunk(error = "Malformed chunk: ${data.take(120)}"))
                     }
                 }
 
                 override fun onFailure(eventSource: EventSource, t: Throwable?, response: Response?) {
-                    val errorMsg = t?.message ?: response?.body?.string()?.take(200) ?: "Unknown error"
+                    if (closed) return
+                    closed = true
+                    val errorMsg = t?.message ?: try {
+                        response?.body?.string()?.take(200)
+                    } catch (_: Exception) { null } ?: "Unknown error (HTTP ${response?.code ?: 0})"
                     channel.trySend(StreamChunk(error = errorMsg))
                     channel.close()
                 }
 
                 override fun onClosed(eventSource: EventSource) {
+                    if (closed) return
+                    closed = true
                     channel.close()
                 }
             })
@@ -138,15 +148,38 @@ class OpenAiStreamClient(
             .post(requestJson.toRequestBody("application/json".toMediaType()))
             .header("Content-Type", "application/json")
 
-        if (ProviderConfigKeyStore[config.id.value].isNotBlank()) {
-            requestBuilder.header("Authorization", "Bearer ${ProviderConfigKeyStore[config.id.value]}")
+        val apiKey = ProviderConfigKeyStore[config.id.value]
+        val hasCustomAuth = config.customHeaders.keys.any { it.equals("Authorization", ignoreCase = true) }
+        if (apiKey.isNotBlank() && !hasCustomAuth) {
+            requestBuilder.header("Authorization", "Bearer $apiKey")
         }
         config.customHeaders.forEach { (k, v) ->
             requestBuilder.header(k, v)
         }
 
-        val response = client.newCall(requestBuilder.build()).execute()
-        return response.body?.string() ?: throw IllegalStateException("Empty response")
+        val response = withContext(Dispatchers.IO) {
+            client.newCall(requestBuilder.build()).execute()
+        }
+        return readCappedBody(response)
+    }
+
+    private fun readCappedBody(response: Response, maxBytes: Long = 1_000_000): String {
+        return response.body?.byteStream()?.use { stream ->
+            val buffer = ByteArray(8192)
+            val output = java.io.ByteArrayOutputStream()
+            var total = 0L
+            while (true) {
+                val read = stream.read(buffer)
+                if (read == -1) break
+                total += read
+                if (total > maxBytes) {
+                    output.write(buffer, 0, (maxBytes - (total - read)).toInt().coerceAtLeast(0))
+                    break
+                }
+                output.write(buffer, 0, read)
+            }
+            output.toString(Charsets.UTF_8.name())
+        } ?: throw IllegalStateException("Empty response")
     }
 
     /**
@@ -178,8 +211,10 @@ class OpenAiStreamClient(
             .get()
             .header("Content-Type", "application/json")
 
-        if (ProviderConfigKeyStore[config.id.value].isNotBlank()) {
-            requestBuilder.header("Authorization", "Bearer ${ProviderConfigKeyStore[config.id.value]}")
+        val apiKey = ProviderConfigKeyStore[config.id.value]
+        val hasCustomAuth = config.customHeaders.keys.any { it.equals("Authorization", ignoreCase = true) }
+        if (apiKey.isNotBlank() && !hasCustomAuth) {
+            requestBuilder.header("Authorization", "Bearer $apiKey")
         }
         config.customHeaders.forEach { (k, v) ->
             requestBuilder.header(k, v)
@@ -201,7 +236,10 @@ class OpenAiStreamClient(
     internal fun modelFetchUrls(config: ProviderConfig): List<String> {
         val primary = config.effectiveModelsUrl
         val normalizedPrimary = primary.trimEnd('/')
-        val isOllamaWeb = normalizedPrimary.startsWith("https://ollama.com", ignoreCase = true)
+        val isOllamaWeb = try {
+            val host = java.net.URI(primary).host
+            host != null && host.equals("ollama.com", ignoreCase = true)
+        } catch (_: Exception) { false }
         return buildList {
             add(primary)
             if (isOllamaWeb && normalizedPrimary != "https://ollama.com/v1/models") {
@@ -267,6 +305,14 @@ class OpenAiStreamClient(
 
     private fun parseChunk(data: String): StreamChunk {
         val root = json.parseToJsonElement(data).jsonObject
+
+        val errorObj = root["error"]
+        if (errorObj != null) {
+            val errorMsg = errorObj.jsonObject["message"]?.jsonPrimitive?.contentOrNull
+                ?: errorObj.toString().take(200)
+            return StreamChunk(error = errorMsg)
+        }
+
         val choices = root["choices"]?.jsonArray ?: return StreamChunk()
 
         if (choices.isEmpty()) return StreamChunk()
@@ -279,13 +325,15 @@ class OpenAiStreamClient(
 
         val reasoningContent = delta["reasoning_content"]?.jsonPrimitive?.contentOrNull
 
-        val toolCallDeltas = delta["tool_calls"]?.jsonArray?.map { tc ->
-            val tcObj = tc.jsonObject
-            val index = tcObj["index"]?.jsonPrimitive?.intOrNull ?: 0
-            val id = tcObj["id"]?.jsonPrimitive?.contentOrNull
-            val name = tcObj["function"]?.jsonObject?.get("name")?.jsonPrimitive?.contentOrNull
-            val argsFragment = tcObj["function"]?.jsonObject?.get("arguments")?.jsonPrimitive?.contentOrNull
-            ToolCallDelta(index = index, id = id, name = name, argumentsFragment = argsFragment)
+        val toolCallDeltas = delta["tool_calls"]?.jsonArray?.mapNotNull { tc ->
+            runCatching {
+                val tcObj = tc.jsonObject
+                val index = tcObj["index"]?.jsonPrimitive?.intOrNull ?: 0
+                val id = tcObj["id"]?.jsonPrimitive?.contentOrNull
+                val name = tcObj["function"]?.jsonObject?.get("name")?.jsonPrimitive?.contentOrNull
+                val argsFragment = tcObj["function"]?.jsonObject?.get("arguments")?.jsonPrimitive?.contentOrNull
+                ToolCallDelta(index = index, id = id, name = name, argumentsFragment = argsFragment)
+            }.getOrNull()
         }
 
         val usageObj = root["usage"]?.jsonObject

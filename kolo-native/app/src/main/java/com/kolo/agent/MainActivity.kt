@@ -4,13 +4,17 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.*
+import androidx.compose.ui.Modifier
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.compose.*
 import com.kolo.agent.core.model.*
 import com.kolo.agent.feature.chat.ui.ChatScreen
 import com.kolo.agent.feature.chat.ChatViewModel
 import com.kolo.agent.feature.chat.ToolApprovalAction
+import com.kolo.agent.feature.phonecontrol.ui.PhoneControlOverlay
 import com.kolo.agent.feature.settings.ui.SettingsScreen
 import com.kolo.agent.feature.settings.ui.LocalModelScreen
 import com.kolo.agent.feature.settings.SettingsViewModel
@@ -35,10 +39,11 @@ class MainActivity : ComponentActivity() {
 fun KoloNavApp() {
     val navController = rememberNavController()
 
-    NavHost(
-        navController = navController,
-        startDestination = "chat",
-    ) {
+    Box(modifier = Modifier.fillMaxSize()) {
+        NavHost(
+            navController = navController,
+            startDestination = "chat",
+        ) {
         composable("chat") {
             val chatViewModel: ChatViewModel = hiltViewModel()
             val state by chatViewModel.uiState.collectAsState()
@@ -56,11 +61,11 @@ fun KoloNavApp() {
                 onDeleteFolder = { chatViewModel.deleteFolder(it) },
                 onMoveChat = { chatId, folderId -> chatViewModel.moveChat(chatId, folderId) },
                 onSetPinned = { chatId, pinned -> chatViewModel.setPinned(chatId, pinned) },
-                onNavigateSettings = { navController.navigate("settings") },
+                onNavigateSettings = { navController.navigate("settings") { launchSingleTop = true } },
                 onSetActiveModel = { modelId -> chatViewModel.setActiveModel(modelId) },
                 onRefreshActiveModels = { chatViewModel.refreshActiveProviderModels() },
                 onUsePromptTemplate = { templateId -> chatViewModel.touchPromptTemplate(templateId) },
-                onNavigateLocalModels = { navController.navigate("local_models") },
+                onNavigateLocalModels = { navController.navigate("local_models") { launchSingleTop = true } },
                 onAllowOnce = { chatViewModel.handleApprovalAction(ToolApprovalAction.AllowOnce(it)) },
                 onAlwaysAllow = { chatViewModel.handleApprovalAction(ToolApprovalAction.AlwaysAllow(it)) },
                 onDenyOnce = { chatViewModel.handleApprovalAction(ToolApprovalAction.DenyOnce(it)) },
@@ -93,7 +98,7 @@ fun KoloNavApp() {
                 onSetLocalLlamaGpuMode = { useGpu -> settingsViewModel.setLocalLlamaGpuMode(useGpu) },
                 onSetLocalLlamaGpuLayers = { layers -> settingsViewModel.setLocalLlamaGpuLayers(layers) },
                 onSetShowTokenUsage = { enabled -> settingsViewModel.setShowTokenUsage(enabled) },
-                onNavigateLocalModels = { navController.navigate("local_models") },
+                onNavigateLocalModels = { navController.navigate("local_models") { launchSingleTop = true } },
                 onNavigateBack = { navController.popBackStack() },
             )
         }
@@ -115,5 +120,10 @@ fun KoloNavApp() {
                 onNavigateBack = { navController.popBackStack() },
             )
         }
+        }
+
+        // In-app STOP overlay — visible whenever a phone-control session is active.
+        // PhoneControlOverlay self-gates on sessionState and calls emergencyStop() internally.
+        PhoneControlOverlay(onStop = { })
     }
 }

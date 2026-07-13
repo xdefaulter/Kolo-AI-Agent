@@ -121,8 +121,12 @@ class BatteryInfoTool : KoloTool() {
 
     override suspend fun execute(params: Map<String, String>, context: ToolExecutionContext): ToolExecutionResult {
         val app = context.requireAndroidContext() ?: return ToolExecutionResult.err("Android context unavailable")
-        val status = app.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-            ?: return ToolExecutionResult.err("Battery status unavailable")
+        val filter = IntentFilter(Intent.ACTION_BATTERY_CHANGED)
+        val status = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            app.registerReceiver(null, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            app.registerReceiver(null, filter)
+        } ?: return ToolExecutionResult.err("Battery status unavailable")
         val level = status.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
         val scale = status.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
         val percent = if (level >= 0 && scale > 0) level * 100 / scale else -1
@@ -156,7 +160,9 @@ class VibrateTool : KoloTool() {
         }
         val duration = (params["duration_ms"]?.toLongOrNull() ?: 250L).coerceIn(1L, 2000L)
         val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            (app.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager).defaultVibrator
+            val vibratorManager = app.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
+                ?: return ToolExecutionResult.err("Vibrator service unavailable on this device")
+            vibratorManager.defaultVibrator
         } else {
             @Suppress("DEPRECATION")
             app.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
@@ -275,7 +281,8 @@ class ContactsSearchTool : KoloTool() {
             ContactsContract.CommonDataKinds.Phone.CONTACT_ID,
         )
         val selection = "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} LIKE ? OR ${ContactsContract.CommonDataKinds.Phone.NUMBER} LIKE ?"
-        val args = arrayOf("%$query%", "%$query%")
+        val escapedQuery = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        val args = arrayOf("%$escapedQuery%", "%$escapedQuery%")
         val results = linkedMapOf<String, MutableList<String>>()
         app.contentResolver.query(
             ContactsContract.CommonDataKinds.Phone.CONTENT_URI,

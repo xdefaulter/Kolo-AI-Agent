@@ -17,7 +17,7 @@ interface MessageDao {
     @Query("DELETE FROM messages WHERE id = :id")
     suspend fun deleteById(id: String)
 
-    @Query("DELETE FROM messages WHERE chat_id = :chatId AND created_at > :cutoff")
+    @Query("DELETE FROM messages WHERE chat_id = :chatId AND created_at >= :cutoff")
     suspend fun deleteAfterTime(chatId: String, cutoff: Long)
 
     @Query("DELETE FROM messages WHERE chat_id = :chatId")

@@ -97,12 +97,20 @@ class ChatViewModel @Inject constructor(
     val uiState: StateFlow<ChatUiState> = _uiState.asStateFlow()
 
     private var currentChatId: ChatId? = null
-    private var isCancelled = false
-    private val refreshingProviderModels = mutableSetOf<String>()
+    @Volatile private var isCancelled = false
+    private val refreshingProviderModels = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap())
     private var localBridgeStatus: LocalModelManager.BridgeStatus = LocalModelManager.BridgeStatus.Unknown
+    private var agentJob: kotlinx.coroutines.Job? = null
+    private val sendMutex = kotlinx.coroutines.sync.Mutex()
 
     /** Continuation for pending tool approval — resumed by approve/deny actions. */
-    private var approvalContinuation: kotlin.coroutines.Continuation<Boolean>? = null
+    private val approvalContinuation = java.util.concurrent.atomic.AtomicReference<kotlin.coroutines.Continuation<Boolean>?>(null)
+
+    private fun resumeApproval(value: Boolean) {
+        approvalContinuation.getAndSet(null)?.let { cont ->
+            try { cont.resume(value) } catch (_: IllegalStateException) { /* already resumed */ }
+        }
+    }
 
     init {
         viewModelScope.launch {
@@ -183,6 +191,9 @@ class ChatViewModel @Inject constructor(
     }
 
     fun deleteChat(chatId: ChatId) {
+        if (_uiState.value.isStreaming && currentChatId == chatId) {
+            cancelGeneration()
+        }
         viewModelScope.launch {
             chatDao.deleteById(chatId.value)
             messageDao.deleteForChat(chatId.value)
@@ -204,10 +215,10 @@ class ChatViewModel @Inject constructor(
 
     fun newChat(): ChatId {
         val chatId = ChatId(UUID.randomUUID().toString())
+        currentChatId = chatId
         viewModelScope.launch {
             val chat = Chat(id = chatId, folderId = _uiState.value.activeFolderId)
             chatDao.upsert(chat.toEntity())
-            currentChatId = chatId
             _uiState.update { it.copy(currentChatId = chatId, messages = emptyList()) }
             loadChatList()
         }
@@ -268,31 +279,28 @@ class ChatViewModel @Inject constructor(
         when (action) {
             is ToolApprovalAction.AllowOnce -> {
                 // Resume the agent loop (approved) but do NOT persist
-                approvalContinuation?.resume(true)
+                resumeApproval(true)
             }
             is ToolApprovalAction.AlwaysAllow -> {
                 // Resume the agent loop (approved) AND persist alwaysAllow
-                approvalContinuation?.resume(true)
+                resumeApproval(true)
                 viewModelScope.launch { permStore.setMode(action.approval.toolName, ToolPermissionMode.alwaysAllow) }
             }
             is ToolApprovalAction.DenyOnce -> {
                 // Deny this invocation but do NOT persist
-                approvalContinuation?.resume(false)
+                resumeApproval(false)
             }
             is ToolApprovalAction.Block -> {
                 // Deny this invocation AND persist neverAllow
-                approvalContinuation?.resume(false)
+                resumeApproval(false)
                 viewModelScope.launch { permStore.setMode(action.approval.toolName, ToolPermissionMode.neverAllow) }
             }
         }
-        approvalContinuation = null
     }
 
     fun clearPendingApproval() {
         _uiState.update { it.copy(pendingApproval = null) }
-        val continuation = approvalContinuation
-        approvalContinuation = null
-        continuation?.resume(false)
+        resumeApproval(false)
     }
 
     private fun evaluateProviderReadinessError(provider: ProviderConfig?, localModelPath: String?): String? {
@@ -334,10 +342,18 @@ class ChatViewModel @Inject constructor(
     fun denyAndBlockTool(approval: ToolPermissionApproval) = handleApprovalAction(ToolApprovalAction.Block(approval))
 
     fun cancelGeneration() {
+        agentJob?.cancel()
+        agentJob = null
         isCancelled = true
         _uiState.update { it.copy(isStreaming = false, isLoading = false, pendingApproval = null) }
-        approvalContinuation?.resume(false)
-        approvalContinuation = null
+        resumeApproval(false)
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        agentJob?.cancel()
+        agentJob = null
+        resumeApproval(false)
     }
 
     fun clearError() { _uiState.update { it.copy(error = null) } }
@@ -397,7 +413,7 @@ class ChatViewModel @Inject constructor(
                     },
                     updatedAt = System.currentTimeMillis(),
                 )
-                providerRep.saveProvider(updated, providerRep.getApiKey(provider.id.value))
+                providerRep.saveProvider(updated, com.kolo.agent.core.providers.ProviderConfigKeyStore[provider.id.value])
                 _uiState.update {
                     it.copy(
                         modelFetchStatus = "Fetched ${fetched.size} models",
@@ -446,133 +462,138 @@ class ChatViewModel @Inject constructor(
             newId
         }
 
-        viewModelScope.launch {
-            isCancelled = false
-            val persisted = persistAttachments(attachments)
-            if (persisted.failed.isNotEmpty()) {
-                _uiState.update {
-                    it.copy(
-                        error = "Unable to attach: ${persisted.failed.take(2).joinToString(", ")}" +
-                            if (persisted.failed.size > 2) " and ${persisted.failed.size - 2} more" else "",
-                    )
-                }
-                onAccepted(false, content, attachments)
-                return@launch
-            }
-
-            val stableAttachments = persisted.attachments
-            if (chatDao.getById(chatId.value) == null) {
-                chatDao.upsert(Chat(id = chatId, folderId = _uiState.value.activeFolderId).toEntity())
-            }
-
-            val userMsg = Message(chatId = chatId, role = MessageRole.user, content = content, attachments = stableAttachments)
-            messageDao.upsert(userMsg.toEntity())
-
-            val currentMessages = _uiState.value.messages
-            if (currentMessages.isEmpty()) {
-                chatDao.updateTitle(chatId.value, firstChatTitle(content, stableAttachments))
-            }
-
-            _uiState.update { it.copy(
-                messages = it.messages + userMsg,
-                isLoading = true, isStreaming = true,
-                streamingContent = "", streamingThinking = "",
-                error = null, activeToolCalls = emptyList(), toolResults = emptyMap(),
-                pendingApproval = null,
-            )}
-
+        agentJob = viewModelScope.launch {
+            if (!sendMutex.tryLock()) return@launch
             try {
-                val rawProvider = providerRep.getActiveProvider()
-                    ?: throw IllegalStateException("No active provider configured")
-                var provider = if (rawProvider.isLocal && rawProvider.modelPath.isNullOrBlank()) {
-                    rawProvider.copy(
-                        modelPath = appSettings.localLlamaModelPath.first()?.takeIf { it.isNotBlank() },
-                        localGpuLayers = appSettings.localLlamaGpuLayers.first(),
+                isCancelled = false
+                val persisted = persistAttachments(attachments)
+                if (persisted.failed.isNotEmpty()) {
+                    _uiState.update {
+                        it.copy(
+                            error = "Unable to attach: ${persisted.failed.take(2).joinToString(", ")}" +
+                                if (persisted.failed.size > 2) " and ${persisted.failed.size - 2} more" else "",
+                        )
+                    }
+                    onAccepted(false, content, attachments)
+                    return@launch
+                }
+
+                val stableAttachments = persisted.attachments
+                if (chatDao.getById(chatId.value) == null) {
+                    chatDao.upsert(Chat(id = chatId, folderId = _uiState.value.activeFolderId).toEntity())
+                }
+
+                val userMsg = Message(chatId = chatId, role = MessageRole.user, content = content, attachments = stableAttachments)
+                messageDao.upsert(userMsg.toEntity())
+
+                val currentMessages = _uiState.value.messages
+                if (currentMessages.isEmpty()) {
+                    chatDao.updateTitle(chatId.value, firstChatTitle(content, stableAttachments))
+                }
+
+                _uiState.update { it.copy(
+                    messages = it.messages + userMsg,
+                    isLoading = true, isStreaming = true,
+                    streamingContent = "", streamingThinking = "",
+                    error = null, activeToolCalls = emptyList(), toolResults = emptyMap(),
+                    pendingApproval = null,
+                )}
+
+                try {
+                    val rawProvider = providerRep.getActiveProvider()
+                        ?: throw IllegalStateException("No active provider configured")
+                    var provider = if (rawProvider.isLocal && rawProvider.modelPath.isNullOrBlank()) {
+                        rawProvider.copy(
+                            modelPath = appSettings.localLlamaModelPath.first()?.takeIf { it.isNotBlank() },
+                            localGpuLayers = appSettings.localLlamaGpuLayers.first(),
+                        )
+                    } else if (rawProvider.isLocal) {
+                        rawProvider.copy(localGpuLayers = appSettings.localLlamaGpuLayers.first())
+                    } else {
+                        rawProvider
+                    }
+                    if (provider.isLocal && provider.modelPath.isNullOrBlank()) {
+                        throw IllegalStateException("Import a GGUF model in Settings > Local Models and set it active.")
+                    }
+                    if (!provider.isLocal && provider.activeModel == null) {
+                        val refreshed = ensureRemoteProviderHasModels(provider)
+                        if (refreshed == null) {
+                            throw IllegalStateException("No model selected and no models were returned by ${provider.effectiveModelsUrl}")
+                        }
+                        provider = refreshed
+                    }
+                    val providerReadyError = evaluateProviderReadinessError(
+                        provider,
+                        if (provider.isLocal) appSettings.localLlamaModelPath.first() else null,
                     )
-                } else if (rawProvider.isLocal) {
-                    rawProvider.copy(localGpuLayers = appSettings.localLlamaGpuLayers.first())
-                } else {
-                    rawProvider
-                }
-                if (provider.isLocal && provider.modelPath.isNullOrBlank()) {
-                    throw IllegalStateException("Import a GGUF model in Settings > Local Models and set it active.")
-                }
-                if (!provider.isLocal && provider.activeModel == null) {
-                    val refreshed = ensureRemoteProviderHasModels(provider)
-                    if (refreshed == null) {
-                        throw IllegalStateException("No model selected and no models were returned by ${provider.effectiveModelsUrl}")
+                    if (providerReadyError != null) {
+                        throw IllegalStateException(providerReadyError)
                     }
-                    provider = refreshed
-                }
-                val providerReadyError = evaluateProviderReadinessError(
-                    provider,
-                    if (provider.isLocal) appSettings.localLlamaModelPath.first() else null,
-                )
-                if (providerReadyError != null) {
-                    throw IllegalStateException(providerReadyError)
-                }
 
-                val apiMessages = buildApiMessages(chatId, content, stableAttachments)
-                val memories = memoryRepository.search(content, limit = 6).map { memory ->
-                    "${memory.kind}: ${memory.content}"
-                }
-                val systemPrompt = SystemPromptComposer.compose(
-                    memories = memories,
-                    skills = appSettings.skills.first().filter { it.isEnabled }.map { "- ${it.name}: ${it.description}" },
-                    additionalPrompt = appSettings.customInstructions.first(),
-                    enabledTools = toolRegistry.getToolsForProvider(provider).map { it.name },
-                )
-                val fullMessages = listOf(ApiMessage(role = "system", content = systemPrompt)) + apiMessages
-
-                onAccepted(true, "", emptyList())
-
-                val agentLoop = AgentLoop(
-                    client = streamClient,
-                    toolRegistry = toolRegistry,
-                    localModelManager = localModelManager,
-                    androidContext = androidContext,
-                    permissionChecker = { toolName ->
-                        val tool = toolRegistry.getTool(toolName)
-                        val perm = tool?.permission ?: ToolPermission.sensitive
-                        permStore.getMode(toolName, perm).first()
-                    },
-                    approvalCallback = { approval ->
-                        _uiState.update { it.copy(pendingApproval = approval) }
-                        suspendCancellableCoroutine { cont -> approvalContinuation = cont }
-                    },
-                )
-                agentLoop.run(config = provider, messages = fullMessages, chatId = chatId.value).collect { event ->
-                    if (isCancelled) return@collect
-                    when (event) {
-                        is AgentEvent.ThinkingChunk -> _uiState.update { it.copy(streamingThinking = it.streamingThinking + event.thinking) }
-                        is AgentEvent.ContentChunk -> _uiState.update { it.copy(streamingContent = it.streamingContent + event.content) }
-                        is AgentEvent.TextComplete -> {
-                            val msg = Message(chatId = chatId, role = MessageRole.assistant, content = event.content)
-                            messageDao.upsert(msg.toEntity())
-                            _uiState.update { it.copy(messages = it.messages + msg, isStreaming = false, isLoading = false, streamingContent = "") }
-                        }
-                        is AgentEvent.ToolCallsStart -> _uiState.update { it.copy(activeToolCalls = event.calls) }
-                        is AgentEvent.ToolResult -> {
-                            val newResults = _uiState.value.toolResults.toMutableMap()
-                            newResults[event.toolCallId] = event.result
-                            val toolMsg = Message(
-                                chatId = chatId, role = MessageRole.tool,
-                                content = if (event.result.success) event.result.output else "Error: ${event.result.error}",
-                                toolCallId = ToolCallId(event.toolCallId), toolName = event.toolName, toolSuccess = event.result.success,
-                            )
-                            messageDao.upsert(toolMsg.toEntity())
-                            _uiState.update { it.copy(toolResults = newResults, messages = it.messages + toolMsg) }
-                        }
-                        is AgentEvent.ToolApprovalRequest -> { /* handled by approvalCallback suspension */ }
-                        is AgentEvent.UsageUpdate -> _uiState.update { it.copy(tokenUsage = event.usage) }
-                        is AgentEvent.Cancelled -> _uiState.update { it.copy(isStreaming = false, isLoading = false) }
-                        is AgentEvent.Error -> _uiState.update { it.copy(error = event.error, isStreaming = false, isLoading = false) }
+                    val apiMessages = buildApiMessages(chatId, content, stableAttachments)
+                    val memories = memoryRepository.search(content, limit = 6).map { memory ->
+                        "${memory.kind}: ${memory.content}"
                     }
+                    val systemPrompt = SystemPromptComposer.compose(
+                        memories = memories,
+                        skills = appSettings.skills.first().filter { it.isEnabled }.map { "- ${it.name}: ${it.description}" },
+                        additionalPrompt = appSettings.customInstructions.first(),
+                        enabledTools = toolRegistry.getToolsForProvider(provider).map { it.name },
+                    )
+                    val fullMessages = listOf(ApiMessage(role = "system", content = systemPrompt)) + apiMessages
+
+                    onAccepted(true, "", emptyList())
+
+                    val agentLoop = AgentLoop(
+                        client = streamClient,
+                        toolRegistry = toolRegistry,
+                        localModelManager = localModelManager,
+                        androidContext = androidContext,
+                        permissionChecker = { toolName ->
+                            val tool = toolRegistry.getTool(toolName)
+                            val perm = tool?.permission ?: ToolPermission.sensitive
+                            permStore.getMode(toolName, perm).first()
+                        },
+                        approvalCallback = { approval ->
+                            _uiState.update { it.copy(pendingApproval = approval) }
+                            suspendCancellableCoroutine { cont -> approvalContinuation.set(cont) }
+                        },
+                    )
+                    agentLoop.run(config = provider, messages = fullMessages, chatId = chatId.value).collect { event ->
+                        if (isCancelled) return@collect
+                        when (event) {
+                            is AgentEvent.ThinkingChunk -> _uiState.update { it.copy(streamingThinking = it.streamingThinking + event.thinking) }
+                            is AgentEvent.ContentChunk -> _uiState.update { it.copy(streamingContent = it.streamingContent + event.content) }
+                            is AgentEvent.TextComplete -> {
+                                val msg = Message(chatId = chatId, role = MessageRole.assistant, content = event.content)
+                                messageDao.upsert(msg.toEntity())
+                                _uiState.update { it.copy(messages = it.messages + msg, isStreaming = false, isLoading = false, streamingContent = "") }
+                            }
+                            is AgentEvent.ToolCallsStart -> _uiState.update { it.copy(activeToolCalls = event.calls) }
+                            is AgentEvent.ToolResult -> {
+                                val newResults = _uiState.value.toolResults.toMutableMap()
+                                newResults[event.toolCallId] = event.result
+                                val toolMsg = Message(
+                                    chatId = chatId, role = MessageRole.tool,
+                                    content = if (event.result.success) event.result.output else "Error: ${event.result.error}",
+                                    toolCallId = ToolCallId(event.toolCallId), toolName = event.toolName, toolSuccess = event.result.success,
+                                )
+                                messageDao.upsert(toolMsg.toEntity())
+                                _uiState.update { it.copy(toolResults = newResults, messages = it.messages + toolMsg) }
+                            }
+                            is AgentEvent.ToolApprovalRequest -> { /* handled by approvalCallback suspension */ }
+                            is AgentEvent.UsageUpdate -> _uiState.update { it.copy(tokenUsage = event.usage) }
+                            is AgentEvent.Cancelled -> _uiState.update { it.copy(isStreaming = false, isLoading = false) }
+                            is AgentEvent.Error -> _uiState.update { it.copy(error = event.error, isStreaming = false, isLoading = false) }
+                        }
+                    }
+                    loadChatList()
+                } catch (e: Exception) {
+                    onAccepted(false, content, attachments)
+                    _uiState.update { it.copy(error = e.message, isStreaming = false, isLoading = false) }
                 }
-                loadChatList()
-            } catch (e: Exception) {
-                onAccepted(false, content, attachments)
-                _uiState.update { it.copy(error = e.message, isStreaming = false, isLoading = false) }
+            } finally {
+                sendMutex.unlock()
             }
         }
     }
@@ -596,23 +617,24 @@ class ChatViewModel @Inject constructor(
             },
             updatedAt = System.currentTimeMillis(),
         )
-        providerRep.saveProvider(updated, providerRep.getApiKey(provider.id.value))
+        providerRep.saveProvider(updated, com.kolo.agent.core.providers.ProviderConfigKeyStore[provider.id.value])
         return updated
     }
 
     private suspend fun buildApiMessages(chatId: ChatId, newUserContent: String, newAttachments: List<MessageAttachment>): List<ApiMessage> {
         val existing = messageDao.getForChat(chatId.value).map { it.toDomain() }
-        val messages = existing
-            .filter { it.role == MessageRole.user || it.role == MessageRole.assistant || it.role == MessageRole.system || it.role == MessageRole.tool }
-            .map { msg ->
-                when (msg.role) {
-                    MessageRole.tool -> ApiMessage(role = "tool", content = msg.content, toolCallId = msg.toolCallId?.value)
-                    else -> msg.toApiMessage()
-                }
-            }.toMutableList()
-        if (existing.none { it.content == newUserContent && it.role == MessageRole.user }) {
-            messages.add(Message(chatId = chatId, role = MessageRole.user, content = newUserContent, attachments = newAttachments).toApiMessage())
+        val messages = withContext(Dispatchers.IO) {
+            existing
+                .filter { it.role == MessageRole.user || it.role == MessageRole.assistant || it.role == MessageRole.tool }
+                .map { msg ->
+                    when (msg.role) {
+                        MessageRole.tool -> ApiMessage(role = "tool", content = msg.content, toolCallId = msg.toolCallId?.value)
+                        else -> msg.toApiMessage()
+                    }
+                }.toMutableList()
         }
+        // The new user message was already persisted to DB before calling this, so `existing` includes it.
+        // No dedup needed — just ensure it's present.
         return messages
     }
 

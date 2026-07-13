@@ -27,7 +27,6 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import java.io.File
 import java.io.FileOutputStream
-import java.lang.ref.WeakReference
 
 /**
  * Accessibility service for phone control.
@@ -52,9 +51,9 @@ class PhoneControlAccessibilityService : AccessibilityService() {
         private val _overlayMessage = MutableStateFlow("")
         val overlayMessage: StateFlow<String> = _overlayMessage
 
-        private var instanceRef: WeakReference<PhoneControlAccessibilityService>? = null
+        private var instanceRef: PhoneControlAccessibilityService? = null
 
-        fun getInstance(): PhoneControlAccessibilityService? = instanceRef?.get()
+        fun getInstance(): PhoneControlAccessibilityService? = instanceRef
 
         /** Called by phone_control_start tool to begin a session. */
         fun beginSession(reason: String = "Agent is controlling your phone") {
@@ -87,11 +86,11 @@ class PhoneControlAccessibilityService : AccessibilityService() {
 
     override fun onServiceConnected() {
         super.onServiceConnected()
-        instanceRef = WeakReference(this)
+        instanceRef = this
         _isRunning.value = true
 
         serviceInfo = serviceInfo.apply {
-            eventTypes = AccessibilityEvent.TYPES_ALL_MASK
+            eventTypes = AccessibilityEvent.TYPES_WINDOW_STATE_CHANGED or AccessibilityEvent.TYPES_WINDOW_CONTENT_CHANGED
             feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
             flags = AccessibilityServiceInfo.DEFAULT or
                     AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS or
@@ -108,8 +107,9 @@ class PhoneControlAccessibilityService : AccessibilityService() {
 
     override fun onDestroy() {
         super.onDestroy()
-        removeOverlay()
-        if (instanceRef?.get() === this) {
+        // Remove overlay synchronously — handler.post may not execute after onDestroy
+        removeOverlayView()
+        if (instanceRef === this) {
             instanceRef = null
         }
         _isRunning.value = false
@@ -193,6 +193,7 @@ class PhoneControlAccessibilityService : AccessibilityService() {
     // ──── Phone control actions (all guarded by session state) ────
 
     fun getScreenTree(): String {
+        // TODO: Recycle AccessibilityNodeInfo instances after traversal to avoid native leaks on long sessions
         // Reading the screen tree is always allowed even when stopped
         val rootNode = rootInActiveWindow ?: return "No active window"
         return buildString { appendNode(rootNode, 0) }
@@ -210,9 +211,20 @@ class PhoneControlAccessibilityService : AccessibilityService() {
             val result = captureScreenshotResult()
             val hardwareBuffer = result.hardwareBuffer
             val hardwareBitmap = Bitmap.wrapHardwareBuffer(hardwareBuffer, result.colorSpace)
-                ?: return ToolExecutionResult.err("Android returned an empty screenshot buffer.")
+                ?: run {
+                    hardwareBuffer.close()
+                    return ToolExecutionResult.err("Android returned an empty screenshot buffer.")
+                }
+            // Copy to a software bitmap BEFORE closing the buffer
             val bitmap = hardwareBitmap.copy(Bitmap.Config.ARGB_8888, false)
+            val width = hardwareBitmap.width
+            val height = hardwareBitmap.height
+            hardwareBitmap.recycle()
             hardwareBuffer.close()
+
+            if (bitmap == null) {
+                return ToolExecutionResult.err("Failed to copy screenshot bitmap.")
+            }
 
             val file = withContext(Dispatchers.IO) {
                 val screenshotsDir = File(cacheDir, "screenshots").apply { mkdirs() }
@@ -230,7 +242,7 @@ class PhoneControlAccessibilityService : AccessibilityService() {
                     appendLine("Pixel screenshot captured.")
                     appendLine("File: ${file.absolutePath}")
                     appendLine("Size: ${file.length()} bytes")
-                    appendLine("Dimensions: ${hardwareBitmap.width}x${hardwareBitmap.height}")
+                    appendLine("Dimensions: ${width}x${height}")
                     appendLine("Timestamp: ${result.timestamp}")
                     appendLine()
                     appendLine("Accessibility tree:")
@@ -239,8 +251,8 @@ class PhoneControlAccessibilityService : AccessibilityService() {
                 metadata = mapOf(
                     "path" to file.absolutePath,
                     "mime" to "image/png",
-                    "width" to hardwareBitmap.width.toString(),
-                    "height" to hardwareBitmap.height.toString(),
+                    "width" to width.toString(),
+                    "height" to height.toString(),
                     "timestamp" to result.timestamp.toString(),
                 ),
             )
@@ -283,8 +295,8 @@ class PhoneControlAccessibilityService : AccessibilityService() {
         }
         val stroke = StrokeDescription(path, 0L, 100L)
         val gesture = GestureDescription.Builder().addStroke(stroke).build()
-        return if (dispatchGesture(gesture, null, null)) ToolExecutionResult.ok("Tapped at ($x, $y)")
-        else ToolExecutionResult.err("Failed to tap at ($x, $y)")
+        return if (dispatchGesture(gesture, null, null)) ToolExecutionResult.ok("Tap dispatched at ($x, $y)")
+        else ToolExecutionResult.err("Failed to dispatch tap at ($x, $y)")
     }
 
     fun swipe(startX: Int, startY: Int, endX: Int, endY: Int, duration: Long = 300L): ToolExecutionResult {
@@ -295,7 +307,7 @@ class PhoneControlAccessibilityService : AccessibilityService() {
         }
         val stroke = StrokeDescription(path, 0L, duration)
         val gesture = GestureDescription.Builder().addStroke(stroke).build()
-        return if (dispatchGesture(gesture, null, null)) ToolExecutionResult.ok("Swiped from ($startX,$startY) to ($endX,$endY)")
+        return if (dispatchGesture(gesture, null, null)) ToolExecutionResult.ok("Swipe dispatched from ($startX,$startY) to ($endX,$endY)")
         else ToolExecutionResult.err("Swipe failed")
     }
 
@@ -304,7 +316,7 @@ class PhoneControlAccessibilityService : AccessibilityService() {
         val path = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
         val stroke = StrokeDescription(path, 0L, duration)
         val gesture = GestureDescription.Builder().addStroke(stroke).build()
-        return if (dispatchGesture(gesture, null, null)) ToolExecutionResult.ok("Long pressed at ($x, $y)")
+        return if (dispatchGesture(gesture, null, null)) ToolExecutionResult.ok("Long press dispatched at ($x, $y)")
         else ToolExecutionResult.err("Long press failed")
     }
 
@@ -383,8 +395,8 @@ class PhoneControlAccessibilityService : AccessibilityService() {
         val action = when (direction) {
             "up" -> AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
             "down" -> AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
-            "left" -> AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
-            "right" -> AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+            "left" -> AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+            "right" -> AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
             else -> return ToolExecutionResult.err("Unknown direction: $direction. Use up, down, left, right")
         }
 
@@ -436,7 +448,17 @@ class PhoneControlAccessibilityService : AccessibilityService() {
 
     private fun findNodeByText(node: AccessibilityNodeInfo, text: String): AccessibilityNodeInfo? {
         val nodeText = node.text?.toString() ?: node.contentDescription?.toString() ?: ""
-        if (nodeText.contains(text, ignoreCase = true) && node.isClickable) return node
+        if (nodeText.contains(text, ignoreCase = true)) {
+            // Return the node if it's clickable, otherwise walk up to find a clickable ancestor
+            if (node.isClickable) return node
+            var parent = node.parent
+            while (parent != null) {
+                if (parent.isClickable) return parent
+                parent = parent.parent
+            }
+            // Return the text node itself if no clickable ancestor found
+            return node
+        }
         for (i in 0 until node.childCount) {
             node.getChild(i)?.let { child ->
                 findNodeByText(child, text)?.let { return it }

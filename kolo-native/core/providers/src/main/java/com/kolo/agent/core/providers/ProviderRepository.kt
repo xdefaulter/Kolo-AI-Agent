@@ -28,7 +28,7 @@ class ProviderRepository(
     private val PROVIDERS_KEY = stringPreferencesKey("providers_v2")
 
     /** Get API key for a provider from secure storage + in-memory cache. */
-    fun getApiKey(providerId: String): String = ProviderConfigKeyStore[providerId]
+    internal fun getApiKey(providerId: String): String = ProviderConfigKeyStore[providerId]
 
     val providersFlow: Flow<List<ProviderConfig>> = context.dataStore.data.map { prefs ->
         decodeProviders(prefs[PROVIDERS_KEY])
@@ -47,6 +47,9 @@ class ProviderRepository(
         if (raw.isNullOrBlank()) return emptyList()
         return try {
             val list = normalizeActiveProviders(json.decodeFromString<List<ProviderConfig>>(raw))
+            // Clear keys for providers that no longer exist
+            val currentIds = list.map { it.id.value }.toSet()
+            ProviderConfigKeyStore.clear()
             // Re-attach API keys from secure storage into the in-memory store
             list.map { config ->
                 val key = secureKeyStore.getApiKey(config.id.value) ?: ""

@@ -573,7 +573,7 @@ private fun ChatContent(
     onClearPendingApproval: () -> Unit,
 ) {
     val context = LocalContext.current
-    var inputText by remember { mutableStateOf("") }
+    var inputText by rememberSaveable { mutableStateOf("") }
     var pendingAttachments by remember { mutableStateOf<List<MessageAttachment>>(emptyList()) }
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -585,7 +585,7 @@ private fun ChatContent(
         }
     }
     val resolvedSendDisabledReason = sendDisabledReason ?: attachmentValidationError
-    val timelineItemCount by remember(state) {
+    val timelineItemCount by remember {
         derivedStateOf {
             var count = state.messages.size
             if (state.isStreaming && state.streamingContent.isNotEmpty()) count += 1
@@ -614,9 +614,15 @@ private fun ChatContent(
         state.isLoading,
         state.isStreaming,
     ) {
-        val targetIndex = (timelineItemCount - 1).coerceAtLeast(0)
-        if (timelineItemCount > 0 && !state.isStreaming) {
-            listState.animateScrollToItem(targetIndex)
+        if (state.isStreaming) {
+            // During streaming, only auto-scroll if user is already near the bottom
+            val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
+            val totalItems = listState.layoutInfo.totalItemsCount
+            if (lastVisible >= totalItems - 3) {
+                listState.animateScrollToItem(timelineItemCount.coerceAtLeast(0))
+            }
+        } else {
+            listState.animateScrollToItem(timelineItemCount.coerceAtLeast(0))
         }
     }
 
@@ -1209,7 +1215,6 @@ private fun MessageBubble(
             modifier = Modifier
                 .widthIn(max = maxWidthDp)
                 .combinedClickable(
-                    onClick = {},
                     onLongClick = { copyMessageToClipboard(context, message.content) },
                 ),
         ) {

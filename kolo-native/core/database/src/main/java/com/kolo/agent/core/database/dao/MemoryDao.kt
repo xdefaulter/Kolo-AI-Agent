@@ -31,7 +31,7 @@ interface MemoryDao {
 
     @Query("""
         SELECT * FROM memories
-        WHERE LOWER(content) LIKE :query
+        WHERE LOWER(content) LIKE :query ESCAPE '\'
         ORDER BY last_used_at DESC LIMIT :limit
     """)
     suspend fun search(query: String, limit: Int = 6): List<MemoryEntity>

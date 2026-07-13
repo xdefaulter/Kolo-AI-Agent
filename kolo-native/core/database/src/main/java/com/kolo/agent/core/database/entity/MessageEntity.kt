@@ -33,12 +33,17 @@ data class MessageEntity(
     val edited_at: Long? = null,
 )
 
+private val lenientJson = kotlinx.serialization.json.Json {
+    ignoreUnknownKeys = true
+    isLenient = true
+}
+
 fun MessageEntity.toDomain(): Message {
     val toolCalls = tool_calls_json?.let {
-        kotlinx.serialization.json.Json.decodeFromString<List<ToolCallInfo>>(it)
+        runCatching { lenientJson.decodeFromString<List<ToolCallInfo>>(it) }.getOrNull()
     }
     val attachments = attachments_json?.let {
-        kotlinx.serialization.json.Json.decodeFromString<List<MessageAttachment>>(it)
+        runCatching { lenientJson.decodeFromString<List<MessageAttachment>>(it) }.getOrNull()
     }.orEmpty()
     return Message(
         id = MessageId(id),
@@ -50,7 +55,9 @@ fun MessageEntity.toDomain(): Message {
         toolName = tool_name,
         toolSuccess = tool_success,
         toolCalls = toolCalls,
-        status = status?.let { MessageStatus.valueOf(it) },
+        status = status?.let {
+            runCatching { MessageStatus.valueOf(it) }.getOrNull()
+        },
         error = error,
         createdAt = created_at,
         editedAt = edited_at,
@@ -63,7 +70,7 @@ fun Message.toEntity() = MessageEntity(
     role = role.wire,
     content = content,
     attachments_json = attachments.takeIf { it.isNotEmpty() }?.let {
-        kotlinx.serialization.json.Json.encodeToString(
+        lenientJson.encodeToString(
             kotlinx.serialization.builtins.ListSerializer(MessageAttachment.serializer()),
             it
         )
@@ -72,7 +79,7 @@ fun Message.toEntity() = MessageEntity(
     tool_name = toolName,
     tool_success = toolSuccess,
     tool_calls_json = toolCalls?.let {
-        kotlinx.serialization.json.Json.encodeToString(
+        lenientJson.encodeToString(
             kotlinx.serialization.builtins.ListSerializer(ToolCallInfo.serializer()),
             it
         )

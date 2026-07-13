@@ -58,8 +58,13 @@ enum class MessageRole {
     val wire: String get() = name
 
     companion object {
-        fun fromWire(s: String): MessageRole =
-            entries.firstOrNull { it.wire == s } ?: user
+        fun fromWire(s: String): MessageRole {
+            return entries.firstOrNull { it.wire == s } ?: run {
+                // Unknown role — log and default to user to avoid crash
+                println("WARNING: Unknown MessageRole '$s', defaulting to user")
+                user
+            }
+        }
     }
 }
 
@@ -122,6 +127,7 @@ data class PromptTemplate(
 /**
  * A single search hit from message search.
  */
+@Serializable
 data class MessageSearchHit(
     val messageId: MessageId,
     val chatId: ChatId,

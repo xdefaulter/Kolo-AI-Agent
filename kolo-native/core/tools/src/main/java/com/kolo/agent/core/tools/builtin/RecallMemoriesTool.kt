@@ -10,14 +10,15 @@ class RecallMemoriesTool : KoloTool() {
     override val parameterSchema = """{"type":"object","properties":{"query":{"type":"string","description":"Search query for memories"},"limit":{"type":"integer","description":"Maximum number of memories to return (default: 6)"}},"required":["query"]}"""
     override val permission = ToolPermission.safe
 
+    @Volatile
     var memoryRepository: MemoryRepository? = null
 
     override suspend fun execute(params: Map<String, String>, context: ToolExecutionContext): ToolExecutionResult {
         val query = params["query"] ?: return ToolExecutionResult.err("Missing query parameter")
-        val limit = params["limit"]?.toIntOrNull() ?: 6
+        val limit = (params["limit"]?.toIntOrNull() ?: 6).coerceIn(1, 50)
 
         val repo = memoryRepository
-            ?: return ToolExecutionResult.ok("Memory system not yet initialized.")
+            ?: return ToolExecutionResult.err("Memory system not yet initialized.")
 
         val memories = repo.search(query, limit)
         if (memories.isEmpty()) {

@@ -9,6 +9,18 @@
 -keepclassmembers class **$$serializer { *; }
 -keepclassmembers class **$Companion { *; }
 
+# Feature UI state and sealed classes
+-keep class com.kolo.agent.feature.**UiState { *; }
+-keep class com.kolo.agent.feature.**$* { *; }
+-keep class com.kolo.agent.feature.chat.ToolApprovalAction { *; }
+-keep class com.kolo.agent.feature.chat.ToolApprovalAction$* { *; }
+
+# Hilt ViewModels
+-keep @dagger.hilt.android.lifecycle.HiltViewModel class * { *; }
+-keepclassmembers class * {
+    @dagger.assisted.Assisted <init>(...);
+}
+
 # Room
 -keep class * extends androidx.room.RoomDatabase
 -keep @androidx.room.Entity class *

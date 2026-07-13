@@ -31,20 +31,18 @@ object LlamaCppBridge {
      */
     fun isAvailable(): Boolean {
         libraryLoaded?.let { return it }
-        return try {
-            System.loadLibrary("kolo_llama_bridge")
-            val available = nativeRuntimeAvailable()
-            libraryLoaded = available
-            Log.i(TAG, "llama.cpp bridge loaded: available=$available")
-            available
-        } catch (e: UnsatisfiedLinkError) {
-            libraryLoaded = false
-            Log.w(TAG, "llama.cpp bridge not available: ${e.message}")
-            false
-        } catch (e: Exception) {
-            libraryLoaded = false
-            Log.w(TAG, "Error checking llama.cpp availability: ${e.message}")
-            false
+        synchronized(this) {
+            libraryLoaded?.let { return it }
+            val loaded = try {
+                System.loadLibrary("kolo_llama_bridge")
+                nativeRuntimeAvailable()
+            } catch (_: UnsatisfiedLinkError) {
+                false
+            } catch (_: Exception) {
+                false
+            }
+            libraryLoaded = loaded
+            return loaded
         }
     }
 

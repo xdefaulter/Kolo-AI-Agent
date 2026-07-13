@@ -24,7 +24,7 @@ class HashTool : KoloTool() {
             else -> return ToolExecutionResult.err("Unsupported algorithm: $algorithm")
         }
 
-        val hash = digest.digest(input.toByteArray())
+        val hash = digest.digest(input.toByteArray(Charsets.UTF_8))
             .joinToString("") { "%02x".format(it) }
         return ToolExecutionResult.ok("$algorithm: $hash")
     }

@@ -7,7 +7,7 @@ import com.kolo.agent.core.tools.ToolExecutionContext
 
 class CalculatorTool : KoloTool() {
     override val name = "calculator"
-    override val description = "Evaluate mathematical expressions. Supports +, -, *, /, parentheses, and common math functions (sqrt, sin, cos, tan, log, abs, pi, e)."
+    override val description = "Evaluate mathematical expressions. Supports +, -, *, /, parentheses, power (^ or **), and functions (sqrt, sin, cos, tan, log, ln, abs, ceil, floor, pi, e)."
     override val parameterSchema = """{"type":"object","properties":{"expression":{"type":"string","description":"Mathematical expression to evaluate"}},"required":["expression"]}"""
     override val permission = ToolPermission.safe
 
@@ -87,12 +87,12 @@ class CalculatorTool : KoloTool() {
         private fun parseUnary(): Double {
             if (pos < input.length && input[pos] == '-') {
                 pos++
-                return -parseAtom()
+                return -parsePower()
             }
             if (pos < input.length && input[pos] == '+') {
                 pos++
             }
-            return parseAtom()
+            return parsePower()
         }
 
         private fun parseAtom(): Double {
@@ -118,8 +118,8 @@ class CalculatorTool : KoloTool() {
                 "ceil" to { x: Double -> Math.ceil(x) },
                 "floor" to { x: Double -> Math.floor(x) },
             )
-
-            for ((name, fn) in functions) {
+            // Try longer names first to avoid prefix shadowing
+            for ((name, fn) in functions.entries.sortedByDescending { it.key.length }) {
                 if (input.startsWith(name, pos)) {
                     pos += name.length
                     skipWhitespace()

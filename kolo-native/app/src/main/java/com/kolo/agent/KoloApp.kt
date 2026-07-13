@@ -43,13 +43,7 @@ fun KoloTheme(content: @Composable () -> Unit) {
         EntryPointAccessors.fromApplication(app, AppSettingsEntryPoint::class.java).appSettings()
     }
 
-    var themeMode by remember { mutableStateOf(AppSettings.ThemeMode.SYSTEM) }
-
-    LaunchedEffect(settings) {
-        settings.themeMode.collect { mode ->
-            themeMode = mode
-        }
-    }
+    val themeMode by settings.themeMode.collectAsState(initial = AppSettings.ThemeMode.SYSTEM)
 
     val darkTheme = when (themeMode) {
         AppSettings.ThemeMode.SYSTEM -> isSystemInDarkTheme()

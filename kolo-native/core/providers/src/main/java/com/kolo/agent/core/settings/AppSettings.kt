@@ -37,7 +37,9 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
     private val KEY_SHOW_TOKEN_USAGE = booleanPreferencesKey("show_token_usage")
 
     val themeMode: Flow<ThemeMode> = dataStore.data.map { prefs ->
-        prefs[KEY_THEME]?.let { ThemeMode.valueOf(it) } ?: ThemeMode.SYSTEM
+        prefs[KEY_THEME]?.let {
+            runCatching { ThemeMode.valueOf(it) }.getOrNull()
+        } ?: ThemeMode.SYSTEM
     }
 
     suspend fun setThemeMode(mode: ThemeMode) {

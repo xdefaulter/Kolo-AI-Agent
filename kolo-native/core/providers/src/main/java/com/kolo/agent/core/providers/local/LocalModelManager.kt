@@ -11,6 +11,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
@@ -47,14 +49,19 @@ class LocalModelManager @Inject constructor(
     /** Synchronous cached value for code paths that need it immediately. */
     @Volatile private var bridgeAvailableCached: Boolean? = null
 
+    /** Guards concurrent bridge availability checks. */
+    private val bridgeCheckMutex = Mutex()
+
     /** Initialise bridge check on IO dispatcher. Safe to call multiple times. */
     suspend fun checkBridgeAvailability() {
-        if (_bridgeStatus.value == BridgeStatus.Available || _bridgeStatus.value == BridgeStatus.Unavailable) return
-        _bridgeStatus.value = BridgeStatus.Checking
-        val result = withContext(Dispatchers.IO) { LlamaCppBridge.isAvailable() }
-        bridgeAvailableCached = result
-        _bridgeStatus.value = if (result) BridgeStatus.Available else BridgeStatus.Unavailable
-        Log.i(TAG, "Bridge check result: $result")
+        bridgeCheckMutex.withLock {
+            if (_bridgeStatus.value == BridgeStatus.Available || _bridgeStatus.value == BridgeStatus.Unavailable) return@withLock
+            _bridgeStatus.value = BridgeStatus.Checking
+            val result = withContext(Dispatchers.IO) { LlamaCppBridge.isAvailable() }
+            bridgeAvailableCached = result
+            _bridgeStatus.value = if (result) BridgeStatus.Available else BridgeStatus.Unavailable
+            Log.i(TAG, "Bridge check result: $result")
+        }
     }
 
     /**
@@ -126,8 +133,10 @@ class LocalModelManager @Inject constructor(
             return@withContext null
         }
 
-        // Resolve destination with collision handling
+        // Resolve destination with collision handling. Write to a .tmp file first so a
+        // partially-copied or invalid file never appears in the models directory.
         val destFile = GgufHelpers.resolveCollision(modelsDir, fileName)
+        val tmpFile = File(destFile.parentFile, "${destFile.name}.tmp")
 
         _importStatus.value = ImportStatus.Importing(fileName, progress = 0f)
 
@@ -146,7 +155,7 @@ class LocalModelManager @Inject constructor(
         // Copy file with progress tracking
         try {
             context.contentResolver.openInputStream(uri)?.use { input ->
-                destFile.outputStream().buffered().use { output ->
+                tmpFile.outputStream().buffered().use { output ->
                     val buffer = ByteArray(32 * 1024) // 32 KB buffer
                     var bytesReceived = 0L
                     val totalBytes = estimatedSize
@@ -176,27 +185,36 @@ class LocalModelManager @Inject constructor(
                 }
             } ?: run {
                 _importStatus.value = ImportStatus.Error("Could not open input stream for URI.")
+                tmpFile.deleteSafely()
                 return@withContext null
             }
         } catch (e: IOException) {
             Log.e(TAG, "Failed to import model", e)
-            destFile.deleteSafely()
+            tmpFile.deleteSafely()
             _importStatus.value = ImportStatus.Error("Import failed: ${e.message}")
             return@withContext null
         } catch (e: Exception) {
             Log.e(TAG, "Unexpected error importing model", e)
-            destFile.deleteSafely()
+            tmpFile.deleteSafely()
             _importStatus.value = ImportStatus.Error("Import failed: ${e.message}")
             return@withContext null
         }
 
-        // Validate GGUF magic bytes after copy
-        val isValid = GgufHelpers.validateGgufMagic(destFile)
+        // Validate GGUF magic bytes before making the file visible.
+        val isValid = GgufHelpers.validateGgufMagic(tmpFile)
         if (!isValid) {
-            destFile.deleteSafely()
+            tmpFile.deleteSafely()
             _importStatus.value = ImportStatus.Error(
                 "\"$fileName\" does not have a valid GGUF header. The file may be corrupted or a different format."
             )
+            return@withContext null
+        }
+
+        // Atomically move the validated file to its final destination.
+        if (!tmpFile.renameTo(destFile)) {
+            Log.e(TAG, "Failed to move temp file to destination: ${destFile.absolutePath}")
+            tmpFile.deleteSafely()
+            _importStatus.value = ImportStatus.Error("Import failed: could not finalize model file.")
             return@withContext null
         }
 
@@ -228,6 +246,7 @@ class LocalModelManager @Inject constructor(
                     .sortedBy { it.name }
                     .firstOrNull()
                 setActiveModel(fallback?.path)
+                // TODO: Unload the in-memory engine when the active model is cleared or deleted
             }
             Log.i(TAG, "Deleted model: ${model.fileName}")
         } else {
@@ -242,6 +261,7 @@ class LocalModelManager @Inject constructor(
     suspend fun setActiveModel(modelPath: String?) {
         appSettings.setLocalLlamaModelPath(modelPath)
         _activeModelPath.value = modelPath
+        // TODO: Unload the in-memory engine when the active model is cleared or deleted
     }
 
     /**

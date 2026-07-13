@@ -10,6 +10,8 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -63,7 +65,12 @@ fun SettingsScreen(
     onNavigateLocalModels: () -> Unit = {},
     onNavigateBack: () -> Unit,
 ) {
-    var selectedSection by remember { mutableStateOf<SettingsSection?>(null) }
+    var selectedSection by rememberSaveable(
+        saver = Saver(
+            save = { it.value?.name },
+            restore = { restored -> mutableStateOf(restored?.let { name -> runCatching { SettingsSection.valueOf(name) }.getOrNull() }) },
+        ),
+    ) { mutableStateOf<SettingsSection?>(null) }
     var homeSearch by remember { mutableStateOf("") }
     val currentSection = selectedSection
 
@@ -491,7 +498,7 @@ private fun ProviderCard(
     }
     var gpuLayerDraft by remember(provider.id) { mutableStateOf(localGpuLayers) }
     var showEditDialog by remember { mutableStateOf(false) }
-    LaunchedEffect(localGpuLayers) { gpuLayerDraft = localGpuLayers }
+    LaunchedEffect(provider.id) { gpuLayerDraft = localGpuLayers }
     Card(onClick = onToggleExpand, colors = CardDefaults.cardColors(containerColor = if (isActive) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface), shape = MaterialTheme.shapes.small) {
         Column(modifier = Modifier.padding(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {

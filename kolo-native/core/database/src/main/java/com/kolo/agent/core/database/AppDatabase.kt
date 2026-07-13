@@ -28,4 +28,14 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun memoryDao(): MemoryDao
     abstract fun folderDao(): FolderDao
     abstract fun promptTemplateDao(): PromptTemplateDao
+
+    companion object {
+        fun builder(context: android.content.Context): RoomDatabase.Builder<AppDatabase> {
+            return androidx.room.Room.databaseBuilder(
+                context,
+                AppDatabase::class.java,
+                "kolo.db"
+            ).fallbackToDestructiveMigrationOnDowngrade()
+        }
+    }
 }

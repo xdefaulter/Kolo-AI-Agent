@@ -12,13 +12,14 @@ class ForgetMemoryTool : KoloTool() {
     override val parameterSchema = """{"type":"object","properties":{"memory_id":{"type":"string","description":"The ID of the memory to delete"}},"required":["memory_id"]}"""
     override val permission = ToolPermission.dangerous
 
+    @Volatile
     var memoryRepository: MemoryRepository? = null
 
     override suspend fun execute(params: Map<String, String>, context: ToolExecutionContext): ToolExecutionResult {
         val memoryId = params["memory_id"] ?: return ToolExecutionResult.err("Missing memory_id parameter")
 
         val repo = memoryRepository
-            ?: return ToolExecutionResult.ok("Memory system not yet initialized.")
+            ?: return ToolExecutionResult.err("Memory system not yet initialized.")
 
         repo.deleteById(memoryId)
         return ToolExecutionResult.ok("Memory $memoryId has been forgotten.")
