@@ -10,6 +10,7 @@ import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.os.Build
+import androidx.core.content.FileProvider
 import android.os.Handler
 import android.os.Looper
 import android.view.Display
@@ -51,6 +52,18 @@ class PhoneControlAccessibilityService : AccessibilityService() {
         private val _overlayMessage = MutableStateFlow("")
         val overlayMessage: StateFlow<String> = _overlayMessage
 
+        /**
+         * Tracks whether the system accessibility overlay could be added. The STOP button lives in
+         * this overlay, so if adding it fails the user has no way to stop the agent via the UI.
+         */
+        sealed interface OverlayStatus {
+            data object Ok : OverlayStatus
+            data class Failed(val message: String) : OverlayStatus
+        }
+
+        private val _overlayStatus = MutableStateFlow<OverlayStatus>(OverlayStatus.Ok)
+        val overlayStatus: StateFlow<OverlayStatus> = _overlayStatus
+
         private var instanceRef: PhoneControlAccessibilityService? = null
 
         fun getInstance(): PhoneControlAccessibilityService? = instanceRef
@@ -82,6 +95,12 @@ class PhoneControlAccessibilityService : AccessibilityService() {
     private val handler = Handler(Looper.getMainLooper())
     private var overlayView: android.view.View? = null
 
+    /** Tracks the most recent posted addOverlayView() so onDestroy can cancel it. */
+    private var pendingAddOverlay: Runnable? = null
+
+    /** Set when the last attempt to add the overlay threw. */
+    @Volatile private var overlayAddFailed: Boolean = false
+
     // ──── Lifecycle ────
 
     override fun onServiceConnected() {
@@ -90,7 +109,7 @@ class PhoneControlAccessibilityService : AccessibilityService() {
         _isRunning.value = true
 
         serviceInfo = serviceInfo.apply {
-            eventTypes = AccessibilityEvent.TYPES_WINDOW_STATE_CHANGED or AccessibilityEvent.TYPES_WINDOW_CONTENT_CHANGED
+            eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
             feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
             flags = AccessibilityServiceInfo.DEFAULT or
                     AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS or
@@ -107,6 +126,10 @@ class PhoneControlAccessibilityService : AccessibilityService() {
 
     override fun onDestroy() {
         super.onDestroy()
+        // Cancel any pending addOverlayView() first — otherwise it could add a view AFTER
+        // removeOverlayView() runs, leaking a system overlay that nobody can remove.
+        pendingAddOverlay?.let { handler.removeCallbacks(it) }
+        pendingAddOverlay = null
         // Remove overlay synchronously — handler.post may not execute after onDestroy
         removeOverlayView()
         if (instanceRef === this) {
@@ -120,7 +143,7 @@ class PhoneControlAccessibilityService : AccessibilityService() {
 
     fun showOverlay(message: String) {
         _overlayMessage.value = message
-        handler.post { addOverlayView() }
+        postAddOverlay()
     }
 
     fun removeOverlay() {
@@ -128,7 +151,18 @@ class PhoneControlAccessibilityService : AccessibilityService() {
     }
 
     private fun showStopOverlay() {
-        handler.post { addOverlayView() }
+        postAddOverlay()
+    }
+
+    /**
+     * Posts addOverlayView() to the main looper and remembers the Runnable so onDestroy can cancel
+     * it. Replaces any previously-pending add so we don't queue up multiple views.
+     */
+    private fun postAddOverlay() {
+        pendingAddOverlay?.let { handler.removeCallbacks(it) }
+        val runnable = Runnable { addOverlayView() }
+        pendingAddOverlay = runnable
+        handler.post(runnable)
     }
 
     private fun addOverlayView() {
@@ -175,8 +209,14 @@ class PhoneControlAccessibilityService : AccessibilityService() {
         try {
             wm.addView(container, params)
             overlayView = container
-        } catch (_: Exception) {
-            // TYPE_ACCESSIBILITY_OVERLAY may not be available on all devices
+            overlayAddFailed = false
+            _overlayStatus.value = OverlayStatus.Ok
+        } catch (e: Exception) {
+            // TYPE_ACCESSIBILITY_OVERLAY may not be available on all devices. Surface the failure
+            // so callers (and the in-app UI) can tell the user the STOP button isn't present.
+            overlayAddFailed = true
+            _overlayStatus.value = OverlayStatus.Failed(e.message ?: e.javaClass.simpleName)
+            android.util.Log.e("PhoneControl", "Failed to add STOP overlay", e)
         }
     }
 
@@ -193,10 +233,17 @@ class PhoneControlAccessibilityService : AccessibilityService() {
     // ──── Phone control actions (all guarded by session state) ────
 
     fun getScreenTree(): String {
-        // TODO: Recycle AccessibilityNodeInfo instances after traversal to avoid native leaks on long sessions
-        // Reading the screen tree is always allowed even when stopped
+        // Reading the screen tree is a "dangerous" tool surface (ScreenReadTool / ScreenReadFullTool),
+        // so it must honor STOP. The in-app PhoneControlOverlay only reads sessionState /
+        // _overlayMessage, not the full tree, so gating here is safe.
+        if (isBlocked()) return "[screen read unavailable — phone control is stopped]"
         val rootNode = rootInActiveWindow ?: return "No active window"
-        return buildString { appendNode(rootNode, 0) }
+        return try {
+            buildString { appendNode(rootNode, 0) }
+        } finally {
+            // Caller no longer needs the root; recycle it (children recycled inside appendNode).
+            tryRecycle(rootNode)
+        }
     }
 
     suspend fun takeScreenshot(): ToolExecutionResult {
@@ -236,11 +283,19 @@ class PhoneControlAccessibilityService : AccessibilityService() {
             }
             bitmap.recycle()
 
+            // Expose the screenshot via a content:// FileProvider URI so it can be opened/shared
+            // without crashing with FileUriExposedException on Android 7+.
+            val contentUri = FileProvider.getUriForFile(
+                this@PhoneControlAccessibilityService,
+                "${packageName}.fileprovider",
+                file,
+            )
+
             val tree = buildString { appendNode(rootNode, 0) }
             ToolExecutionResult.ok(
                 output = buildString {
                     appendLine("Pixel screenshot captured.")
-                    appendLine("File: ${file.absolutePath}")
+                    appendLine("File: ${contentUri}")
                     appendLine("Size: ${file.length()} bytes")
                     appendLine("Dimensions: ${width}x${height}")
                     appendLine("Timestamp: ${result.timestamp}")
@@ -249,7 +304,7 @@ class PhoneControlAccessibilityService : AccessibilityService() {
                     append(tree.take(12000))
                 },
                 metadata = mapOf(
-                    "path" to file.absolutePath,
+                    "path" to contentUri.toString(),
                     "mime" to "image/png",
                     "width" to width.toString(),
                     "height" to height.toString(),
@@ -395,8 +450,16 @@ class PhoneControlAccessibilityService : AccessibilityService() {
         val action = when (direction) {
             "up" -> AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
             "down" -> AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
-            "left" -> AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
-            "right" -> AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+            "left" -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_LEFT.id
+            } else {
+                AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+            }
+            "right" -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_RIGHT.id
+            } else {
+                AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+            }
             else -> return ToolExecutionResult.err("Unknown direction: $direction. Use up, down, left, right")
         }
 
@@ -405,11 +468,29 @@ class PhoneControlAccessibilityService : AccessibilityService() {
         repeat(scrolls) {
             if (!scrollable.performAction(action)) success = false
         }
-        return if (success) ToolExecutionResult.ok("Scrolled $direction ($scrolls steps)")
-        else ToolExecutionResult.ok("Partially scrolled $direction")
+        // On pre-Android 13 the platform has no dedicated horizontal scroll action, so left/right
+        // fall back to backward/forward; surface that to the caller.
+        val horizontalNote =
+            if ((direction == "left" || direction == "right") &&
+                Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU
+            ) {
+                " (note: horizontal scroll needs Android 13+; used vertical fallback)"
+            } else ""
+        return if (success) ToolExecutionResult.ok("Scrolled $direction ($scrolls steps)$horizontalNote")
+        else ToolExecutionResult.ok("Partially scrolled $direction$horizontalNote")
     }
 
     // ──── Private helpers ────
+
+    /** Recycles a node, swallowing the IllegalStateException some APIs throw for double-recycle. */
+    private fun tryRecycle(node: AccessibilityNodeInfo?) {
+        if (node == null) return
+        try {
+            node.recycle()
+        } catch (_: IllegalStateException) {
+            // Already recycled on some API levels.
+        }
+    }
 
     private fun findScrollableNode(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
         if (node.isScrollable) return node
@@ -441,27 +522,47 @@ class PhoneControlAccessibilityService : AccessibilityService() {
             appendLine()
         }
 
+        // Allocate each child, recurse, then recycle the child BEFORE the parent (post-order).
+        // The caller of appendNode is responsible for recycling the root node we were handed.
         for (i in 0 until node.childCount) {
-            node.getChild(i)?.let { appendNode(it, depth + 1) }
+            val child = node.getChild(i) ?: continue
+            appendNode(child, depth + 1)
+            tryRecycle(child)
         }
     }
 
     private fun findNodeByText(node: AccessibilityNodeInfo, text: String): AccessibilityNodeInfo? {
         val nodeText = node.text?.toString() ?: node.contentDescription?.toString() ?: ""
         if (nodeText.contains(text, ignoreCase = true)) {
-            // Return the node if it's clickable, otherwise walk up to find a clickable ancestor
+            // Return the node if it's clickable, otherwise walk up to find a clickable ancestor.
             if (node.isClickable) return node
-            var parent = node.parent
-            while (parent != null) {
-                if (parent.isClickable) return parent
-                parent = parent.parent
+            // Each node.parent call allocates a new AccessibilityNodeInfo that must be recycled.
+            // Collect every intermediate parent and recycle them in finally; the returned match
+            // (whichever parent we hand back to the caller) is left alone.
+            val ancestors = ArrayList<AccessibilityNodeInfo>()
+            try {
+                var parent = node.parent
+                while (parent != null) {
+                    if (parent.isClickable) return parent
+                    ancestors.add(parent)
+                    parent = parent.parent
+                }
+            } finally {
+                ancestors.forEach(::tryRecycle)
             }
             // Return the text node itself if no clickable ancestor found
             return node
         }
         for (i in 0 until node.childCount) {
-            node.getChild(i)?.let { child ->
-                findNodeByText(child, text)?.let { return it }
+            val child = node.getChild(i) ?: continue
+            try {
+                val match = findNodeByText(child, text)
+                if (match != null) return match
+            } finally {
+                // child was only needed for this branch; if we didn't return it, recycle it.
+                // (A returned match is either `child` itself or a descendant already handed up,
+                // never an unrelated `child` we allocated here.)
+                tryRecycle(child)
             }
         }
         return null

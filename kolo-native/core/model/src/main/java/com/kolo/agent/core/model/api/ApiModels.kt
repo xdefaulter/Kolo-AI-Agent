@@ -27,7 +27,7 @@ data class ApiMessage(
             put("content", content)
         } else {
             // Some providers reject null content on user/system messages — emit empty string instead
-            put("content", if (role == "assistant") JsonNull else "")
+            put("content", if (role == "assistant") JsonNull else JsonPrimitive(""))
         }
         name?.let { put("name", it) }
         toolCalls?.let { calls ->

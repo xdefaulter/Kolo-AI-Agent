@@ -38,5 +38,11 @@ object ToolModule {
         registry.register(PhoneControlStatusTool())
         registry.register(PhoneControlDoneTool())
         registry.register(ScreenScreenshotTool())
+
+        // Built-in Android device tools wired into the DI-backed registry
+        // (VIBRATE, ACCESS_FINE/COARSE_LOCATION, READ_CONTACTS are declared in the manifest)
+        registry.register(com.kolo.agent.core.tools.builtin.VibrateTool())
+        registry.register(com.kolo.agent.core.tools.builtin.LocationTool())
+        registry.register(com.kolo.agent.core.tools.builtin.ContactsSearchTool())
     }
 }

@@ -8,7 +8,7 @@ import com.kolo.agent.core.tools.ToolExecutionContext
 class WebScrapeTool : KoloTool() {
     override val name = "web_scrape"
     override val description = "Scrape and extract text content from a web page URL."
-    override val parameterSchema = """{"type":"object","properties":{"url":{"type":"string","description":"URL to scrape"},"selector":{"type":"string","description":"Optional CSS selector to target specific content"}},"required":["url"]}"""
+    override val parameterSchema = """{"type":"object","properties":{"url":{"type":"string","description":"URL to scrape"},"selector":{"type":"string","description":"Optional HTML tag name (e.g. 'div', 'span', 'p') to target specific content"}},"required":["url"]}"""
     override val permission = ToolPermission.sensitive
 
     override suspend fun execute(params: Map<String, String>, context: ToolExecutionContext): ToolExecutionResult {
@@ -20,6 +20,11 @@ class WebScrapeTool : KoloTool() {
 
         var html = result.output
         if (!selector.isNullOrBlank()) {
+            // Only allow simple HTML tag names (letters/digits, must start with a letter)
+            // to prevent regex injection via the selector value.
+            if (!Regex("^[a-zA-Z][a-zA-Z0-9]*$").matches(selector)) {
+                return ToolExecutionResult.err("Invalid HTML tag name: '$selector'. Only simple tag names (letters/digits) are supported.")
+            }
             // Simple tag-based extraction: find content between tags matching the selector
             // This is a simplified approach — not a full CSS selector engine
             val tagMatch = Regex("<($selector)[^>]*>(.*?)</$selector>", RegexOption.DOT_MATCHES_ALL)

@@ -3,6 +3,7 @@ package com.kolo.agent.feature.chat
 import android.content.Context
 import android.net.Uri
 import android.util.Base64
+import androidx.core.content.FileProvider
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.kolo.agent.core.agent.AgentLoop
@@ -98,7 +99,7 @@ class ChatViewModel @Inject constructor(
 
     private var currentChatId: ChatId? = null
     @Volatile private var isCancelled = false
-    private val refreshingProviderModels = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap())
+    private val refreshingProviderModels = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
     private var localBridgeStatus: LocalModelManager.BridgeStatus = LocalModelManager.BridgeStatus.Unknown
     private var agentJob: kotlinx.coroutines.Job? = null
     private val sendMutex = kotlinx.coroutines.sync.Mutex()
@@ -109,6 +110,17 @@ class ChatViewModel @Inject constructor(
     private fun resumeApproval(value: Boolean) {
         approvalContinuation.getAndSet(null)?.let { cont ->
             try { cont.resume(value) } catch (_: IllegalStateException) { /* already resumed */ }
+        }
+    }
+
+    /**
+     * Stores a new approval continuation, defensively denying any stale continuation that
+     * is still pending (the agent loop is serial — a new approval should never arrive while
+     * one is pending, but this guard prevents a leaked/hung continuation in that edge case).
+     */
+    fun setApprovalContinuation(cont: kotlin.coroutines.Continuation<Boolean>) {
+        approvalContinuation.getAndSet(cont)?.let { stale ->
+            try { stale.resume(false) } catch (_: IllegalStateException) { /* already resumed */ }
         }
     }
 
@@ -462,8 +474,11 @@ class ChatViewModel @Inject constructor(
             newId
         }
 
-        agentJob = viewModelScope.launch {
+        val job = viewModelScope.launch {
             if (!sendMutex.tryLock()) return@launch
+            // Assign agentJob only after acquiring the mutex so it always points at the job
+            // that actually owns the lock and is running — not a losing send that returns early.
+            agentJob = this.coroutineContext[kotlinx.coroutines.Job]
             try {
                 isCancelled = false
                 val persisted = persistAttachments(attachments)
@@ -556,7 +571,10 @@ class ChatViewModel @Inject constructor(
                         },
                         approvalCallback = { approval ->
                             _uiState.update { it.copy(pendingApproval = approval) }
-                            suspendCancellableCoroutine { cont -> approvalContinuation.set(cont) }
+                            suspendCancellableCoroutine { cont ->
+                                setApprovalContinuation(cont)
+                                cont.invokeOnCancellation { approvalContinuation.compareAndSet(cont, null) }
+                            }
                         },
                     )
                     agentLoop.run(config = provider, messages = fullMessages, chatId = chatId.value).collect { event ->
@@ -690,7 +708,12 @@ class ChatViewModel @Inject constructor(
                         failed.add(attachment.name)
                         return@mapNotNull null
                     }
-                    attachment.copy(uri = Uri.fromFile(target).toString(), sizeBytes = target.length())
+                    val contentUri = FileProvider.getUriForFile(
+                        androidContext,
+                        "${androidContext.packageName}.fileprovider",
+                        target,
+                    )
+                    attachment.copy(uri = contentUri.toString(), sizeBytes = target.length())
                 }
             } catch (_: Exception) {
                 failed.add(attachment.name)

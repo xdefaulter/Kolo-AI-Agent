@@ -6,44 +6,9 @@ import com.kolo.agent.core.tools.KoloTool
 import com.kolo.agent.core.tools.ToolExecutionContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonPrimitive
 import java.net.URI
-
-private fun isInternalHost(host: String): Boolean {
-    val lower = host.lowercase()
-    if (lower == "localhost") return true
-    // Block common internal IP ranges
-    val ip = lower.removeSurrounding("[", "]")
-    if (ip == "0.0.0.0" || ip == "::" || ip == "::1") return true
-    // 127.x.x.x
-    if (ip.startsWith("127.")) return true
-    // 10.x.x.x
-    if (ip.startsWith("10.")) return true
-    // 192.168.x.x
-    if (ip.startsWith("192.168.")) return true
-    // 172.16-31.x.x
-    if (ip.startsWith("172.")) {
-        val parts = ip.split(".")
-        if (parts.size >= 2) {
-            val second = parts[1].toIntOrNull()
-            if (second != null && second in 16..31) return true
-        }
-    }
-    // 169.254.x.x (link-local / cloud metadata)
-    if (ip.startsWith("169.254.")) return true
-    return false
-}
-
-private fun validateUrlSafe(url: String): Boolean {
-    return try {
-        val uri = URI(url)
-        if (uri.scheme !in listOf("http", "https")) return false
-        val host = uri.host ?: return false
-        if (isInternalHost(host)) return false
-        true
-    } catch (_: Exception) {
-        false
-    }
-}
 
 class HttpPostTool : KoloTool() {
     override val name = "http_post"

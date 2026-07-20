@@ -23,10 +23,10 @@ import kotlinx.serialization.json.JsonPrimitive
 class ToolRegistry {
 
     private val tools = java.util.concurrent.ConcurrentHashMap<String, KoloTool>()
-    private val builtinNames = mutableSetOf<String>()
-    private val customToolNames = mutableSetOf<String>()
-    private var customTools: List<CustomToolDef> = emptyList()
-    private var skills: List<Skill> = emptyList()
+    private val builtinNames: MutableSet<String> = java.util.concurrent.CopyOnWriteArraySet()
+    private val customToolNames: MutableSet<String> = java.util.concurrent.CopyOnWriteArraySet()
+    @Volatile private var customTools: List<CustomToolDef> = emptyList()
+    @Volatile private var skills: List<Skill> = emptyList()
 
     init {
         registerBuiltinTools()
@@ -214,6 +214,16 @@ private class CustomToolAdapter(private val def: CustomToolDef) : KoloTool() {
             }
             if (subTool?.permission == ToolPermission.sensitive && permission == ToolPermission.safe) {
                 return ToolExecutionResult.err("Step ${index + 1} (${step.toolName}) is sensitive; mark this custom tool as sensitive or dangerous.")
+            }
+            // Sensitive sub-steps must be re-approved via the execution-context permission
+            // checker (e.g. user gating). Safe sub-steps auto-execute; dangerous already blocked.
+            if (subTool?.permission == ToolPermission.sensitive) {
+                val checker = context.permissionChecker
+                val allowed = checker != null && checker(ToolPermission.sensitive)
+                if (!allowed) {
+                    outputs.add("[${index + 1}] ${step.toolName}\nBlocked: sensitive sub-step was not approved.")
+                    return@forEachIndexed
+                }
             }
             val rendered = step.params.mapValues { (_, value) ->
                 // Only template against original user params, not untrusted tool outputs

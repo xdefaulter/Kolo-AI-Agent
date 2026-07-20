@@ -21,6 +21,8 @@ import com.kolo.agent.core.model.ToolPermission
 import com.kolo.agent.core.tools.KoloTool
 import com.kolo.agent.core.tools.ToolExecutionContext
 import com.kolo.agent.core.tools.ToolPlatform
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
@@ -54,8 +56,10 @@ class ClipboardReadTool : KoloTool() {
 
     override suspend fun execute(params: Map<String, String>, context: ToolExecutionContext): ToolExecutionResult {
         val app = context.requireAndroidContext() ?: return ToolExecutionResult.err("Android context unavailable")
-        val clipboard = app.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        val text = clipboard.primaryClip?.getItemAt(0)?.coerceToText(app)?.toString().orEmpty()
+        val text = withContext(Dispatchers.Main) {
+            val clipboard = app.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            clipboard.primaryClip?.getItemAt(0)?.coerceToText(app)?.toString().orEmpty()
+        }
         return if (text.isBlank()) ToolExecutionResult.ok("Clipboard is empty.")
         else ToolExecutionResult.ok(text.take(10000))
     }
@@ -71,8 +75,10 @@ class ClipboardWriteTool : KoloTool() {
     override suspend fun execute(params: Map<String, String>, context: ToolExecutionContext): ToolExecutionResult {
         val text = params["text"] ?: return ToolExecutionResult.err("Missing text parameter")
         val app = context.requireAndroidContext() ?: return ToolExecutionResult.err("Android context unavailable")
-        val clipboard = app.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        clipboard.setPrimaryClip(ClipData.newPlainText("Kolo", text))
+        withContext(Dispatchers.Main) {
+            val clipboard = app.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            clipboard.setPrimaryClip(ClipData.newPlainText("Kolo", text))
+        }
         return ToolExecutionResult.ok("Copied ${text.length} characters to clipboard.")
     }
 }

@@ -14,6 +14,7 @@ import com.kolo.agent.core.model.*
 import com.kolo.agent.feature.chat.ui.ChatScreen
 import com.kolo.agent.feature.chat.ChatViewModel
 import com.kolo.agent.feature.chat.ToolApprovalAction
+import com.kolo.agent.feature.phonecontrol.service.PhoneControlAccessibilityService
 import com.kolo.agent.feature.phonecontrol.ui.PhoneControlOverlay
 import com.kolo.agent.feature.settings.ui.SettingsScreen
 import com.kolo.agent.feature.settings.ui.LocalModelScreen
@@ -32,6 +33,13 @@ class MainActivity : ComponentActivity() {
                 KoloNavApp()
             }
         }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        // End any active phone-control session when the activity is destroyed so the
+        // accessibility overlay and session state don't outlive the UI that controls them.
+        PhoneControlAccessibilityService.endSession()
     }
 }
 

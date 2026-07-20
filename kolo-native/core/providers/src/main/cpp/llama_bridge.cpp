@@ -44,7 +44,7 @@ struct KoloLlamaState {
     bool batch_initialized = false;
     int n_ctx = 4096;
     int n_threads = 4;
-    std::mutex mutex;
+    std::recursive_mutex mutex;
     llama_tokens cached_tokens;
 };
 
@@ -151,7 +151,7 @@ std::string run_completion(
         return "";
     }
 
-    std::lock_guard<std::mutex> lock(state->mutex);
+    std::lock_guard<std::recursive_mutex> lock(state->mutex);
 
     __android_log_print(
             ANDROID_LOG_INFO,
@@ -416,7 +416,25 @@ Java_com_kolo_agent_core_providers_local_LlamaCppBridge_nativeUnloadModel(
         JNIEnv *,
         jobject,
         jlong handle) {
-    free_state(reinterpret_cast<KoloLlamaState *>(handle));
+    auto * state = reinterpret_cast<KoloLlamaState *>(handle);
+    if (state == nullptr) {
+        __android_log_write(ANDROID_LOG_WARN, LOG_TAG, "nativeUnloadModel: null handle, nothing to free");
+        return;
+    }
+    // Acquire the state mutex before freeing so we cannot destroy a
+    // KoloLlamaState while a decode is in-flight in run_completion (which
+    // holds the same mutex during decoding). recursive_mutex avoids a
+    // self-deadlock if the same thread somehow already holds it.
+    std::lock_guard<std::recursive_mutex> lock(state->mutex);
+    __android_log_print(
+            ANDROID_LOG_INFO,
+            LOG_TAG,
+            "nativeUnloadModel: freeing state=%p model=%p context=%p",
+            static_cast<void *>(state),
+            static_cast<void *>(state->model),
+            static_cast<void *>(state->context));
+    free_state(state);
+    __android_log_write(ANDROID_LOG_INFO, LOG_TAG, "nativeUnloadModel: state freed");
 }
 
 extern "C" JNIEXPORT jstring JNICALL

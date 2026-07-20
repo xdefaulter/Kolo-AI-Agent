@@ -245,8 +245,9 @@ class LocalModelManager @Inject constructor(
                     .filter { it.path != model.path }
                     .sortedBy { it.name }
                     .firstOrNull()
+                // Switching the active path (to a fallback or null) also unloads
+                // the in-memory engine — see [setActiveModel].
                 setActiveModel(fallback?.path)
-                // TODO: Unload the in-memory engine when the active model is cleared or deleted
             }
             Log.i(TAG, "Deleted model: ${model.fileName}")
         } else {
@@ -257,11 +258,35 @@ class LocalModelManager @Inject constructor(
 
     /**
      * Set the active model path. Persists through AppSettings.
+     *
+     * When the active path actually changes (including being cleared), any model
+     * currently held by the shared in-memory [LlmEngineFactory.sharedLlamaEngine]
+     * is unloaded so the underlying native llama.cpp resources are released. The
+     * next local inference will lazily reload the newly active model. Setting the
+     * same path again is a no-op and does not disturb a loaded engine.
      */
     suspend fun setActiveModel(modelPath: String?) {
+        val previousPath = _activeModelPath.value
         appSettings.setLocalLlamaModelPath(modelPath)
         _activeModelPath.value = modelPath
-        // TODO: Unload the in-memory engine when the active model is cleared or deleted
+        if (modelPath != previousPath) {
+            unloadSharedEngine()
+        }
+    }
+
+    /**
+     * Best-effort unload of the shared in-memory [LlamaCppEngine].
+     *
+     * Safe to call when no model is loaded (the engine no-ops) or when the native
+     * bridge is unavailable. Any failure is logged and swallowed so that an error
+     * releasing native resources never blocks a model delete/switch.
+     */
+    private suspend fun unloadSharedEngine() {
+        try {
+            LlmEngineFactory.sharedLlamaEngine.unloadModel()
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to unload engine", e)
+        }
     }
 
     /**

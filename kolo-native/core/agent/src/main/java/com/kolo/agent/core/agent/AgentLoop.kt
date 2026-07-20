@@ -325,10 +325,10 @@ class AgentLoop(
             return
         }
         val currentMessages = messages
-            .filter { it.role == "user" || it.role == "assistant" }
+            .filter { it.role == "system" || it.role == "user" || it.role == "assistant" }
             .takeLast(LOCAL_PROMPT_MESSAGE_LIMIT)
             .toMutableList()
-        val toolDefinitions = emptyList<ApiToolDefinition>()
+        val toolDefinitions = toolRegistry.getToolDefinitionsForProvider(config)
 
         try {
             localEngine.loadModel(
@@ -376,6 +376,8 @@ class AgentLoop(
                             modelPath = modelPath,
                             prompt = prompt,
                             rawAssistantContent = rawContent,
+                            messageCount = currentMessages.size,
+                            lastUserMessage = currentMessages.lastOrNull { it.role == "user" }?.content?.trim().orEmpty(),
                         )
                     }
                     return
@@ -558,9 +560,19 @@ class AgentLoop(
                 messages = messages,
             )?.let { return it }
 
-            builder.appendLine("System: Reply in one short sentence.")
-            messages.forEach { msg ->
-                val role = if (msg.role == "assistant") "Assistant" else "User"
+            // Render the system message (if provided by SystemPromptComposer) instead of a toy default.
+            val systemMessage = messages.firstOrNull { it.role == "system" }?.content?.trim()
+            if (!systemMessage.isNullOrBlank()) {
+                builder.append("System: ").appendLine(systemMessage)
+            } else {
+                builder.appendLine("System: You are Kolo, a helpful AI assistant. Reply briefly and directly.")
+            }
+            messages.filter { it.role != "system" }.forEach { msg ->
+                val role = when (msg.role) {
+                    "assistant" -> "Assistant"
+                    "tool" -> "TOOL_RESULT ${msg.toolCallId.orEmpty()}"
+                    else -> "User"
+                }
                 builder.append(role).append(": ").appendLine(msg.content.orEmpty().trim())
             }
             builder.append("Assistant:")
@@ -664,7 +676,8 @@ class AgentLoop(
 
 private object LocalPromptSessionCache {
     private data class CacheKey(val chatId: String, val modelPath: String)
-    private data class CacheEntry(val transcript: String)
+    private data class CacheEntry(val transcript: String, val messageCount: Int, val lastUserMessage: String)
+    private const val MAX_ENTRIES = 8
     private val cache = java.util.concurrent.ConcurrentHashMap<CacheKey, CacheEntry>()
 
     fun tryBuildPrompt(
@@ -673,11 +686,14 @@ private object LocalPromptSessionCache {
         messages: List<ApiMessage>,
     ): String? {
         val entry = cache[CacheKey(chatId, modelPath)] ?: return null
-        val cachedTranscript = entry.transcript
+        // Staleness guard: if the conversation shape changed (messages were edited/deleted),
+        // the cached transcript no longer reflects reality — bail out and rebuild from scratch.
         val lastUser = messages.lastOrNull { it.role == "user" }?.content?.trim()
         if (lastUser.isNullOrBlank()) return null
+        if (messages.size != entry.messageCount) return null
+        if (lastUser != entry.lastUserMessage) return null
         return buildString {
-            append(cachedTranscript)
+            append(entry.transcript)
             append("User: ")
             appendLine(lastUser)
             append("Assistant:")
@@ -689,32 +705,85 @@ private object LocalPromptSessionCache {
         modelPath: String,
         prompt: String,
         rawAssistantContent: String,
+        messageCount: Int,
+        lastUserMessage: String,
     ) {
         if (rawAssistantContent.isBlank()) return
+        // Bounded LRU-style eviction: if over capacity, drop the oldest entries.
+        if (cache.size >= MAX_ENTRIES) {
+            cache.keys.take(cache.size - MAX_ENTRIES + 1).forEach { cache.remove(it) }
+        }
         cache[CacheKey(chatId, modelPath)] = CacheEntry(
             transcript = buildString {
                 append(prompt)
                 append(rawAssistantContent)
                 appendLine()
-            }
+            },
+            messageCount = messageCount,
+            lastUserMessage = lastUserMessage,
         )
+    }
+
+    /** Invalidate cached entries for a chat (e.g. when the chat or its messages are deleted). */
+    fun invalidate(chatId: String) {
+        cache.keys.filter { it.chatId == chatId }.forEach { cache.remove(it) }
     }
 }
 
-private object LocalToolCallParser {
+internal object LocalToolCallParser {
     private val json = Json { ignoreUnknownKeys = true }
-    private val fenceStart = "```tool_call"
-    private val blockStart = "<tool_call"
+    private val blockPatterns = listOf(
+        Regex("""(?s)<tool_call[^>]*>\s*([{].*?[}])\s*</tool_call>"""),
+        Regex("""(?s)```tool_call\s*([{].*?[}])\s*```"""),
+    )
 
     fun resolve(content: String): List<ResolvedToolCall> {
         val calls = mutableListOf<ResolvedToolCall>()
-
-        // Extract from fenced blocks: ```tool_call { ... } ```
-        extractFencedBlocks(content).forEach { payload ->
-            parsePayload(payload, calls.size)?.let { calls.add(it) }
+        for (pattern in blockPatterns) {
+            for (match in pattern.findAll(content)) {
+                parsePayload(match.groupValues[1], calls.size)?.let { calls.add(it) }
+            }
         }
+        // Fallback: try the whole content if it looks like a single JSON object with a "name" field
+        if (calls.isEmpty()) {
+            val trimmed = content.trim()
+            if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+                parsePayload(trimmed, 0)?.let { calls.add(it) }
+            }
+        }
+        return calls
+    }
 
-        // Extract from <tool_call> ... { ... } ...
+    fun stripToolCalls(content: String): String {
+        var result = content
+        for (pattern in blockPatterns) {
+            result = pattern.replace(result, "")
+        }
+        return result
+    }
+
+    @Suppress("UNUSED_PARAMETER")
+    private fun parsePayload(payload: String, index: Int): ResolvedToolCall? {
+        return try {
+            val obj = json.parseToJsonElement(payload).jsonObject
+            val name = obj["name"]?.jsonPrimitive?.contentOrNull
+                ?: obj["tool_name"]?.jsonPrimitive?.contentOrNull
+                ?: return null
+            val arguments = when (val args = obj["arguments"] ?: obj["params"]) {
+                null -> "{}"
+                is JsonObject -> args.toString()
+                else -> args.jsonPrimitive.contentOrNull ?: args.toString()
+            }
+            ResolvedToolCall(
+                id = "${System.currentTimeMillis()}$index",
+                name = name,
+                arguments = arguments,
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
+}
 
 /**
  * Companion helpers for permission checking — extracted to avoid a runtime
@@ -727,3 +796,4 @@ internal object ToolPermissionChecks {
     fun isBlocked(mode: ToolPermissionMode): Boolean =
         mode == ToolPermissionMode.neverAllow
 }
+

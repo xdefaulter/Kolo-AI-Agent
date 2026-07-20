@@ -8,6 +8,8 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -245,52 +247,20 @@ class LlamaCppEngine : LocalLlmEngine {
     private var loadedThreads: Int = 0
     private var loadedGpuLayers: Int = 0
 
-    override suspend fun loadModel(modelPath: String, contextSize: Int, threads: Int, gpuLayers: Int) {
-        if (
-            nativeHandle != 0L &&
-            isModelLoaded &&
-            loadedModelPath == modelPath &&
-            loadedContextSize == contextSize &&
-            loadedThreads == threads &&
-            loadedGpuLayers == gpuLayers
-        ) {
-            Log.i(TAG, "Reusing loaded model/context: $modelPath")
-            return
-        }
+    /**
+     * Serializes loadModel/unloadModel so one cannot tear down native state
+     * (freeing the KoloLlamaState) while the other is mid-operation. This is
+     * the Kotlin-side guard against the use-after-free fixed in
+     * nativeUnloadModel; it complements (does not replace) the native mutex.
+     */
+    private val lifecycleMutex = Mutex()
 
-        if (nativeHandle != 0L) {
-            unloadModel()
-        }
-
-        if (!GgufHelpers.isValidModel(modelPath)) {
-            Log.e(TAG, "Model file not found or not a valid GGUF: $modelPath")
-            throw IllegalArgumentException(
-                "Model file not found or not a valid GGUF file: $modelPath"
-            )
-        }
-        // All bridge interaction on IO dispatcher — never main thread
-        nativeHandle = withContext(Dispatchers.IO) {
-            if (!LlamaCppBridge.isAvailable()) {
-                Log.e(TAG, "llama.cpp bridge unavailable at loadModel time")
-                throw IllegalStateException(
-                    "llama.cpp runtime is unavailable. Reinstall the app to enable local inference."
-                )
-            }
-            LlamaCppBridge.loadModel(modelPath, contextSize, threads, gpuLayers)
-        }
-        if (nativeHandle == 0L) {
-            Log.e(TAG, "llama.cpp failed to load model: $modelPath")
-            throw IllegalStateException("llama.cpp failed to load model: $modelPath")
-        }
-        isModelLoaded = true
-        loadedModelPath = modelPath
-        loadedContextSize = contextSize
-        loadedThreads = threads
-        loadedGpuLayers = gpuLayers
-        Log.i(TAG, "Model loaded: $modelPath")
-    }
-
-    override suspend fun unloadModel() {
+    /**
+     * Assumes [lifecycleMutex] is already held. Does the actual teardown.
+     * Extracted so [loadModel] can reuse it without re-acquiring the
+     * (non-reentrant) [lifecycleMutex].
+     */
+    private suspend fun unloadModelLocked() {
         // Wait for any in-flight generation to complete before freeing native resources
         while (activeGenerations > 0) {
             kotlinx.coroutines.delay(50)
@@ -308,6 +278,59 @@ class LlamaCppEngine : LocalLlmEngine {
         loadedContextSize = 0
         loadedThreads = 0
         loadedGpuLayers = 0
+    }
+
+    override suspend fun loadModel(modelPath: String, contextSize: Int, threads: Int, gpuLayers: Int) {
+        lifecycleMutex.withLock {
+            if (
+                nativeHandle != 0L &&
+                isModelLoaded &&
+                loadedModelPath == modelPath &&
+                loadedContextSize == contextSize &&
+                loadedThreads == threads &&
+                loadedGpuLayers == gpuLayers
+            ) {
+                Log.i(TAG, "Reusing loaded model/context: $modelPath")
+                return@withLock
+            }
+
+            if (nativeHandle != 0L) {
+                unloadModelLocked()
+            }
+
+            if (!GgufHelpers.isValidModel(modelPath)) {
+                Log.e(TAG, "Model file not found or not a valid GGUF: $modelPath")
+                throw IllegalArgumentException(
+                    "Model file not found or not a valid GGUF file: $modelPath"
+                )
+            }
+            // All bridge interaction on IO dispatcher — never main thread
+            nativeHandle = withContext(Dispatchers.IO) {
+                if (!LlamaCppBridge.isAvailable()) {
+                    Log.e(TAG, "llama.cpp bridge unavailable at loadModel time")
+                    throw IllegalStateException(
+                        "llama.cpp runtime is unavailable. Reinstall the app to enable local inference."
+                    )
+                }
+                LlamaCppBridge.loadModel(modelPath, contextSize, threads, gpuLayers)
+            }
+            if (nativeHandle == 0L) {
+                Log.e(TAG, "llama.cpp failed to load model: $modelPath")
+                throw IllegalStateException("llama.cpp failed to load model: $modelPath")
+            }
+            isModelLoaded = true
+            loadedModelPath = modelPath
+            loadedContextSize = contextSize
+            loadedThreads = threads
+            loadedGpuLayers = gpuLayers
+            Log.i(TAG, "Model loaded: $modelPath")
+        }
+    }
+
+    override suspend fun unloadModel() {
+        lifecycleMutex.withLock {
+            unloadModelLocked()
+        }
     }
 
     override fun completeStream(
@@ -409,7 +432,17 @@ class StubLocalLlmEngine : LocalLlmEngine {
  */
 object LlmEngineFactory {
     private const val TAG = "LlmEngineFactory"
-    private val sharedLlamaEngine = LlamaCppEngine()
+
+    /**
+     * The shared in-memory [LlamaCppEngine] instance.
+     *
+     * Exposed at `internal` visibility so [LocalModelManager] can unload it when
+     * the active model is cleared, changed, or deleted (see
+     * [LocalModelManager.unloadSharedEngine]). Callers must not rely on this
+     * identity being private to the factory; the engine it has loaded changes
+     * over time as models are swapped.
+     */
+    internal val sharedLlamaEngine = LlamaCppEngine()
 
     /**
      * Create an engine using a [LocalModelManager], ensuring the bridge
