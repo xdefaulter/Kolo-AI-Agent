@@ -4,7 +4,9 @@ import androidx.compose.animation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
@@ -21,6 +23,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import java.text.DateFormat
 import java.util.Date
+import com.kolo.agent.core.designsystem.Spacing
 import com.kolo.agent.core.model.*
 import com.kolo.agent.core.model.ToolPermission
 import com.kolo.agent.core.providers.local.LocalModelManager
@@ -161,8 +164,6 @@ fun SettingsScreen(
                 null -> SettingsHome(
                     providers = state.providers,
                     activeProviderId = state.activeProviderId,
-                    localLlamaModelPath = state.localLlamaModelPath,
-                    localGpuLayers = state.localLlamaGpuLayers,
                     bridgeStatus = state.bridgeStatus,
                     sectionSearch = homeSearch,
                     onSectionSearch = { homeSearch = it },
@@ -180,14 +181,13 @@ fun SettingsScreen(
 private fun SettingsHome(
     providers: List<ProviderConfig>,
     activeProviderId: ProviderId?,
-    localLlamaModelPath: String,
-    localGpuLayers: Int,
     bridgeStatus: LocalModelManager.BridgeStatus,
     sectionSearch: String,
     onSectionSearch: (String) -> Unit,
     onSectionSelected: (SettingsSection) -> Unit,
     onNavigateLocalModels: () -> Unit = {},
 ) {
+
     val activeProvider = providers.firstOrNull { it.id == activeProviderId }
     val normalizedSearch = sectionSearch.trim().lowercase()
     val sectionMatch = { text: String ->
@@ -216,7 +216,7 @@ private fun SettingsHome(
     val showToolsSection = visibleToolsItems.isNotEmpty() || sectionMatch("Tools")
     val showAppSection = visibleAppItems.isNotEmpty() || sectionMatch("App")
     LazyColumn(
-        modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
+        modifier = Modifier.fillMaxSize().padding(horizontal = Spacing.screen),
         verticalArrangement = Arrangement.spacedBy(0.dp),
         contentPadding = PaddingValues(vertical = 4.dp),
     ) {
@@ -229,34 +229,27 @@ private fun SettingsHome(
                 Column(modifier = Modifier.padding(12.dp)) {
                     Text("Status", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
                     Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        "Active provider: ${activeProvider?.name ?: "None"}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
                     if (activeProvider == null) {
                         Text("No provider is active. Add and select one to start.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                     } else {
                         Text(
-                            "Active model: ${activeProvider.activeModel?.label ?: "Not selected"}",
+                            "${activeProvider.name} · ${activeProvider.activeModel?.label ?: "No model selected"}",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                         )
-                    }
-                    if (activeProvider?.isLocal == true) {
-                        Text(
-                            "Local runtime: " + when {
-                                bridgeStatus == LocalModelManager.BridgeStatus.Available -> "Ready"
-                                bridgeStatus == LocalModelManager.BridgeStatus.Unavailable -> "Unavailable"
-                                bridgeStatus == LocalModelManager.BridgeStatus.Checking -> "Checking"
-                                else -> "Unknown"
-                            },
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        Text("GPU layers: $localGpuLayers", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        if (localLlamaModelPath.isNotBlank()) {
-                            Text("Local model path set", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        if (activeProvider.isLocal) {
+                            Text(
+                                "Local runtime: " + when {
+                                    bridgeStatus == LocalModelManager.BridgeStatus.Available -> "Ready"
+                                    bridgeStatus == LocalModelManager.BridgeStatus.Unavailable -> "Unavailable"
+                                    bridgeStatus == LocalModelManager.BridgeStatus.Checking -> "Checking"
+                                    else -> "Unknown"
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         }
                     }
                 }
@@ -356,7 +349,7 @@ private fun SettingsHome(
 }
 
 @Composable private fun SectionHeader(text: String) {
-    Text(text, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(start = 12.dp, top = 10.dp, bottom = 4.dp))
+    Text(text, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(start = Spacing.screen, top = 10.dp, bottom = 4.dp))
 }
 
 @Composable
@@ -399,7 +392,7 @@ private fun ProvidersSection(
     var pendingDeleteProvider by remember { mutableStateOf<ProviderConfig?>(null) }
     val existingProviderNames = remember(providers) { providers.map { it.name.lowercase() }.toSet() }
 
-    LazyColumn(modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp), contentPadding = PaddingValues(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    LazyColumn(modifier = Modifier.fillMaxSize().padding(horizontal = Spacing.screen), contentPadding = PaddingValues(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         item {
             FilledTonalButton(onClick = { showAddDialog = true }, modifier = Modifier.fillMaxWidth()) {
                 Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(16.dp))
@@ -498,6 +491,7 @@ private fun ProviderCard(
     }
     var gpuLayerDraft by remember(provider.id) { mutableStateOf(localGpuLayers) }
     var showEditDialog by remember { mutableStateOf(false) }
+    var showModelMenu by remember { mutableStateOf(false) }
     LaunchedEffect(provider.id) { gpuLayerDraft = localGpuLayers }
     Card(onClick = onToggleExpand, colors = CardDefaults.cardColors(containerColor = if (isActive) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface), shape = MaterialTheme.shapes.small) {
         Column(modifier = Modifier.padding(12.dp)) {
@@ -612,75 +606,80 @@ private fun ProviderCard(
                         }
                         if (provider.models.isNotEmpty()) {
                             Spacer(Modifier.height(8.dp))
-                            Text("Model", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            OutlinedTextField(
-                                value = modelSearch,
-                                onValueChange = { modelSearch = it },
-                                label = { Text("Search models") },
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth(),
-                            )
-                            Spacer(Modifier.height(2.dp))
-                            Text("${filteredModels.size} shown (${provider.models.size} total)", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Spacer(Modifier.height(4.dp))
-                            LazyColumn(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .heightIn(max = 240.dp),
-                                verticalArrangement = Arrangement.spacedBy(2.dp),
-                            ) {
-                                if (filteredModels.isEmpty()) {
-                                    item {
-                                        Text(
-                                            if (modelSearch.isBlank()) "No models available" else "No models match \"$modelSearch\"",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        )
-                                    }
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.weight(1f)) {
+                                    Text("Active: ${provider.activeModel?.label ?: "Not selected"}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text("${provider.models.size} models available", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
-                                items(filteredModels) { model ->
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        verticalAlignment = Alignment.CenterVertically,
+                                Box {
+                                    OutlinedButton(
+                                        onClick = { showModelMenu = true },
+                                        contentPadding = PaddingValues(horizontal = 12.dp),
                                     ) {
-                                        RadioButton(
-                                            selected = model.modelId == provider.activeModel?.modelId,
-                                            onClick = { onSetActiveModel(model.modelId) },
-                                        )
-                                        Text(
-                                            model.label,
-                                            style = MaterialTheme.typography.bodySmall,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                            modifier = Modifier.weight(1f),
-                                        )
+                                        Icon(Icons.Filled.Tune, contentDescription = null, modifier = Modifier.size(14.dp))
+                                        Spacer(Modifier.width(4.dp))
+                                        Text("Select", style = MaterialTheme.typography.labelSmall)
                                     }
-                                }
-                                if (filteredModels.isNotEmpty() && filteredModels.size < provider.models.size) {
-                                    item {
-                                        Text(
-                                            "Showing ${filteredModels.size} filtered results",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .padding(vertical = 4.dp, horizontal = 6.dp),
-                                        )
+                                    DropdownMenu(
+                                        expanded = showModelMenu,
+                                        onDismissRequest = { showModelMenu = false; modelSearch = "" },
+                                        modifier = Modifier.fillMaxWidth(0.9f),
+                                    ) {
+                                        if (provider.models.size > 6) {
+                                            OutlinedTextField(
+                                                modifier = Modifier
+                                                    .padding(horizontal = 8.dp)
+                                                    .fillMaxWidth(),
+                                                value = modelSearch,
+                                                onValueChange = { modelSearch = it },
+                                                singleLine = true,
+                                                placeholder = { Text("Search models") },
+                                                textStyle = MaterialTheme.typography.bodySmall,
+                                                trailingIcon = {
+                                                    if (modelSearch.isNotBlank()) {
+                                                        IconButton(onClick = { modelSearch = "" }, modifier = Modifier.size(16.dp)) {
+                                                            Icon(Icons.Filled.Close, contentDescription = "Clear", modifier = Modifier.size(12.dp))
+                                                        }
+                                                    }
+                                                },
+                                            )
+                                            HorizontalDivider()
+                                        }
+                                        if (filteredModels.isEmpty()) {
+                                            DropdownMenuItem(
+                                                text = { Text(if (modelSearch.isBlank()) "No models available" else "No models match") },
+                                                enabled = false,
+                                                onClick = {},
+                                            )
+                                        } else {
+                                            Column(
+                                                modifier = Modifier
+                                                    .heightIn(max = 320.dp)
+                                                    .fillMaxWidth()
+                                                    .verticalScroll(rememberScrollState()),
+                                            ) {
+                                                filteredModels.forEach { model ->
+                                                    DropdownMenuItem(
+                                                        text = { Text(model.label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                                        leadingIcon = {
+                                                            if (model.modelId == provider.activeModel?.modelId) {
+                                                                Icon(Icons.Filled.Check, contentDescription = null, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
+                                                            } else {
+                                                                Spacer(modifier = Modifier.size(18.dp))
+                                                            }
+                                                        },
+                                                        onClick = {
+                                                            showModelMenu = false
+                                                            modelSearch = ""
+                                                            onSetActiveModel(model.modelId)
+                                                        },
+                                                    )
+                                                }
+                                            }
+                                        }
                                     }
-                                }
-                            if (provider.models.size > 24 && filteredModels.isNotEmpty()) {
-                                item {
-                                    Text(
-                                        "Scroll to view all models",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(top = 2.dp, start = 6.dp, end = 6.dp, bottom = 4.dp),
-                                    )
                                 }
                             }
-                        }
                         }
                     }
                     Spacer(Modifier.height(6.dp))
@@ -1071,7 +1070,7 @@ private fun normalizeBaseUrl(value: String, fallback: String? = null, allowRelat
 
 @Composable
 private fun ToolsSection(toolPermissions: List<ToolPermissionUi>, onSetPermission: (String, ToolPermissionMode) -> Unit) {
-    LazyColumn(modifier = Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+    LazyColumn(modifier = Modifier.fillMaxSize().padding(Spacing.screen), verticalArrangement = Arrangement.spacedBy(3.dp)) {
         item { Text("Configure tool permissions. Safe=auto, Sensitive/Dangerous=ask or block.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant); Spacer(Modifier.height(10.dp)) }
         val grouped = toolPermissions.groupBy { perm -> when { perm.isDangerous -> "Dangerous — Phone Control"; perm.defaultMode == ToolPermissionMode.alwaysAllow -> "Safe — Auto-approved"; else -> "Sensitive — Network & Memory" } }
         grouped.forEach { (group, perms) ->
@@ -1126,7 +1125,7 @@ private fun CustomToolsSection(
     var showDialog by remember { mutableStateOf(false) }
     var selectedTool by remember { mutableStateOf<CustomToolDef?>(null) }
     var pendingDeleteTool by remember { mutableStateOf<CustomToolDef?>(null) }
-    LazyColumn(modifier = Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    LazyColumn(modifier = Modifier.fillMaxSize().padding(Spacing.screen), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         item {
             Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
                 Column {
@@ -1374,7 +1373,7 @@ private fun SkillsSection(
             },
         )
     }
-    LazyColumn(modifier = Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    LazyColumn(modifier = Modifier.fillMaxSize().padding(Spacing.screen), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         item {
             Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
                 Column {
@@ -1524,7 +1523,7 @@ private fun MemorySection(memories: List<Memory>, onAdd: (String, String) -> Uni
             matchesKind && matchesQuery
         }
     }
-    LazyColumn(modifier = Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+    LazyColumn(modifier = Modifier.fillMaxSize().padding(Spacing.screen), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         item {
             Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
                 Column { Text("Agent Memory", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold); Text("${filteredMemories.size} of ${memories.size} memories", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
@@ -1671,7 +1670,7 @@ private fun InstructionsSection(
     var showDiscardConfirm by remember { mutableStateOf(false) }
     var showClearConfirm by remember { mutableStateOf(false) }
     val hasUnsavedChanges = draft.trim() != customInstructions.trim()
-    LazyColumn(modifier = Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    LazyColumn(modifier = Modifier.fillMaxSize().padding(Spacing.screen), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         item {
             Text("Custom Instructions", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
             Text("These instructions are added to every chat turn.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1759,7 +1758,7 @@ private fun InstructionsSection(
 @Composable
 private fun PhoneControlSection() {
     val context = LocalContext.current
-    LazyColumn(modifier = Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    LazyColumn(modifier = Modifier.fillMaxSize().padding(Spacing.screen), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         item {
             Card(shape = MaterialTheme.shapes.small, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                 Column(Modifier.padding(12.dp)) {
@@ -1812,7 +1811,7 @@ private fun AppearanceSection(
     showTokenUsage: Boolean,
     onSetShowTokenUsage: (Boolean) -> Unit,
 ) {
-    LazyColumn(modifier = Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    LazyColumn(modifier = Modifier.fillMaxSize().padding(Spacing.screen), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         item {
             SectionHeader("Theme")
         }
@@ -1822,9 +1821,6 @@ private fun AppearanceSection(
                 ThemeOptionButton("Light", AppThemeMode.LIGHT, themeMode, onSetTheme, Modifier.weight(1f))
                 ThemeOptionButton("Dark", AppThemeMode.DARK, themeMode, onSetTheme, Modifier.weight(1f))
             }
-        }
-        item {
-            Card(shape = MaterialTheme.shapes.small, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) { Column(Modifier.padding(12.dp)) { Row(verticalAlignment = Alignment.CenterVertically) { Icon(Icons.Filled.Memory, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("Local Model", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold) }; Spacer(Modifier.height(4.dp)); Text("llama.cpp JNI/CMake bridge is built into this build. Import GGUF models via Settings > Local Models to start local inference.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) } }
         }
         item {
             SwitchPreference(
@@ -1892,13 +1888,56 @@ private fun AboutSection(bridgeStatus: LocalModelManager.BridgeStatus = LocalMod
     }
     val appVersionName = packageInfo?.versionName ?: "Unknown"
     val appPackageName = packageInfo?.packageName ?: context.packageName
-    LazyColumn(modifier = Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        item { Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) { Icon(Icons.Filled.SmartToy, contentDescription = null, modifier = Modifier.size(36.dp), tint = MaterialTheme.colorScheme.primary); Spacer(Modifier.height(4.dp)); Text("Kolo AI Agent", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold); Text("$appVersionName (${appPackageName})", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) } }
+    var showReleaseNotes by remember { mutableStateOf(false) }
+    LazyColumn(modifier = Modifier.fillMaxSize().padding(Spacing.screen), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        item {
+            Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+                Icon(Icons.Filled.SmartToy, contentDescription = null, modifier = Modifier.size(36.dp), tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.height(4.dp))
+                Text("Kolo AI Agent", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Text(appVersionName, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
         item { HorizontalDivider() }
-        item { Card(shape = MaterialTheme.shapes.small) { Column(Modifier.padding(10.dp)) { Text("What Works", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold); Spacer(Modifier.height(4.dp)); Text("\u2022 OpenAI-compatible streaming chat with tool use", style = MaterialTheme.typography.bodySmall); Text("\u2022 Tool permission gating (allow once / always / deny / block)", style = MaterialTheme.typography.bodySmall); Text("\u2022 Room-backed memory system", style = MaterialTheme.typography.bodySmall); Text("\u2022 Phone control with session safety \u0026 system overlay", style = MaterialTheme.typography.bodySmall); Text("\u2022 Chat list drawer for switching conversations", style = MaterialTheme.typography.bodySmall); Text("\u2022 Web search via DuckDuckGo (no API key needed)", style = MaterialTheme.typography.bodySmall); Text("\u2022 Theme switching (system / light / dark via DataStore)", style = MaterialTheme.typography.bodySmall); Text("\u2022 Local model import \u0026 management via file picker", style = MaterialTheme.typography.bodySmall); Text("\u2022 llama.cpp ${if (bridgeStatus == LocalModelManager.BridgeStatus.Available) "runtime available" else "bridge built but runtime not loaded"}", style = MaterialTheme.typography.bodySmall, color = if (bridgeStatus == LocalModelManager.BridgeStatus.Available) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.tertiary) } } }
-        item { Card(shape = MaterialTheme.shapes.small) { Column(Modifier.padding(10.dp)) { Text("Partially Integrated", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.tertiary); Spacer(Modifier.height(4.dp)); Text("\u2022 Pixel screenshot \u2014 working on Android 11+ with active phone-control session; needs device verification", style = MaterialTheme.typography.bodySmall) } } }
-        item { Card(shape = MaterialTheme.shapes.small) { Column(Modifier.padding(10.dp)) { Text("Needs Device Verification", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.outline); Spacer(Modifier.height(4.dp)); Text("• Pixel screenshot — code path uses Android 11+ Accessibility screenshot; not verified on device yet", style = MaterialTheme.typography.bodySmall); Text("• System overlay STOP button — overlay layout works but not testable without active session", style = MaterialTheme.typography.bodySmall) } } }
-        item { Card(shape = MaterialTheme.shapes.small) { Column(Modifier.padding(10.dp)) { Text("Diagnostics", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold); Spacer(Modifier.height(4.dp)); Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Platform", style = MaterialTheme.typography.bodySmall); Text("Android Native", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary) }; Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Min SDK", style = MaterialTheme.typography.bodySmall); Text("26", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary) }; Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("llama.cpp Bridge", style = MaterialTheme.typography.bodySmall); Text(if (bridgeStatus == LocalModelManager.BridgeStatus.Available) "Available" else when (bridgeStatus) { LocalModelManager.BridgeStatus.Unavailable -> "Not Loaded"; else -> "Unknown" }, style = MaterialTheme.typography.bodySmall, color = if (bridgeStatus == LocalModelManager.BridgeStatus.Available) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error) } } } }
+        item {
+            Card(shape = MaterialTheme.shapes.small) {
+                Column(Modifier.padding(10.dp)) {
+                    Text("Diagnostics", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(4.dp))
+                    Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Platform", style = MaterialTheme.typography.bodySmall); Text("Android Native", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary) }
+                    Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Min SDK", style = MaterialTheme.typography.bodySmall); Text("26", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary) }
+                    Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Package", style = MaterialTheme.typography.bodySmall); Text(appPackageName, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                    Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("llama.cpp Bridge", style = MaterialTheme.typography.bodySmall); Text(if (bridgeStatus == LocalModelManager.BridgeStatus.Available) "Available" else when (bridgeStatus) { LocalModelManager.BridgeStatus.Unavailable -> "Not Loaded"; else -> "Unknown" }, style = MaterialTheme.typography.bodySmall, color = if (bridgeStatus == LocalModelManager.BridgeStatus.Available) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error) }
+                }
+            }
+        }
+        item {
+            Card(shape = MaterialTheme.shapes.small, onClick = { showReleaseNotes = !showReleaseNotes }) {
+                Column(Modifier.padding(10.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Release notes", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                        Icon(if (showReleaseNotes) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore, contentDescription = if (showReleaseNotes) "Collapse" else "Expand", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
+                    }
+                    AnimatedVisibility(visible = showReleaseNotes) {
+                        Column {
+                            Spacer(Modifier.height(4.dp))
+                            Text("What works", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
+                            Text("\u2022 OpenAI-compatible streaming chat with tool use", style = MaterialTheme.typography.bodySmall)
+                            Text("\u2022 Tool permission gating (allow once / always / deny / block)", style = MaterialTheme.typography.bodySmall)
+                            Text("\u2022 Room-backed memory system", style = MaterialTheme.typography.bodySmall)
+                            Text("\u2022 Phone control with session safety \u0026 system overlay", style = MaterialTheme.typography.bodySmall)
+                            Text("\u2022 Web search via DuckDuckGo (no API key needed)", style = MaterialTheme.typography.bodySmall)
+                            Text("\u2022 Theme switching (system / light / dark)", style = MaterialTheme.typography.bodySmall)
+                            Text("\u2022 Local model import \u0026 management", style = MaterialTheme.typography.bodySmall)
+                            Spacer(Modifier.height(4.dp))
+                            Text("Needs device verification", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.outline, fontWeight = FontWeight.SemiBold)
+                            Text("• Pixel screenshot (Android 11+ Accessibility screenshot)", style = MaterialTheme.typography.bodySmall)
+                            Text("• System overlay STOP button", style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

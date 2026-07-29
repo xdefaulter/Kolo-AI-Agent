@@ -36,6 +36,7 @@ android {
 dependencies {
     implementation(project(":core:model"))
     implementation(project(":core:database"))
+    implementation(project(":core:designsystem"))
     implementation(project(":core:providers"))
     implementation(project(":core:agent"))
     implementation(project(":core:tools"))

@@ -19,6 +19,7 @@ rootProject.name = "kolo-native"
 include(":app")
 include(":core:model")
 include(":core:database")
+include(":core:designsystem")
 include(":core:providers")
 include(":core:agent")
 include(":core:tools")

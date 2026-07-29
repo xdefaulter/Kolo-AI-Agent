@@ -19,6 +19,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.kolo.agent.core.designsystem.Spacing
 import com.kolo.agent.core.providers.local.ImportedModel
 import com.kolo.agent.core.providers.local.LocalModelManager
 import com.kolo.agent.feature.settings.LocalModelUiState
@@ -95,7 +96,7 @@ fun LocalModelScreen(
         },
     ) { paddingValues ->
         LazyColumn(
-            modifier = Modifier.fillMaxSize().padding(paddingValues).padding(horizontal = 12.dp),
+            modifier = Modifier.fillMaxSize().padding(paddingValues).padding(horizontal = Spacing.screen),
             verticalArrangement = Arrangement.spacedBy(8.dp),
             contentPadding = PaddingValues(vertical = 8.dp),
         ) {
@@ -121,6 +122,8 @@ fun LocalModelScreen(
                     activeModelName = state.activeModelName,
                     activeModelPath = state.activeModelPath,
                     onClear = { onSetActiveModel(null) },
+                    showSetUpCta = !state.hasLocalProvider && state.activeModelPath != null,
+                    onSetUp = onEnsureLocalProvider,
                 )
             }
 
@@ -161,33 +164,6 @@ fun LocalModelScreen(
                                     Text("Clear error")
                                 }
                             }
-                        }
-                    }
-                }
-            }
-
-            // "Use for Local Chat" action when no local provider and there's an active model
-            if (!state.hasLocalProvider && state.activeModelPath != null) {
-                item {
-                    Card(
-                        shape = MaterialTheme.shapes.small,
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)),
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth().padding(12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Icon(Icons.Filled.PlayCircle, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
-                            Spacer(modifier = Modifier.width(10.dp))
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text("Ready for local chat", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.primary)
-                                Text("Create a Local llama.cpp provider to start chatting with your model.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                            Spacer(modifier = Modifier.width(6.dp))
-                            FilledTonalButton(
-                                onClick = onEnsureLocalProvider,
-                                contentPadding = PaddingValues(horizontal = 10.dp),
-                            ) { Text("Set Up", style = MaterialTheme.typography.labelSmall) }
                         }
                     }
                 }
@@ -379,6 +355,8 @@ private fun ActiveModelCard(
     activeModelName: String?,
     activeModelPath: String?,
     onClear: () -> Unit,
+    showSetUpCta: Boolean = false,
+    onSetUp: () -> Unit = {},
 ) {
     Card(shape = MaterialTheme.shapes.small) {
         Column(modifier = Modifier.padding(12.dp)) {
@@ -406,6 +384,28 @@ private fun ActiveModelCard(
                     }
                 } else {
                     Text("No active model. Import a GGUF file or set a manual path to enable local inference.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            if (showSetUpCta) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Surface(
+                    shape = MaterialTheme.shapes.small,
+                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f),
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Ready for local chat", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.primary)
+                            Text("Create a Local llama.cpp provider to start chatting.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Spacer(modifier = Modifier.width(6.dp))
+                        FilledTonalButton(
+                            onClick = onSetUp,
+                            contentPadding = PaddingValues(horizontal = 10.dp),
+                        ) { Text("Set Up", style = MaterialTheme.typography.labelSmall) }
+                    }
                 }
             }
         }
@@ -481,25 +481,40 @@ private fun EmptyModelsCard() {
 
 @Composable
 private fun HelpCard() {
-    Card(shape = MaterialTheme.shapes.small, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))) {
+    var expanded by remember { mutableStateOf(false) }
+    Card(
+        shape = MaterialTheme.shapes.small,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
+        onClick = { expanded = !expanded },
+    ) {
         Column(modifier = Modifier.padding(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.AutoMirrored.Filled.HelpOutline, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(16.dp))
                 Spacer(modifier = Modifier.width(6.dp))
-                Text("How to use local models", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+                Text("How to use local models", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                Icon(
+                    imageVector = if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                    contentDescription = if (expanded) "Collapse" else "Expand",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp),
+                )
             }
-            Spacer(modifier = Modifier.height(6.dp))
-            Text("1. Download a quantized GGUF model to your device.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Spacer(modifier = Modifier.height(2.dp))
-            Text("2. Tap Import GGUF to copy it into app storage.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Spacer(modifier = Modifier.height(2.dp))
-            Text("3. Set an imported model as active.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Spacer(modifier = Modifier.height(2.dp))
-            Text("4. Add a Local llama.cpp provider in Providers, or use the Set Up button above.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Spacer(modifier = Modifier.height(2.dp))
-            Text("5. Start chatting with local inference!", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Spacer(modifier = Modifier.height(8.dp))
-            Text("Tip: Small quantized models (Q4_K_M) work best on mobile. Models are stored in app-private storage.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            AnimatedVisibility(visible = expanded) {
+                Column {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text("1. Download a quantized GGUF model to your device.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text("2. Tap Import GGUF to copy it into app storage.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text("3. Set an imported model as active.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text("4. Add a Local llama.cpp provider in Providers, or use the Set Up button above.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text("5. Start chatting with local inference!", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("Tip: Small quantized models (Q4_K_M) work best on mobile. Models are stored in app-private storage.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
         }
     }
 }

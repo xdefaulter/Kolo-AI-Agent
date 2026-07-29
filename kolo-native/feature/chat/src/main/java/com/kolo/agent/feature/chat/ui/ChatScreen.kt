@@ -17,6 +17,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -37,6 +38,7 @@ import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.foundation.text.KeyboardActions
@@ -48,6 +50,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.kolo.agent.core.designsystem.Spacing
 import com.kolo.agent.core.model.*
 import com.kolo.agent.core.providers.local.LocalModelManager
 import com.kolo.agent.feature.chat.ChatUiState
@@ -142,6 +145,7 @@ fun ChatScreen(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ChatDrawer(
     chats: List<Chat>,
@@ -173,14 +177,10 @@ private fun ChatDrawer(
     var pendingMoveToNoFolderChatId by remember { mutableStateOf<ChatId?>(null) }
     var pendingDeleteFolder by remember { mutableStateOf<Folder?>(null) }
     var openMenuChatId by remember { mutableStateOf<ChatId?>(null) }
-    val providerStatusText = when {
+    var openFolderMenuId by remember { mutableStateOf<FolderId?>(null) }
+    val providerReadyLabel = when {
         providerReadinessError != null -> providerReadinessError
         activeProviderConfig == null -> "No provider configured"
-        else -> null
-    }
-    val providerReadyLabel = when {
-        providerReadinessError != null -> "Provider status: issue"
-        activeProviderConfig == null -> "Provider status: not set"
         activeProviderConfig.isLocal && localBridgeStatus == LocalModelManager.BridgeStatus.Unavailable -> "Local runtime unavailable"
         activeProviderConfig.isLocal && localBridgeStatus == LocalModelManager.BridgeStatus.Checking -> "Local runtime checking"
         activeProviderConfig.isLocal && localBridgeStatus == LocalModelManager.BridgeStatus.Available -> "Local runtime ready"
@@ -208,16 +208,6 @@ private fun ChatDrawer(
         }
         HorizontalDivider()
 
-        if (providerStatusText != null) {
-            Text(
-                text = providerStatusText,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.error,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 4.dp),
-            )
-        }
         BadgedBox(
             modifier = Modifier
                 .fillMaxWidth()
@@ -302,30 +292,39 @@ private fun ChatDrawer(
             }
             items(folders, key = { it.id.value }) { folder ->
                 val folderChatCount = allChats.count { it.folderId == folder.id }
-                NavigationDrawerItem(
-                    label = { Text(folder.name, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                    icon = { Icon(Icons.Filled.Folder, contentDescription = null, modifier = Modifier.size(16.dp)) },
-                    selected = activeFolderId == folder.id,
-                    onClick = { onSetActiveFolder(folder.id) },
-                    badge = {
-                        Row {
+                Box {
+                    NavigationDrawerItem(
+                        label = { Text(folder.name, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                        icon = { Icon(Icons.Filled.Folder, contentDescription = null, modifier = Modifier.size(16.dp)) },
+                        selected = activeFolderId == folder.id,
+                        onClick = { onSetActiveFolder(folder.id) },
+                        badge = {
                             if (folderChatCount > 0) {
                                 Text(folderChatCount.toString(), style = MaterialTheme.typography.labelSmall)
                             }
-                            Spacer(modifier = Modifier.width(2.dp))
-                            FilledTonalButton(
-                                onClick = { pendingDeleteFolder = folder },
-                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
-                                modifier = Modifier.height(22.dp),
-                            ) {
-                                Icon(Icons.Filled.Delete, contentDescription = "Delete folder", modifier = Modifier.size(12.dp))
-                                Spacer(modifier = Modifier.width(2.dp))
-                                Text("Delete", style = MaterialTheme.typography.labelSmall)
-                            }
-                        }
-                    },
-                    modifier = Modifier.padding(vertical = 1.dp),
-                )
+                        },
+                        modifier = Modifier
+                            .padding(vertical = 1.dp)
+                            .pointerInput(folder.id) {
+                                detectTapGestures(
+                                    onLongPress = { openFolderMenuId = folder.id },
+                                )
+                            },
+                    )
+                    DropdownMenu(
+                        expanded = openFolderMenuId == folder.id,
+                        onDismissRequest = { openFolderMenuId = null },
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Delete folder") },
+                            leadingIcon = { Icon(Icons.Filled.Delete, contentDescription = null) },
+                            onClick = {
+                                openFolderMenuId = null
+                                pendingDeleteFolder = folder
+                            },
+                        )
+                    }
+                }
             }
         }
         TextButton(
@@ -372,14 +371,11 @@ private fun ChatDrawer(
                     },
                     badge = {
                         Row {
-                            FilledTonalButton(
+                            IconButton(
                                 onClick = { openMenuChatId = chat.id },
-                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
-                                modifier = Modifier.height(22.dp),
+                                modifier = Modifier.size(24.dp),
                             ) {
-                                Icon(Icons.Filled.MoreVert, contentDescription = null, modifier = Modifier.size(12.dp))
-                                Spacer(modifier = Modifier.width(3.dp))
-                                Text("Actions", style = MaterialTheme.typography.labelSmall)
+                                Icon(Icons.Filled.MoreVert, contentDescription = "Chat actions", modifier = Modifier.size(16.dp))
                             }
                             DropdownMenu(expanded = openMenuChatId == chat.id, onDismissRequest = { openMenuChatId = null }) {
                                 DropdownMenuItem(
@@ -839,38 +835,73 @@ private fun ChatHeader(
         tonalElevation = 2.dp,
         shadowElevation = 1.dp,
     ) {
-        Column(
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(start = 2.dp, end = 2.dp, top = 0.dp, bottom = 0.dp)
                 .statusBarsPadding(),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                IconButton(onClick = onOpenDrawer, modifier = Modifier.size(40.dp)) {
-                    Icon(Icons.Filled.Menu, contentDescription = "Chat list", modifier = Modifier.size(22.dp))
-                }
-                Spacer(modifier = Modifier.width(4.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = provider ?: "Kolo AI",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        lineHeight = 18.sp,
-                    )
-                    if (provider != null) {
+            IconButton(onClick = onOpenDrawer, modifier = Modifier.size(40.dp)) {
+                Icon(Icons.Filled.Menu, contentDescription = "Chat list", modifier = Modifier.size(22.dp))
+            }
+            // Title + subtitle column doubles as the model picker trigger. Tapping it
+            // opens the dropdown (replacing the previous full-width picker row), keeping
+            // the model name visible in the subtitle without a second row of chrome.
+            Box(modifier = Modifier.weight(1f)) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(enabled = hasProvider) { expanded = true },
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            if (isLocalProvider) Icons.Filled.Memory else Icons.Filled.Cloud,
+                            contentDescription = null,
+                            modifier = Modifier.size(14.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
                         Text(
-                            text = activeModelDisplay,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            lineHeight = 14.sp,
+                            text = provider ?: "Kolo AI",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
+                            lineHeight = 18.sp,
                         )
+                        if (isRefreshingModels) {
+                            Spacer(modifier = Modifier.width(6.dp))
+                            CircularProgressIndicator(modifier = Modifier.size(12.dp), strokeWidth = 2.dp)
+                        }
+                    }
+                    if (provider != null) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = activeModelDisplay,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                lineHeight = 14.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false),
+                            )
+                            if (providerConfig?.isLocal == true && localRuntimeStatusLabel != null) {
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    "$runtimeLabel · $localRuntimeStatusLabel",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(2.dp))
+                            Icon(
+                                Icons.Filled.ArrowDropDown,
+                                contentDescription = "Model picker",
+                                modifier = Modifier.size(14.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                     } else {
                         Text(
                             text = "No provider configured",
@@ -889,164 +920,110 @@ private fun ChatHeader(
                         )
                     }
                 }
-
-                if (!hasProvider) {
-                    FilledTonalButton(
-                        onClick = onSettings,
-                        contentPadding = PaddingValues(horizontal = 8.dp),
-                    ) {
-                        Icon(Icons.Filled.Settings, contentDescription = null, modifier = Modifier.size(14.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Setup", style = MaterialTheme.typography.labelSmall)
-                    }
-                }
-                IconButton(onClick = onSettings, modifier = Modifier.size(40.dp)) {
-                    Icon(Icons.Filled.Settings, contentDescription = "Settings", modifier = Modifier.size(22.dp))
-                }
-            }
-
-            if (hasProvider) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(start = 8.dp, end = 8.dp, bottom = 6.dp),
+                DropdownMenu(
+                    expanded = expanded,
+                    onDismissRequest = { expanded = false },
+                    modifier = Modifier.width(menuWidth),
                 ) {
-                    OutlinedButton(
-                        onClick = { expanded = true },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(min = 38.dp),
-                        contentPadding = PaddingValues(horizontal = 10.dp),
-                    ) {
-                        Icon(
-                            if (isLocalProvider) Icons.Filled.Memory else Icons.Filled.Cloud,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp),
+                    if (isRefreshingModels) {
+                        DropdownMenuItem(
+                            enabled = false,
+                            leadingIcon = { CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp) },
+                            text = { Text("Refreshing models…") },
+                            onClick = {},
                         )
-                        Spacer(Modifier.width(6.dp))
-                        Text(
-                            text = if (models.isEmpty()) "Model: no models loaded" else "Model: $activeModelDisplay",
-                            style = MaterialTheme.typography.labelSmall,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f),
-                        )
-                        if (isRefreshingModels) {
-                            CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
-                            Spacer(Modifier.width(6.dp))
-                        }
-                        if (providerConfig?.isLocal == true) {
-                            Text(
-                                "$runtimeLabel · $localRuntimeStatusLabel",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                            )
-                            Spacer(Modifier.width(6.dp))
-                        }
-                        Icon(Icons.Filled.ArrowDropDown, contentDescription = "Model picker", modifier = Modifier.size(16.dp))
+                        HorizontalDivider()
                     }
-                    DropdownMenu(
-                        expanded = expanded,
-                        onDismissRequest = { expanded = false },
-                        modifier = Modifier.width(menuWidth),
-                    ) {
-                        if (isRefreshingModels) {
-                            DropdownMenuItem(
-                                enabled = false,
-                                leadingIcon = { CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp) },
-                                text = { Text("Refreshing models…") },
-                                onClick = {},
+
+                    if (models.isEmpty()) {
+                        DropdownMenuItem(
+                            text = { Text(if (isLocalProvider) "No local model loaded" else "No models loaded") },
+                            leadingIcon = {
+                                Icon(
+                                    if (isLocalProvider) Icons.Filled.Memory else Icons.Filled.Cloud,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp),
+                                )
+                            },
+                            enabled = false,
+                            onClick = {},
+                        )
+                    } else {
+                        if (models.size > 6) {
+                            OutlinedTextField(
+                                modifier = Modifier
+                                    .padding(horizontal = 8.dp)
+                                    .fillMaxWidth(),
+                                value = modelSearch,
+                                onValueChange = { modelSearch = it },
+                                singleLine = true,
+                                placeholder = { Text("Search models") },
+                                textStyle = MaterialTheme.typography.bodySmall,
+                                trailingIcon = {
+                                    if (modelSearch.isNotBlank()) {
+                                        IconButton(onClick = { modelSearch = "" }, modifier = Modifier.size(16.dp)) {
+                                            Icon(Icons.Filled.Close, contentDescription = "Clear", modifier = Modifier.size(12.dp))
+                                        }
+                                    }
+                                },
                             )
                             HorizontalDivider()
                         }
 
-                        if (models.isEmpty()) {
-                            DropdownMenuItem(
-                                text = { Text(if (isLocalProvider) "No local model loaded" else "No models loaded") },
-                                leadingIcon = {
-                                    Icon(
-                                        if (isLocalProvider) Icons.Filled.Memory else Icons.Filled.Cloud,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(18.dp),
-                                    )
-                                },
-                                enabled = false,
-                                onClick = {},
-                            )
+                        if (filteredModels.isEmpty()) {
+                            DropdownMenuItem(text = { Text("No models match") }, onClick = {}, enabled = false)
                         } else {
-                            if (models.size > 6) {
-                                OutlinedTextField(
-                                    modifier = Modifier
-                                        .padding(horizontal = 8.dp)
-                                        .fillMaxWidth(),
-                                    value = modelSearch,
-                                    onValueChange = { modelSearch = it },
-                                    singleLine = true,
-                                    placeholder = { Text("Search models") },
-                                    textStyle = MaterialTheme.typography.bodySmall,
-                                    trailingIcon = {
-                                        if (modelSearch.isNotBlank()) {
-                                            IconButton(onClick = { modelSearch = "" }, modifier = Modifier.size(16.dp)) {
-                                                Icon(Icons.Filled.Close, contentDescription = "Clear", modifier = Modifier.size(12.dp))
+                            DropdownMenuItem(enabled = false, text = { Text("${filteredModels.size} model${if (filteredModels.size != 1) "s" else ""} available", style = MaterialTheme.typography.labelSmall) }, onClick = {})
+                            Column(
+                                modifier = Modifier
+                                    .heightIn(max = 220.dp)
+                                    .fillMaxWidth()
+                                    .verticalScroll(rememberScrollState()),
+                            ) {
+                                filteredModels.forEach { option ->
+                                    DropdownMenuItem(
+                                        text = { Text(option.label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                        leadingIcon = {
+                                            if (option.modelId == activeModelId) {
+                                                Icon(Icons.Filled.Check, contentDescription = null, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
+                                            } else {
+                                                Spacer(modifier = Modifier.size(18.dp))
                                             }
-                                        }
-                                    },
-                                )
-                                HorizontalDivider()
-                            }
-
-                            if (filteredModels.isEmpty()) {
-                                DropdownMenuItem(text = { Text("No models match") }, onClick = {}, enabled = false)
-                            } else {
-                                DropdownMenuItem(enabled = false, text = { Text("${filteredModels.size} model${if (filteredModels.size != 1) "s" else ""} available", style = MaterialTheme.typography.labelSmall) }, onClick = {})
-                                Column(
-                                    modifier = Modifier
-                                        .heightIn(max = 220.dp)
-                                        .fillMaxWidth()
-                                        .verticalScroll(rememberScrollState()),
-                                ) {
-                                    filteredModels.forEach { option ->
-                                        DropdownMenuItem(
-                                            text = { Text(option.label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                                            leadingIcon = {
-                                                if (option.modelId == activeModelId) {
-                                                    Icon(Icons.Filled.Check, contentDescription = null, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
-                                                } else {
-                                                    Spacer(modifier = Modifier.size(18.dp))
-                                                }
-                                            },
-                                            onClick = {
-                                                expanded = false
-                                                onSetActiveModel(option.modelId)
-                                            },
-                                        )
-                                    }
+                                        },
+                                        onClick = {
+                                            expanded = false
+                                            onSetActiveModel(option.modelId)
+                                        },
+                                    )
                                 }
                             }
                         }
+                    }
 
-                        HorizontalDivider()
-                        if (!isLocalProvider) {
-                            DropdownMenuItem(
-                                text = { Text(if (models.isEmpty()) "Fetch models" else "Refresh models") },
-                                leadingIcon = { Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(18.dp)) },
-                                onClick = {
-                                    expanded = false
-                                    onRefreshActiveModels()
-                                },
-                            )
-                        }
+                    HorizontalDivider()
+                    if (!isLocalProvider) {
                         DropdownMenuItem(
-                            text = { Text(if (isLocalProvider) "Local model settings" else "Provider settings") },
-                            leadingIcon = { Icon(Icons.Filled.Settings, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                            text = { Text(if (models.isEmpty()) "Fetch models" else "Refresh models") },
+                            leadingIcon = { Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(18.dp)) },
                             onClick = {
                                 expanded = false
-                                onSettings()
+                                onRefreshActiveModels()
                             },
                         )
                     }
+                    DropdownMenuItem(
+                        text = { Text(if (isLocalProvider) "Local model settings" else "Provider settings") },
+                        leadingIcon = { Icon(Icons.Filled.Settings, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                        onClick = {
+                            expanded = false
+                            onSettings()
+                        },
+                    )
                 }
+            }
+
+            IconButton(onClick = onSettings, modifier = Modifier.size(40.dp)) {
+                Icon(Icons.Filled.Settings, contentDescription = "Settings", modifier = Modifier.size(22.dp))
             }
         }
     }
@@ -1069,10 +1046,10 @@ private fun ToolApprovalBanner(
             ToolPermission.sensitive -> MaterialTheme.colorScheme.tertiaryContainer
             ToolPermission.safe -> MaterialTheme.colorScheme.primaryContainer
         },
-        shape = RoundedCornerShape(8.dp),
+        shape = MaterialTheme.shapes.small,
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 10.dp, vertical = 2.dp),
+            .padding(horizontal = Spacing.content, vertical = 2.dp),
     ) {
         Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1176,6 +1153,7 @@ private fun MessageBubble(
     val configuration = LocalConfiguration.current
     val maxWidthDp = (configuration.screenWidthDp * maxWidthFraction).dp
     val context = LocalContext.current
+    var showBubbleMenu by remember { mutableStateOf(false) }
     val timeText = remember(message.createdAt) {
         DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(message.createdAt))
     }
@@ -1196,30 +1174,31 @@ private fun MessageBubble(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start,
     ) {
-        Surface(
-            shape = if (isGroupedWithPrevious) {
-                if (isUser) {
-                    RoundedCornerShape(topStart = 4.dp, topEnd = 4.dp, bottomStart = 14.dp, bottomEnd = 2.dp)
+        Box {
+            Surface(
+                shape = if (isGroupedWithPrevious) {
+                    if (isUser) {
+                        RoundedCornerShape(topStart = 4.dp, topEnd = 4.dp, bottomStart = 14.dp, bottomEnd = 2.dp)
+                    } else {
+                        RoundedCornerShape(topStart = 4.dp, topEnd = 4.dp, bottomStart = 2.dp, bottomEnd = 14.dp)
+                    }
                 } else {
-                    RoundedCornerShape(topStart = 4.dp, topEnd = 4.dp, bottomStart = 2.dp, bottomEnd = 14.dp)
-                }
-            } else {
-                RoundedCornerShape(
-                    topStart = 14.dp,
-                    topEnd = 14.dp,
-                    bottomStart = if (isUser) 14.dp else 2.dp,
-                    bottomEnd = if (isUser) 2.dp else 14.dp,
-                )
-            },
-            color = roleSurfaceColor,
-            tonalElevation = if (!isUser) 0.5.dp else 0.dp,
-            modifier = Modifier
-                .widthIn(max = maxWidthDp)
-                .combinedClickable(
-                    onClick = {},
-                    onLongClick = { copyMessageToClipboard(context, message.content) },
-                ),
-        ) {
+                    RoundedCornerShape(
+                        topStart = 14.dp,
+                        topEnd = 14.dp,
+                        bottomStart = if (isUser) 14.dp else 2.dp,
+                        bottomEnd = if (isUser) 2.dp else 14.dp,
+                    )
+                },
+                color = roleSurfaceColor,
+                tonalElevation = if (!isUser) 0.5.dp else 0.dp,
+                modifier = Modifier
+                    .widthIn(max = maxWidthDp)
+                    .combinedClickable(
+                        onClick = {},
+                        onLongClick = { showBubbleMenu = true },
+                    ),
+            ) {
             Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
                 if (isTool) {
                     Row(
@@ -1304,31 +1283,38 @@ private fun MessageBubble(
                     )
                 }
                 Spacer(modifier = Modifier.height(3.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    if (message.content.isNotBlank()) {
-                        IconButton(
-                            onClick = { copyMessageToClipboard(context, message.content) },
-                            modifier = Modifier.size(18.dp),
-                        ) {
-                            Icon(Icons.Filled.ContentCopy, contentDescription = "Copy message", modifier = Modifier.size(12.dp))
-                        }
-                        IconButton(
-                            onClick = { copyMessageToClipboard(context, message.content, quote = true) },
-                            modifier = Modifier.size(18.dp),
-                        ) {
-                            Icon(Icons.Filled.FormatQuote, contentDescription = "Copy message as quote", modifier = Modifier.size(12.dp))
-                        }
-                    }
-                    Text(
-                        text = timeText,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = roleContentColor.copy(alpha = 0.72f),
-                    )
-                }
+                Text(
+                    text = timeText,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = roleContentColor.copy(alpha = 0.72f),
+                    modifier = Modifier.align(Alignment.End),
+                )
+            }
+            }
+            // Long-press menu replaces the per-bubble copy/quote button footer,
+            // reclaiming ~18dp on every message. Copy still works exactly as before.
+            DropdownMenu(
+                expanded = showBubbleMenu,
+                onDismissRequest = { showBubbleMenu = false },
+            ) {
+                DropdownMenuItem(
+                    text = { Text("Copy") },
+                    leadingIcon = { Icon(Icons.Filled.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                    enabled = message.content.isNotBlank(),
+                    onClick = {
+                        showBubbleMenu = false
+                        copyMessageToClipboard(context, message.content)
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("Copy as quote") },
+                    leadingIcon = { Icon(Icons.Filled.FormatQuote, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                    enabled = message.content.isNotBlank(),
+                    onClick = {
+                        showBubbleMenu = false
+                        copyMessageToClipboard(context, message.content, quote = true)
+                    },
+                )
             }
         }
     }
@@ -1394,7 +1380,7 @@ private fun StreamingBubble(content: String) {
     val maxWidthDp = (configuration.screenWidthDp * maxWidthFraction).dp
 
     Surface(
-        shape = RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp, bottomStart = 2.dp, bottomEnd = 14.dp),
+        shape = MaterialTheme.shapes.medium,
         color = MaterialTheme.colorScheme.surfaceVariant,
         modifier = Modifier.widthIn(max = maxWidthDp),
     ) {
@@ -1422,7 +1408,7 @@ private fun StreamingBubble(content: String) {
 @Composable
 private fun ThinkingBubble(content: String) {
     Surface(
-        shape = RoundedCornerShape(10.dp),
+        shape = MaterialTheme.shapes.medium,
         color = MaterialTheme.colorScheme.tertiaryContainer,
         modifier = Modifier.widthIn(max = (LocalConfiguration.current.screenWidthDp * 0.85f).dp),
     ) {
@@ -1448,7 +1434,7 @@ private fun ToolCallsPanel(
     results: Map<String, ToolExecutionResult>,
 ) {
     Surface(
-        shape = RoundedCornerShape(8.dp),
+        shape = MaterialTheme.shapes.small,
         color = MaterialTheme.colorScheme.secondaryContainer,
         modifier = Modifier.widthIn(max = (LocalConfiguration.current.screenWidthDp * 0.88f).dp),
     ) {
@@ -1482,7 +1468,7 @@ private fun ToolCallsPanel(
 private fun LoadingIndicator() {
     Row(horizontalArrangement = Arrangement.Start, modifier = Modifier.fillMaxWidth()) {
         val infiniteTransition = rememberInfiniteTransition(label = "dots")
-        Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
+        Surface(shape = MaterialTheme.shapes.small, color = MaterialTheme.colorScheme.surfaceVariant) {
             Row(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.CenterVertically) {
                 repeat(3) { index ->
                     val alpha by infiniteTransition.animateFloat(
@@ -1565,7 +1551,7 @@ private fun MessageDateSeparator(timestamp: Long) {
     Box(modifier = Modifier.fillMaxWidth()) {
         Surface(
             color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.55f),
-            shape = RoundedCornerShape(14.dp),
+            shape = MaterialTheme.shapes.medium,
             modifier = Modifier.align(Alignment.Center),
         ) {
             Text(
@@ -1605,8 +1591,8 @@ private fun isSupportedChatAttachment(attachment: MessageAttachment): Boolean {
 private fun ErrorBanner(error: String, onDismiss: () -> Unit) {
     Surface(
         color = MaterialTheme.colorScheme.errorContainer,
-        shape = RoundedCornerShape(6.dp),
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 2.dp),
+        shape = MaterialTheme.shapes.small,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = Spacing.content, vertical = 2.dp),
     ) {
         Row(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             Icon(Icons.Filled.Warning, contentDescription = "Error", tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(16.dp))
@@ -1790,7 +1776,7 @@ private fun ChatInputBar(
                     } else null,
                     placeholder = { Text("Message…") },
                     maxLines = 4,
-                    shape = RoundedCornerShape(20.dp),
+                    shape = MaterialTheme.shapes.large,
                     textStyle = MaterialTheme.typography.bodyMedium,
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                     keyboardActions = KeyboardActions(
