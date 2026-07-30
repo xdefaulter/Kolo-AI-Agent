@@ -7,7 +7,6 @@ import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
-import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -38,6 +37,8 @@ import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -50,10 +51,19 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.kolo.agent.core.designsystem.EmptyState
+import com.kolo.agent.core.designsystem.KoloIconButton
+import com.kolo.agent.core.designsystem.destructiveOutlinedButtonColors
+import com.kolo.agent.core.designsystem.destructiveTextButtonColors
+import com.kolo.agent.core.designsystem.KoloSnackbarHost
+import com.kolo.agent.core.designsystem.LocalMessageSink
 import com.kolo.agent.core.designsystem.Spacing
+import com.kolo.agent.core.designsystem.UiMessage
+import com.kolo.agent.core.designsystem.rememberKoloSnackbarController
 import com.kolo.agent.core.model.*
 import com.kolo.agent.core.providers.local.LocalModelManager
 import com.kolo.agent.feature.chat.ChatUiState
+import kotlinx.coroutines.flow.Flow
 import java.text.DateFormat
 import java.util.Calendar
 import java.util.Date
@@ -85,9 +95,16 @@ fun ChatScreen(
     onDenyOnce: (ToolPermissionApproval) -> Unit = {},
     onBlock: (ToolPermissionApproval) -> Unit = {},
     onClearPendingApproval: () -> Unit = {},
+    messages: Flow<UiMessage> = kotlinx.coroutines.flow.emptyFlow(),
 ) {
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
+
+    val snackbarController = rememberKoloSnackbarController()
+    // Surface VM results (errors, etc.) and provide a sink deep call sites (clipboard,
+    // menu actions) can post to without threading a coroutine scope everywhere.
+    LaunchedEffect(Unit) { messages.collect { snackbarController.show(it) } }
+    val sink: (UiMessage) -> Unit = { msg -> scope.launch { snackbarController.show(msg) } }
 
     ModalNavigationDrawer(
         drawerState = drawerState,
@@ -123,25 +140,28 @@ fun ChatScreen(
             )
         },
     ) {
-        ChatContent(
-            state = state,
-            onSendMessage = onSendMessage,
-            onCancel = onCancel,
-            onClearError = onClearError,
-            onOpenDrawer = { scope.launch { drawerState.open() } },
-            onNavigateSettings = onNavigateSettings,
-            onNavigateLocalModels = onNavigateLocalModels,
-            sendDisabledReason = state.activeProviderReadinessError,
-            localBridgeStatus = state.localBridgeStatus,
-            onSetActiveModel = onSetActiveModel,
-            onRefreshActiveModels = onRefreshActiveModels,
-            onUsePromptTemplate = onUsePromptTemplate,
-            onAllowOnce = onAllowOnce,
-            onAlwaysAllow = onAlwaysAllow,
-            onDenyOnce = onDenyOnce,
-            onBlock = onBlock,
-            onClearPendingApproval = onClearPendingApproval,
-        )
+        CompositionLocalProvider(LocalMessageSink provides sink) {
+            ChatContent(
+                state = state,
+                onSendMessage = onSendMessage,
+                onCancel = onCancel,
+                onClearError = onClearError,
+                onOpenDrawer = { scope.launch { drawerState.open() } },
+                onNavigateSettings = onNavigateSettings,
+                onNavigateLocalModels = onNavigateLocalModels,
+                sendDisabledReason = state.activeProviderReadinessError,
+                localBridgeStatus = state.localBridgeStatus,
+                onSetActiveModel = onSetActiveModel,
+                onRefreshActiveModels = onRefreshActiveModels,
+                onUsePromptTemplate = onUsePromptTemplate,
+                onAllowOnce = onAllowOnce,
+                onAlwaysAllow = onAlwaysAllow,
+                onDenyOnce = onDenyOnce,
+                onBlock = onBlock,
+                onClearPendingApproval = onClearPendingApproval,
+                snackbarController = snackbarController,
+            )
+        }
     }
 }
 
@@ -268,9 +288,12 @@ private fun ChatDrawer(
             leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null, modifier = Modifier.size(18.dp)) },
             trailingIcon = {
                 if (searchQuery.isNotBlank()) {
-                    IconButton(onClick = { onSetSearchQuery("") }, modifier = Modifier.size(20.dp)) {
-                        Icon(Icons.Filled.Close, contentDescription = "Clear search", modifier = Modifier.size(14.dp))
-                    }
+                    KoloIconButton(
+                        onClick = { onSetSearchQuery("") },
+                        contentDescription = "Clear search",
+                        icon = Icons.Filled.Close,
+                        iconSize = 16.dp,
+                    )
                 }
             },
             textStyle = MaterialTheme.typography.bodySmall,
@@ -342,6 +365,15 @@ private fun ChatDrawer(
             modifier = Modifier.weight(1f).fillMaxWidth(),
             contentPadding = PaddingValues(vertical = 4.dp),
         ) {
+            if (chats.isEmpty()) {
+                item {
+                    EmptyState(
+                        icon = if (searchQuery.isNotBlank()) Icons.Filled.Search else Icons.Filled.ChatBubbleOutline,
+                        title = if (searchQuery.isNotBlank()) "No chats match" else "No chats yet",
+                        subtitle = if (searchQuery.isNotBlank()) "No chats match \"$searchQuery\"." else "Start a new chat to begin.",
+                    )
+                }
+            }
             items(chats, key = { it.id.value }) { chat ->
                 val isCurrent = chat.id == currentChatId
                 NavigationDrawerItem(
@@ -371,12 +403,12 @@ private fun ChatDrawer(
                     },
                     badge = {
                         Row {
-                            IconButton(
+                            KoloIconButton(
                                 onClick = { openMenuChatId = chat.id },
-                                modifier = Modifier.size(24.dp),
-                            ) {
-                                Icon(Icons.Filled.MoreVert, contentDescription = "Chat actions", modifier = Modifier.size(16.dp))
-                            }
+                                contentDescription = "Chat actions",
+                                icon = Icons.Filled.MoreVert,
+                                iconSize = 18.dp,
+                            )
                             DropdownMenu(expanded = openMenuChatId == chat.id, onDismissRequest = { openMenuChatId = null }) {
                                 DropdownMenuItem(
                                     text = { Text(if (chat.isPinned) "Unpin" else "Pin") },
@@ -497,7 +529,7 @@ private fun ChatDrawer(
                         onDeleteChat(chatId)
                         pendingDeleteChat = null
                     },
-                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                    colors = destructiveTextButtonColors(),
                 ) { Text("Delete") }
             },
             dismissButton = { TextButton(onClick = { pendingDeleteChat = null }) { Text("Cancel") } },
@@ -519,7 +551,7 @@ private fun ChatDrawer(
                         onDeleteFolder(folder.id)
                         pendingDeleteFolder = null
                     },
-                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                    colors = destructiveTextButtonColors(),
                 ) { Text("Delete") }
             },
             dismissButton = { TextButton(onClick = { pendingDeleteFolder = null }) { Text("Cancel") } },
@@ -568,8 +600,10 @@ private fun ChatContent(
     onDenyOnce: (ToolPermissionApproval) -> Unit,
     onBlock: (ToolPermissionApproval) -> Unit,
     onClearPendingApproval: () -> Unit,
+    snackbarController: com.kolo.agent.core.designsystem.KoloSnackbarController,
 ) {
     val context = LocalContext.current
+    val messageSink = LocalMessageSink.current
     var inputText by rememberSaveable { mutableStateOf("") }
     var pendingAttachments by remember { mutableStateOf<List<MessageAttachment>>(emptyList()) }
     val listState = rememberLazyListState()
@@ -638,6 +672,7 @@ private fun ChatContent(
                 modelFetchStatus = state.modelFetchStatus,
             )
         },
+        snackbarHost = { KoloSnackbarHost(snackbarController) },
         bottomBar = {
             ChatInputBar(
                 value = inputText,
@@ -662,14 +697,18 @@ private fun ChatContent(
                 onCancel = onCancel,
                 promptTemplates = state.promptTemplates,
                     onInsertPrompt = { template ->
-                        Toast.makeText(context, "Template \"${template.name}\" inserted", Toast.LENGTH_SHORT).show()
+                        messageSink(UiMessage("Template \"${template.name}\" inserted"))
                         inputText = if (inputText.isBlank()) template.body else "${inputText.trimEnd()}\n\n${template.body}"
                         onUsePromptTemplate(template.id)
                     },
                 )
             },
             floatingActionButton = {
-                if (showScrollToBottom && state.messages.isNotEmpty()) {
+                AnimatedVisibility(
+                    visible = showScrollToBottom && state.messages.isNotEmpty(),
+                    enter = scaleIn() + fadeIn(),
+                    exit = scaleOut() + fadeOut(),
+                ) {
                     FloatingActionButton(
                         onClick = {
                             val last = (timelineItemCount - 1).coerceAtLeast(0)
@@ -690,34 +729,46 @@ private fun ChatContent(
                     .padding(paddingValues)
         ) {
             // Error banner
-            state.error?.let { errorStr ->
-                ErrorBanner(error = errorStr, onDismiss = onClearError)
+            AnimatedVisibility(
+                visible = state.error != null,
+                enter = expandVertically() + fadeIn(),
+                exit = shrinkVertically() + fadeOut(),
+            ) {
+                state.error?.let { errorStr ->
+                    ErrorBanner(error = errorStr, onDismiss = onClearError)
+                }
             }
 
             // Tool approval banner
-            state.pendingApproval?.let { approval ->
-                ToolApprovalBanner(
-                    approval = approval,
-                    onAllowOnce = {
-                        Toast.makeText(context, "Allowed ${approval.toolName} once", Toast.LENGTH_SHORT).show()
-                        onAllowOnce(approval)
-                    },
-                    onAlwaysAllow = {
-                        Toast.makeText(context, "Always allowed ${approval.toolName}", Toast.LENGTH_SHORT).show()
-                        onAlwaysAllow(approval)
-                    },
-                    onDenyOnce = {
-                        Toast.makeText(context, "Denied ${approval.toolName} for this request", Toast.LENGTH_SHORT).show()
-                        onDenyOnce(approval)
-                    },
-                    onBlock = {
-                        Toast.makeText(context, "Blocked ${approval.toolName}", Toast.LENGTH_SHORT).show()
-                        onBlock(approval)
-                    },
-                    onClear = {
-                        onClearPendingApproval()
-                    },
-                )
+            AnimatedVisibility(
+                visible = state.pendingApproval != null,
+                enter = expandVertically() + fadeIn(),
+                exit = shrinkVertically() + fadeOut(),
+            ) {
+                state.pendingApproval?.let { approval ->
+                    ToolApprovalBanner(
+                        approval = approval,
+                        onAllowOnce = {
+                            messageSink(UiMessage("Allowed ${approval.toolName} once"))
+                            onAllowOnce(approval)
+                        },
+                        onAlwaysAllow = {
+                            messageSink(UiMessage.success("Always allowed ${approval.toolName}"))
+                            onAlwaysAllow(approval)
+                        },
+                        onDenyOnce = {
+                            messageSink(UiMessage("Denied ${approval.toolName} for this request"))
+                            onDenyOnce(approval)
+                        },
+                        onBlock = {
+                            messageSink(UiMessage.error("Blocked ${approval.toolName}"))
+                            onBlock(approval)
+                        },
+                        onClear = {
+                            onClearPendingApproval()
+                        },
+                    )
+                }
             }
 
             // Messages list
@@ -738,7 +789,9 @@ private fun ChatContent(
                         MessageDateSeparator(timestamp = message.createdAt)
                         Spacer(Modifier.height(2.dp))
                     }
-                    MessageBubble(message = message, isGroupedWithPrevious = !shouldStartNewGroup)
+                    Box(modifier = Modifier.animateItem()) {
+                        MessageBubble(message = message, isGroupedWithPrevious = !shouldStartNewGroup)
+                    }
                 }
 
                 if (state.isStreaming && state.streamingContent.isNotEmpty()) {
@@ -777,8 +830,14 @@ private fun ChatContent(
 
             // Token usage
             if (state.showTokenUsage) {
-                state.tokenUsage?.let { usage ->
-                    TokenUsageBar(usage = usage)
+                AnimatedVisibility(
+                    visible = state.tokenUsage != null,
+                    enter = expandVertically() + fadeIn(),
+                    exit = shrinkVertically() + fadeOut(),
+                ) {
+                    state.tokenUsage?.let { usage ->
+                        TokenUsageBar(usage = usage)
+                    }
                 }
             }
         }
@@ -841,7 +900,7 @@ private fun ChatHeader(
                 .statusBarsPadding(),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            IconButton(onClick = onOpenDrawer, modifier = Modifier.size(40.dp)) {
+            IconButton(onClick = onOpenDrawer) {
                 Icon(Icons.Filled.Menu, contentDescription = "Chat list", modifier = Modifier.size(22.dp))
             }
             // Title + subtitle column doubles as the model picker trigger. Tapping it
@@ -864,10 +923,8 @@ private fun ChatHeader(
                         Text(
                             text = provider ?: "Kolo AI",
                             style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.SemiBold,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
-                            lineHeight = 18.sp,
                         )
                         if (isRefreshingModels) {
                             Spacer(modifier = Modifier.width(6.dp))
@@ -880,7 +937,6 @@ private fun ChatHeader(
                                 text = activeModelDisplay,
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                lineHeight = 14.sp,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier.weight(1f, fill = false),
@@ -907,7 +963,6 @@ private fun ChatHeader(
                             text = "No provider configured",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.error,
-                            lineHeight = 14.sp,
                         )
                     }
                     modelFetchStatus?.takeIf { it.isNotBlank() }?.let {
@@ -961,9 +1016,12 @@ private fun ChatHeader(
                                 textStyle = MaterialTheme.typography.bodySmall,
                                 trailingIcon = {
                                     if (modelSearch.isNotBlank()) {
-                                        IconButton(onClick = { modelSearch = "" }, modifier = Modifier.size(16.dp)) {
-                                            Icon(Icons.Filled.Close, contentDescription = "Clear", modifier = Modifier.size(12.dp))
-                                        }
+                                        KoloIconButton(
+                                            onClick = { modelSearch = "" },
+                                            contentDescription = "Clear",
+                                            icon = Icons.Filled.Close,
+                                            iconSize = 14.dp,
+                                        )
                                     }
                                 },
                             )
@@ -1022,7 +1080,7 @@ private fun ChatHeader(
                 }
             }
 
-            IconButton(onClick = onSettings, modifier = Modifier.size(40.dp)) {
+            IconButton(onClick = onSettings) {
                 Icon(Icons.Filled.Settings, contentDescription = "Settings", modifier = Modifier.size(22.dp))
             }
         }
@@ -1077,9 +1135,11 @@ private fun ToolApprovalBanner(
                 if (approval.permission == ToolPermission.dangerous) {
                     Badge(contentColor = MaterialTheme.colorScheme.onErrorContainer) { Text("!", style = MaterialTheme.typography.labelSmall) }
                 }
-                IconButton(onClick = onClear, modifier = Modifier.size(20.dp)) {
-                    Icon(Icons.Filled.Close, contentDescription = "Dismiss")
-                }
+                KoloIconButton(
+                    onClick = onClear,
+                    contentDescription = "Dismiss",
+                    icon = Icons.Filled.Close,
+                )
             }
 
             if (approval.arguments.isNotBlank()) {
@@ -1124,7 +1184,7 @@ private fun ToolApprovalBanner(
                     onClick = onDenyOnce,
                     modifier = Modifier.weight(1f),
                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                    colors = destructiveOutlinedButtonColors(),
                 ) { Text("Deny", style = MaterialTheme.typography.labelSmall) }
 
                 if (approval.permission == ToolPermission.dangerous || approval.permission == ToolPermission.sensitive) {
@@ -1153,6 +1213,7 @@ private fun MessageBubble(
     val configuration = LocalConfiguration.current
     val maxWidthDp = (configuration.screenWidthDp * maxWidthFraction).dp
     val context = LocalContext.current
+    val messageSink = LocalMessageSink.current
     var showBubbleMenu by remember { mutableStateOf(false) }
     val timeText = remember(message.createdAt) {
         DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(message.createdAt))
@@ -1194,6 +1255,14 @@ private fun MessageBubble(
                 tonalElevation = if (!isUser) 0.5.dp else 0.dp,
                 modifier = Modifier
                     .widthIn(max = maxWidthDp)
+                    .semantics(mergeDescendants = true) {
+                        contentDescription = when (message.role) {
+                            MessageRole.user -> "Your message"
+                            MessageRole.tool -> "Tool result"
+                            MessageRole.assistant -> "Assistant message"
+                            else -> "Message"
+                        }
+                    }
                     .combinedClickable(
                         onClick = {},
                         onLongClick = { showBubbleMenu = true },
@@ -1214,6 +1283,8 @@ private fun MessageBubble(
                         Spacer(modifier = Modifier.width(3.dp))
                         Text(
                             text = message.toolName ?: "Tool",
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             fontWeight = FontWeight.Medium,
@@ -1241,12 +1312,12 @@ private fun MessageBubble(
                                 verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .clip(RoundedCornerShape(8.dp))
+                                    .clip(MaterialTheme.shapes.small)
                                     .background(
                                         if (isUser) MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.14f)
                                         else MaterialTheme.colorScheme.surface.copy(alpha = 0.72f)
                                     )
-                                    .clickable { openMessageAttachment(context, attachment) }
+                                    .clickable { openMessageAttachment(context, attachment, messageSink) }
                                     .padding(horizontal = 8.dp, vertical = 4.dp),
                             ) {
                                 Icon(
@@ -1264,12 +1335,18 @@ private fun MessageBubble(
                                     overflow = TextOverflow.Ellipsis,
                                     modifier = Modifier.weight(1f),
                                 )
-                                IconButton(onClick = { openMessageAttachment(context, attachment) }, modifier = Modifier.size(18.dp)) {
-                                    Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = "Open", modifier = Modifier.size(12.dp))
-                                }
-                                IconButton(onClick = { copyTextToClipboard(context, attachment.name) }, modifier = Modifier.size(18.dp)) {
-                                    Icon(Icons.Filled.ContentCopy, contentDescription = "Copy filename", modifier = Modifier.size(12.dp))
-                                }
+                                KoloIconButton(
+                                    onClick = { openMessageAttachment(context, attachment, messageSink) },
+                                    contentDescription = "Open",
+                                    icon = Icons.AutoMirrored.Filled.OpenInNew,
+                                    iconSize = 14.dp,
+                                )
+                                KoloIconButton(
+                                    onClick = { copyTextToClipboard(context, attachment.name, messageSink) },
+                                    contentDescription = "Copy filename",
+                                    icon = Icons.Filled.ContentCopy,
+                                    iconSize = 14.dp,
+                                )
                             }
                         }
                     }
@@ -1303,7 +1380,7 @@ private fun MessageBubble(
                     enabled = message.content.isNotBlank(),
                     onClick = {
                         showBubbleMenu = false
-                        copyMessageToClipboard(context, message.content)
+                        copyMessageToClipboard(context, message.content, messageSink)
                     },
                 )
                 DropdownMenuItem(
@@ -1312,7 +1389,7 @@ private fun MessageBubble(
                     enabled = message.content.isNotBlank(),
                     onClick = {
                         showBubbleMenu = false
-                        copyMessageToClipboard(context, message.content, quote = true)
+                        copyMessageToClipboard(context, message.content, messageSink, quote = true)
                     },
                 )
             }
@@ -1320,7 +1397,12 @@ private fun MessageBubble(
     }
 }
 
-private fun copyMessageToClipboard(context: Context, text: String, quote: Boolean = false) {
+private fun copyMessageToClipboard(
+    context: Context,
+    text: String,
+    messageSink: com.kolo.agent.core.designsystem.MessageSink,
+    quote: Boolean = false,
+) {
     val copiedText = if (quote) {
         text.lineSequence().joinToString("\n") { "> $it" } + "\n"
     } else {
@@ -1328,16 +1410,24 @@ private fun copyMessageToClipboard(context: Context, text: String, quote: Boolea
     }
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     clipboard.setPrimaryClip(ClipData.newPlainText(if (quote) "Kolo message quote" else "Kolo message", copiedText))
-    Toast.makeText(context, if (quote) "Quoted message copied" else "Message copied", Toast.LENGTH_SHORT).show()
+    messageSink(UiMessage(if (quote) "Quoted message copied" else "Message copied"))
 }
 
-private fun copyTextToClipboard(context: Context, text: String) {
+private fun copyTextToClipboard(
+    context: Context,
+    text: String,
+    messageSink: com.kolo.agent.core.designsystem.MessageSink,
+) {
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     clipboard.setPrimaryClip(ClipData.newPlainText("Kolo attachment", text))
-    Toast.makeText(context, "Attachment copied", Toast.LENGTH_SHORT).show()
+    messageSink(UiMessage("Attachment copied"))
 }
 
-private fun openMessageAttachment(context: Context, attachment: MessageAttachment) {
+private fun openMessageAttachment(
+    context: Context,
+    attachment: MessageAttachment,
+    messageSink: com.kolo.agent.core.designsystem.MessageSink,
+) {
     val uri = Uri.parse(attachment.uri)
     val openIntent = Intent(Intent.ACTION_VIEW).apply {
         setDataAndType(uri, attachment.mimeType)
@@ -1346,9 +1436,9 @@ private fun openMessageAttachment(context: Context, attachment: MessageAttachmen
     try {
         context.startActivity(Intent.createChooser(openIntent, "Open attachment"))
     } catch (_: ActivityNotFoundException) {
-        Toast.makeText(context, "No app available to open ${attachment.name}", Toast.LENGTH_SHORT).show()
+        messageSink(UiMessage.error("No app available to open ${attachment.name}"))
     } catch (_: Exception) {
-        Toast.makeText(context, "Unable to open ${attachment.name}", Toast.LENGTH_SHORT).show()
+        messageSink(UiMessage.error("Unable to open ${attachment.name}"))
     }
 }
 
@@ -1504,7 +1594,7 @@ private fun EmptyChatState(
             modifier = Modifier.size(36.dp),
         )
         Spacer(modifier = Modifier.height(8.dp))
-        Text("How can I help you?", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        Text("How can I help you?", style = MaterialTheme.typography.titleMedium)
         Spacer(modifier = Modifier.height(4.dp))
         if (providerReadinessError == null && hasProvider) {
             Text(
@@ -1597,10 +1687,14 @@ private fun ErrorBanner(error: String, onDismiss: () -> Unit) {
         Row(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             Icon(Icons.Filled.Warning, contentDescription = "Error", tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(16.dp))
             Spacer(modifier = Modifier.width(6.dp))
-            Text(error, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onErrorContainer, modifier = Modifier.weight(1f))
-            IconButton(onClick = onDismiss, modifier = Modifier.size(20.dp)) {
-                Icon(Icons.Filled.Close, contentDescription = "Dismiss", tint = MaterialTheme.colorScheme.onErrorContainer, modifier = Modifier.size(14.dp))
-            }
+            Text(error, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onErrorContainer, maxLines = 3, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            KoloIconButton(
+                onClick = onDismiss,
+                contentDescription = "Dismiss",
+                icon = Icons.Filled.Close,
+                iconSize = 16.dp,
+                tint = MaterialTheme.colorScheme.onErrorContainer,
+            )
         }
     }
 }
@@ -1637,6 +1731,7 @@ private fun ChatInputBar(
     var showAllAttachments by remember { mutableStateOf(false) }
     var pickerHint by remember { mutableStateOf<String?>(null) }
     val context = LocalContext.current
+    val messageSink = LocalMessageSink.current
     val maxAttachments = 8
     val attachmentPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.GetMultipleContents(),
@@ -1646,7 +1741,7 @@ private fun ChatInputBar(
             runCatching { context.toMessageAttachment(uri) }.getOrNull()
         }
         if (parsed.isEmpty()) {
-            Toast.makeText(context, "No valid attachments were selected", Toast.LENGTH_SHORT).show()
+            messageSink(UiMessage.error("No valid attachments were selected"))
             return@rememberLauncherForActivityResult
         }
         val supported = parsed.filter { isSupportedChatAttachment(it) }
@@ -1685,7 +1780,6 @@ private fun ChatInputBar(
         ) {
             IconButton(
                 onClick = { showPromptLibrary = true },
-                modifier = Modifier.size(36.dp),
                 enabled = promptTemplates.isNotEmpty(),
             ) {
                 BadgedBox(
@@ -1710,7 +1804,6 @@ private fun ChatInputBar(
             }
             IconButton(
                 onClick = { attachmentPicker.launch("*/*") },
-                modifier = Modifier.size(36.dp),
                 enabled = !isStreaming,
             ) {
                 Icon(Icons.Filled.AttachFile, contentDescription = "Attach", modifier = Modifier.size(20.dp))
@@ -1736,13 +1829,15 @@ private fun ChatInputBar(
                                 },
                                 leadingIcon = { Icon(if (attachment.kind == "image") Icons.Filled.Image else Icons.Filled.AttachFile, contentDescription = null, modifier = Modifier.size(14.dp)) },
                                 trailingIcon = {
-                                    IconButton(
+                                    KoloIconButton(
                                         onClick = {
                                             onAttachmentsChanged(attachments - attachment)
                                             pickerHint = null
                                         },
-                                        modifier = Modifier.size(20.dp),
-                                    ) { Icon(Icons.Filled.Close, contentDescription = "Remove", modifier = Modifier.size(14.dp)) }
+                                        contentDescription = "Remove",
+                                        icon = Icons.Filled.Close,
+                                        iconSize = 16.dp,
+                                    )
                                 },
                                 modifier = Modifier.weight(1f, fill = false).height(32.dp),
                             )
@@ -1789,32 +1884,36 @@ private fun ChatInputBar(
                 )
             }
 
-            if (isStreaming) {
-                FilledIconButton(
-                    onClick = onCancel,
-                    modifier = Modifier.size(36.dp),
-                    shape = CircleShape,
-                    colors = IconButtonDefaults.filledIconButtonColors(
-                        containerColor = MaterialTheme.colorScheme.errorContainer,
-                        contentColor = MaterialTheme.colorScheme.onErrorContainer,
-                    ),
-                ) {
-                    Icon(Icons.Filled.Stop, contentDescription = "Stop", modifier = Modifier.size(18.dp))
-                }
-            } else {
-                FilledIconButton(
-                    onClick = onSend,
-                    modifier = Modifier.size(36.dp),
-                    shape = CircleShape,
-                    enabled = sendDisabledReason == null && !isStreaming && (value.isNotBlank() || attachments.isNotEmpty()),
-                    colors = IconButtonDefaults.filledIconButtonColors(
-                        containerColor = MaterialTheme.colorScheme.primary,
-                        contentColor = MaterialTheme.colorScheme.onPrimary,
-                        disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-                        disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f),
-                    ),
-                ) {
-                    Icon(Icons.Filled.ArrowUpward, contentDescription = "Send", modifier = Modifier.size(18.dp))
+            AnimatedContent(
+                targetState = isStreaming,
+                transitionSpec = { (scaleIn() + fadeIn()) togetherWith (scaleOut() + fadeOut()) },
+                label = "send-stop",
+            ) { streaming ->
+                if (streaming) {
+                    FilledIconButton(
+                        onClick = onCancel,
+                        shape = CircleShape,
+                        colors = IconButtonDefaults.filledIconButtonColors(
+                            containerColor = MaterialTheme.colorScheme.errorContainer,
+                            contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                        ),
+                    ) {
+                        Icon(Icons.Filled.Stop, contentDescription = "Stop", modifier = Modifier.size(18.dp))
+                    }
+                } else {
+                    FilledIconButton(
+                        onClick = onSend,
+                        shape = CircleShape,
+                        enabled = sendDisabledReason == null && !isStreaming && (value.isNotBlank() || attachments.isNotEmpty()),
+                        colors = IconButtonDefaults.filledIconButtonColors(
+                            containerColor = MaterialTheme.colorScheme.primary,
+                            contentColor = MaterialTheme.colorScheme.onPrimary,
+                            disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                            disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f),
+                        ),
+                    ) {
+                        Icon(Icons.Filled.ArrowUpward, contentDescription = "Send", modifier = Modifier.size(18.dp))
+                    }
                 }
             }
         }
@@ -1828,7 +1927,7 @@ private fun ChatInputBar(
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     attachments.forEach { attachment ->
                         Surface(
-                            onClick = { openMessageAttachment(context, attachment) },
+                            onClick = { openMessageAttachment(context, attachment, messageSink) },
                             shape = MaterialTheme.shapes.small,
                             color = MaterialTheme.colorScheme.surfaceVariant,
                             modifier = Modifier.fillMaxWidth(),
@@ -1847,12 +1946,15 @@ private fun ChatInputBar(
                                     Text(attachment.name, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                     Text(attachment.mimeType, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
-                                IconButton(onClick = {
-                                    onAttachmentsChanged(attachments - attachment)
-                                    pickerHint = null
-                                }, modifier = Modifier.size(20.dp)) {
-                                    Icon(Icons.Filled.Close, contentDescription = "Remove", modifier = Modifier.size(12.dp))
-                                }
+                                KoloIconButton(
+                                    onClick = {
+                                        onAttachmentsChanged(attachments - attachment)
+                                        pickerHint = null
+                                    },
+                                    contentDescription = "Remove",
+                                    icon = Icons.Filled.Close,
+                                    iconSize = 14.dp,
+                                )
                             }
                         }
                     }
@@ -1888,7 +1990,7 @@ private fun PromptLibrarySheet(
                 .navigationBarsPadding()
                 .padding(horizontal = 16.dp, vertical = 8.dp),
         ) {
-            Text("Prompt Library", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            Text("Prompt Library", style = MaterialTheme.typography.titleMedium)
             Spacer(modifier = Modifier.height(8.dp))
             LazyColumn(
                 modifier = Modifier.heightIn(max = 360.dp),

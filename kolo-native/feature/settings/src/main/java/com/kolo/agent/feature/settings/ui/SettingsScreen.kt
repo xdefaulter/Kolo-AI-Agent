@@ -16,14 +16,24 @@ import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import java.text.DateFormat
 import java.util.Date
+import com.kolo.agent.core.designsystem.EmptyState
+import com.kolo.agent.core.designsystem.KoloIconButton
+import com.kolo.agent.core.designsystem.KoloSnackbarHost
 import com.kolo.agent.core.designsystem.Spacing
+import com.kolo.agent.core.designsystem.destructiveTextButtonColors
+import com.kolo.agent.core.designsystem.destructiveTonalButtonColors
+import com.kolo.agent.core.designsystem.UiMessage
+import com.kolo.agent.core.designsystem.rememberKoloSnackbarController
 import com.kolo.agent.core.model.*
 import com.kolo.agent.core.model.ToolPermission
 import com.kolo.agent.core.providers.local.LocalModelManager
@@ -67,7 +77,11 @@ fun SettingsScreen(
     onSetShowTokenUsage: (Boolean) -> Unit = {},
     onNavigateLocalModels: () -> Unit = {},
     onNavigateBack: () -> Unit,
+    messages: kotlinx.coroutines.flow.Flow<UiMessage> = kotlinx.coroutines.flow.emptyFlow(),
 ) {
+    val snackbarController = rememberKoloSnackbarController()
+    LaunchedEffect(Unit) { messages.collect { snackbarController.show(it) } }
+
     var selectedSection by rememberSaveable(
         saver = Saver(
             save = { it.value?.name },
@@ -84,7 +98,8 @@ fun SettingsScreen(
                     Text(
                         text = if (currentSection == null) "Settings" else "Settings / ${currentSection.title}",
                         style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 },
                 navigationIcon = {
@@ -100,6 +115,7 @@ fun SettingsScreen(
                 ),
             )
         },
+        snackbarHost = { KoloSnackbarHost(snackbarController) },
     ) { paddingValues ->
         AnimatedContent(
             targetState = selectedSection,
@@ -349,7 +365,9 @@ private fun SettingsHome(
 }
 
 @Composable private fun SectionHeader(text: String) {
-    Text(text, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(start = Spacing.screen, top = 10.dp, bottom = 4.dp))
+    Text(text, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold, modifier = Modifier
+        .padding(start = Spacing.screen, top = 10.dp, bottom = 4.dp)
+        .semantics { heading() })
 }
 
 @Composable
@@ -393,6 +411,15 @@ private fun ProvidersSection(
     val existingProviderNames = remember(providers) { providers.map { it.name.lowercase() }.toSet() }
 
     LazyColumn(modifier = Modifier.fillMaxSize().padding(horizontal = Spacing.screen), contentPadding = PaddingValues(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        if (providers.isEmpty()) {
+            item {
+                EmptyState(
+                    icon = Icons.Filled.Dns,
+                    title = "No providers yet",
+                    subtitle = "Add a provider to start chatting. Connect to OpenAI, a compatible API, or run a local model.",
+                )
+            }
+        }
         item {
             FilledTonalButton(onClick = { showAddDialog = true }, modifier = Modifier.fillMaxWidth()) {
                 Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(16.dp))
@@ -435,7 +462,7 @@ private fun ProvidersSection(
                         onDeleteProvider(provider.id)
                         pendingDeleteProvider = null
                     },
-                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                    colors = destructiveTextButtonColors(),
                 ) { Text("Delete") }
             },
             dismissButton = { TextButton(onClick = { pendingDeleteProvider = null }) { Text("Cancel") } },
@@ -637,9 +664,12 @@ private fun ProviderCard(
                                                 textStyle = MaterialTheme.typography.bodySmall,
                                                 trailingIcon = {
                                                     if (modelSearch.isNotBlank()) {
-                                                        IconButton(onClick = { modelSearch = "" }, modifier = Modifier.size(16.dp)) {
-                                                            Icon(Icons.Filled.Close, contentDescription = "Clear", modifier = Modifier.size(12.dp))
-                                                        }
+                                                        KoloIconButton(
+                                                            onClick = { modelSearch = "" },
+                                                            contentDescription = "Clear",
+                                                            icon = Icons.Filled.Close,
+                                                            iconSize = 14.dp,
+                                                        )
                                                     }
                                                 },
                                             )
@@ -686,7 +716,7 @@ private fun ProviderCard(
                     Row(Modifier.fillMaxWidth(), Arrangement.spacedBy(6.dp)) {
                         if (!isActive) { OutlinedButton(onClick = onSetActive, contentPadding = PaddingValues(horizontal = 12.dp)) { Text("Set Active", style = MaterialTheme.typography.labelSmall) } }
                         OutlinedButton(onClick = { showEditDialog = true }, contentPadding = PaddingValues(horizontal = 12.dp)) { Text("Edit", style = MaterialTheme.typography.labelSmall) }
-                        FilledTonalButton(onClick = onDelete, colors = ButtonDefaults.filledTonalButtonColors(containerColor = MaterialTheme.colorScheme.errorContainer, contentColor = MaterialTheme.colorScheme.onErrorContainer), contentPadding = PaddingValues(horizontal = 12.dp)) { Text("Delete", style = MaterialTheme.typography.labelSmall) }
+                        FilledTonalButton(onClick = onDelete, colors = destructiveTonalButtonColors(), contentPadding = PaddingValues(horizontal = 12.dp)) { Text("Delete", style = MaterialTheme.typography.labelSmall) }
                     }
                 }
             }
@@ -716,6 +746,7 @@ private fun AddProviderDialog(
     var baseUrl by remember { mutableStateOf("") }
     var apiKey by remember { mutableStateOf("") }
     var modelPath by remember { mutableStateOf("") }
+    var apiKeyVisible by remember { mutableStateOf(false) }
     var providerKind by remember { mutableStateOf(ProviderKind.openaiCompat) }
     var selectedPreset by remember { mutableStateOf(-1) }
     val presets = remember { ProviderPresets.defaults }
@@ -834,7 +865,22 @@ private fun AddProviderDialog(
                     isError = baseUrlError != null,
                     supportingText = baseUrlError?.let { { Text(it) } },
                 )
-                OutlinedTextField(value = apiKey, onValueChange = { apiKey = it }, label = { Text("API Key") }, singleLine = true, modifier = Modifier.fillMaxWidth(), visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password))
+                OutlinedTextField(
+                    value = apiKey,
+                    onValueChange = { apiKey = it },
+                    label = { Text("API Key") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    visualTransformation = if (apiKeyVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    trailingIcon = {
+                        KoloIconButton(
+                            onClick = { apiKeyVisible = !apiKeyVisible },
+                            contentDescription = if (apiKeyVisible) "Hide API key" else "Show API key",
+                            icon = if (apiKeyVisible) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                        )
+                    },
+                )
             }
         }
     }, confirmButton = {
@@ -888,6 +934,7 @@ private fun ProviderDetailDialog(
     var baseUrl by remember(provider.id) { mutableStateOf(provider.baseUrl) }
     var modelsEndpoint by remember(provider.id) { mutableStateOf(provider.modelsEndpoint.orEmpty()) }
     var apiKey by remember(provider.id) { mutableStateOf("") }
+    var apiKeyVisible by remember { mutableStateOf(false) }
     var headers by remember(provider.id) {
         mutableStateOf(provider.customHeaders.entries.joinToString("\n") { "${it.key}: ${it.value}" })
     }
@@ -961,7 +1008,24 @@ private fun ProviderDetailDialog(
                             supportingText = modelsEndpointError?.let { { Text(it) } },
                         )
                     }
-                    item { OutlinedTextField(value = apiKey, onValueChange = { apiKey = it }, label = { Text("API key (leave blank to keep)") }, singleLine = true, modifier = Modifier.fillMaxWidth(), visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password)) }
+                    item {
+                        OutlinedTextField(
+                            value = apiKey,
+                            onValueChange = { apiKey = it },
+                            label = { Text("API key (leave blank to keep)") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                            visualTransformation = if (apiKeyVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                            trailingIcon = {
+                                KoloIconButton(
+                                    onClick = { apiKeyVisible = !apiKeyVisible },
+                                    contentDescription = if (apiKeyVisible) "Hide API key" else "Show API key",
+                                    icon = if (apiKeyVisible) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                )
+                            },
+                        )
+                    }
                     item {
                         OutlinedTextField(
                             value = headers,
@@ -1129,7 +1193,7 @@ private fun CustomToolsSection(
         item {
             Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
                 Column {
-                    Text("Custom Tools", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                    Text("Custom Tools", style = MaterialTheme.typography.titleSmall, modifier = Modifier.semantics { heading() })
                     Text("${tools.size} saved", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 FilledTonalButton(onClick = {
@@ -1153,7 +1217,7 @@ private fun CustomToolsSection(
             )
         }
         if (tools.isEmpty()) {
-            item { Text("No custom tools yet.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            item { EmptyState(icon = Icons.Filled.Extension, title = "No custom tools yet", subtitle = "Create a tool to let the agent run custom prompts or chained actions.") }
         }
         items(filteredTools, key = { it.id.value }) { tool ->
             ListItem(
@@ -1176,7 +1240,7 @@ private fun CustomToolsSection(
             )
         }
         if (filteredTools.isEmpty() && query.isNotBlank()) {
-            item { Text("No tools match \"$query\".", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            item { EmptyState(icon = Icons.Filled.Search, title = "No tools match", subtitle = "No custom tools match \"$query\".") }
         }
     }
     if (showDialog) {
@@ -1204,7 +1268,7 @@ private fun CustomToolsSection(
                         onDelete(tool.id.value)
                         pendingDeleteTool = null
                     },
-                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                    colors = destructiveTextButtonColors(),
                 ) { Text("Delete") }
             },
             dismissButton = { TextButton(onClick = { pendingDeleteTool = null }) { Text("Cancel") } },
@@ -1377,7 +1441,7 @@ private fun SkillsSection(
         item {
             Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
                 Column {
-                    Text("Skills", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                    Text("Skills", style = MaterialTheme.typography.titleSmall, modifier = Modifier.semantics { heading() })
                     Text("${skills.count { it.isEnabled }} enabled / ${skills.size} saved", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 FilledTonalButton(onClick = {
@@ -1400,7 +1464,7 @@ private fun SkillsSection(
             Spacer(Modifier.height(4.dp))
         }
         if (skills.isEmpty()) {
-            item { Text("No skills yet.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            item { EmptyState(icon = Icons.Filled.AutoStories, title = "No skills yet", subtitle = "Add a skill to give the agent reusable instructions for specific tasks.") }
         }
         items(filteredSkills, key = { it.id.value }) { skill ->
             ListItem(
@@ -1424,7 +1488,7 @@ private fun SkillsSection(
             )
         }
         if (filteredSkills.isEmpty() && query.isNotBlank()) {
-            item { Text("No skills match \"$query\".", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            item { EmptyState(icon = Icons.Filled.Search, title = "No skills match", subtitle = "No skills match \"$query\".") }
         }
     }
     if (showDialog) {
@@ -1452,7 +1516,7 @@ private fun SkillsSection(
                         onDelete(skill.id.value)
                         pendingDeleteSkill = null
                     },
-                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                    colors = destructiveTextButtonColors(),
                 ) { Text("Delete") }
             },
             dismissButton = { TextButton(onClick = { pendingDeleteSkill = null }) { Text("Cancel") } },
@@ -1526,7 +1590,7 @@ private fun MemorySection(memories: List<Memory>, onAdd: (String, String) -> Uni
     LazyColumn(modifier = Modifier.fillMaxSize().padding(Spacing.screen), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         item {
             Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
-                Column { Text("Agent Memory", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold); Text("${filteredMemories.size} of ${memories.size} memories", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                Column { Text("Agent Memory", style = MaterialTheme.typography.titleSmall, modifier = Modifier.semantics { heading() }); Text("${filteredMemories.size} of ${memories.size} memories", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                 FilledTonalButton(onClick = { showAddDialog = true }, contentPadding = PaddingValues(horizontal = 10.dp)) { Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(16.dp)); Spacer(Modifier.width(4.dp)); Text("Add", style = MaterialTheme.typography.labelMedium) }
             }
             Spacer(Modifier.height(6.dp))
@@ -1592,7 +1656,13 @@ private fun MemorySection(memories: List<Memory>, onAdd: (String, String) -> Uni
                         Text(memory.content, style = MaterialTheme.typography.bodySmall)
                         Text("Updated $updatedLabel", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                    IconButton(onClick = { pendingDeleteMemory = memory }, modifier = Modifier.size(20.dp)) { Icon(Icons.Filled.Close, contentDescription = "Delete", modifier = Modifier.size(12.dp), tint = MaterialTheme.colorScheme.error) }
+                    KoloIconButton(
+                        onClick = { pendingDeleteMemory = memory },
+                        contentDescription = "Delete",
+                        icon = Icons.Filled.Delete,
+                        iconSize = 16.dp,
+                        tint = MaterialTheme.colorScheme.error,
+                    )
                 }
             }
         }
@@ -1651,7 +1721,7 @@ private fun MemorySection(memories: List<Memory>, onAdd: (String, String) -> Uni
                         onDelete(memory.id.value)
                         pendingDeleteMemory = null
                     },
-                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                    colors = destructiveTextButtonColors(),
                 ) { Text("Delete") }
             },
             dismissButton = { TextButton(onClick = { pendingDeleteMemory = null }) { Text("Cancel") } },
@@ -1672,7 +1742,7 @@ private fun InstructionsSection(
     val hasUnsavedChanges = draft.trim() != customInstructions.trim()
     LazyColumn(modifier = Modifier.fillMaxSize().padding(Spacing.screen), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         item {
-            Text("Custom Instructions", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+            Text("Custom Instructions", style = MaterialTheme.typography.titleSmall, modifier = Modifier.semantics { heading() })
             Text("These instructions are added to every chat turn.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (hasUnsavedChanges) {
                 Text("Unsaved changes", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
@@ -1743,7 +1813,7 @@ private fun InstructionsSection(
                         onSave("")
                         showClearConfirm = false
                     },
-                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                    colors = destructiveTextButtonColors(),
                 ) { Text("Clear") }
             },
             dismissButton = {
@@ -1765,7 +1835,7 @@ private fun PhoneControlSection() {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Filled.PhoneAndroid, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
                         Spacer(Modifier.width(8.dp))
-                        Text("Phone Control", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                        Text("Phone Control", style = MaterialTheme.typography.titleSmall, modifier = Modifier.semantics { heading() })
                     }
                     Spacer(Modifier.height(8.dp))
                     Text("Required permission:", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)

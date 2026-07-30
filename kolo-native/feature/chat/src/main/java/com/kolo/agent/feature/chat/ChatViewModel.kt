@@ -15,6 +15,7 @@ import com.kolo.agent.core.database.dao.PromptTemplateDao
 import com.kolo.agent.core.database.entity.toDomain
 import com.kolo.agent.core.database.entity.toEntity
 import com.kolo.agent.core.database.repository.RoomMemoryRepository
+import com.kolo.agent.core.designsystem.UiMessage
 import com.kolo.agent.core.model.*
 import com.kolo.agent.core.model.api.ApiContentPart
 import com.kolo.agent.core.model.api.ApiMessage
@@ -96,6 +97,12 @@ class ChatViewModel @Inject constructor(
 
     private val _uiState = MutableStateFlow(ChatUiState())
     val uiState: StateFlow<ChatUiState> = _uiState.asStateFlow()
+
+    private val _messages = MutableSharedFlow<UiMessage>(extraBufferCapacity = 8)
+    val messages: SharedFlow<UiMessage> = _messages.asSharedFlow()
+
+    /** Emit a one-shot UI message (Snackbar) for UI-side events (clipboard, templates, etc.). */
+    fun emitMessage(message: UiMessage) { _messages.tryEmit(message) }
 
     private var currentChatId: ChatId? = null
     @Volatile private var isCancelled = false

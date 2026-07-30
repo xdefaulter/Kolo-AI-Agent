@@ -3,14 +3,18 @@ package com.kolo.agent.feature.settings
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.kolo.agent.core.designsystem.UiMessage
 import com.kolo.agent.core.providers.local.ImportedModel
 import com.kolo.agent.core.providers.local.LocalModelManager
 import com.kolo.agent.core.providers.ProviderRepository
 import com.kolo.agent.core.model.ProviderKind
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -38,6 +42,11 @@ class LocalModelViewModel @Inject constructor(
 
     private val _uiState = MutableStateFlow(LocalModelUiState())
     val uiState: StateFlow<LocalModelUiState> = _uiState.asStateFlow()
+
+    private val _messages = MutableSharedFlow<UiMessage>(extraBufferCapacity = 8)
+    val messages: SharedFlow<UiMessage> = _messages.asSharedFlow()
+
+    @Volatile private var lastImportUri: Uri? = null
 
     init {
         viewModelScope.launch {
@@ -88,13 +97,22 @@ class LocalModelViewModel @Inject constructor(
     }
 
     fun importModel(uri: Uri) {
+        lastImportUri = uri
         viewModelScope.launch { localModelManager.importModel(uri) }
+    }
+
+    /** Re-attempt the most recent import (e.g. after a transient failure). No-op if none. */
+    fun retryLastImport() {
+        lastImportUri?.let { importModel(it) }
     }
 
     fun deleteModel(model: ImportedModel) {
         viewModelScope.launch {
-            localModelManager.deleteModel(model)
-            checkLocalProvider()
+            runCatching {
+                localModelManager.deleteModel(model)
+                checkLocalProvider()
+            }.onSuccess { _messages.tryEmit(UiMessage.success("Model deleted")) }
+                .onFailure { _messages.tryEmit(UiMessage.error("Failed to delete model: ${it.message ?: "unknown error"}")) }
         }
     }
 
@@ -107,7 +125,10 @@ class LocalModelViewModel @Inject constructor(
     }
 
     fun setActiveModel(model: ImportedModel?) {
-        viewModelScope.launch { localModelManager.setActiveModel(model?.path) }
+        viewModelScope.launch {
+            runCatching { localModelManager.setActiveModel(model?.path) }
+                .onFailure { _messages.tryEmit(UiMessage.error("Failed to set active model: ${it.message ?: "unknown error"}")) }
+        }
     }
 
     fun setActiveModelPath(path: String) {
@@ -172,24 +193,27 @@ class LocalModelViewModel @Inject constructor(
     /** Create a Local llama.cpp provider if none exists. */
     fun ensureLocalProvider() {
         viewModelScope.launch {
-            val providers = providerRepository.getAllProviders()
-            if (providers.none { it.kind == ProviderKind.localLlama }) {
-                val config = com.kolo.agent.core.model.ProviderConfig(
-                    name = "Local llama.cpp",
-                    baseUrl = "llama.cpp://local",
-                    isActive = true,
-                    kind = ProviderKind.localLlama,
-                    models = listOf(com.kolo.agent.core.model.ModelConfig(
-                        modelId = "local-gguf",
-                        displayName = "Local GGUF",
-                        maxTokens = 1024,
-                        contextWindow = 4096,
+            runCatching {
+                val providers = providerRepository.getAllProviders()
+                if (providers.none { it.kind == ProviderKind.localLlama }) {
+                    val config = com.kolo.agent.core.model.ProviderConfig(
+                        name = "Local llama.cpp",
+                        baseUrl = "llama.cpp://local",
                         isActive = true,
-                    )),
-                )
-                providerRepository.saveProvider(config, "")
-                _uiState.value = _uiState.value.copy(hasLocalProvider = true)
-            }
+                        kind = ProviderKind.localLlama,
+                        models = listOf(com.kolo.agent.core.model.ModelConfig(
+                            modelId = "local-gguf",
+                            displayName = "Local GGUF",
+                            maxTokens = 1024,
+                            contextWindow = 4096,
+                            isActive = true,
+                        )),
+                    )
+                    providerRepository.saveProvider(config, "")
+                    _uiState.value = _uiState.value.copy(hasLocalProvider = true)
+                }
+            }.onSuccess { _messages.tryEmit(UiMessage.success("Local provider ready")) }
+                .onFailure { _messages.tryEmit(UiMessage.error("Failed to set up local provider: ${it.message ?: "unknown error"}")) }
         }
     }
 }

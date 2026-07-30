@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import com.kolo.agent.core.providers.local.LocalModelManager
 import com.kolo.agent.core.settings.AppSettings
 import com.kolo.agent.core.database.repository.RoomMemoryRepository
+import com.kolo.agent.core.designsystem.UiMessage
 import com.kolo.agent.core.model.Memory
 import com.kolo.agent.core.model.ProviderConfig
 import com.kolo.agent.core.model.ProviderId
@@ -17,8 +18,11 @@ import com.kolo.agent.core.providers.openai.OpenAiStreamClient
 import com.kolo.agent.core.tools.permissions.ToolPermissionStore
 import com.kolo.agent.core.tools.registry.ToolRegistry
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
@@ -63,6 +67,9 @@ class SettingsViewModel @Inject constructor(
 
     private val _uiState = MutableStateFlow(SettingsUiState())
     val uiState: StateFlow<SettingsUiState> = _uiState.asStateFlow()
+
+    private val _messages = MutableSharedFlow<UiMessage>(extraBufferCapacity = 8)
+    val messages: SharedFlow<UiMessage> = _messages.asSharedFlow()
 
     init {
         loadProviders()
@@ -182,7 +189,9 @@ class SettingsViewModel @Inject constructor(
 
     fun setCustomInstructions(value: String) {
         viewModelScope.launch {
-            appSettings.setCustomInstructions(value)
+            runCatching { appSettings.setCustomInstructions(value) }
+                .onSuccess { _messages.tryEmit(UiMessage.success("Instructions saved")) }
+                .onFailure { _messages.tryEmit(UiMessage.error("Failed to save instructions: ${it.message ?: "unknown error"}")) }
         }
     }
 
@@ -212,25 +221,33 @@ class SettingsViewModel @Inject constructor(
 
     fun saveCustomTool(tool: CustomToolDef) {
         viewModelScope.launch {
-            appSettings.saveCustomTool(tool)
+            runCatching { appSettings.saveCustomTool(tool) }
+                .onSuccess { _messages.tryEmit(UiMessage.success("Tool saved")) }
+                .onFailure { _messages.tryEmit(UiMessage.error("Failed to save tool: ${it.message ?: "unknown error"}")) }
         }
     }
 
     fun deleteCustomTool(id: String) {
         viewModelScope.launch {
-            appSettings.deleteCustomTool(id)
+            runCatching { appSettings.deleteCustomTool(id) }
+                .onSuccess { _messages.tryEmit(UiMessage.success("Tool deleted")) }
+                .onFailure { _messages.tryEmit(UiMessage.error("Failed to delete tool: ${it.message ?: "unknown error"}")) }
         }
     }
 
     fun saveSkill(skill: Skill) {
         viewModelScope.launch {
-            appSettings.saveSkill(skill)
+            runCatching { appSettings.saveSkill(skill) }
+                .onSuccess { _messages.tryEmit(UiMessage.success("Skill saved")) }
+                .onFailure { _messages.tryEmit(UiMessage.error("Failed to save skill: ${it.message ?: "unknown error"}")) }
         }
     }
 
     fun deleteSkill(id: String) {
         viewModelScope.launch {
-            appSettings.deleteSkill(id)
+            runCatching { appSettings.deleteSkill(id) }
+                .onSuccess { _messages.tryEmit(UiMessage.success("Skill deleted")) }
+                .onFailure { _messages.tryEmit(UiMessage.error("Failed to delete skill: ${it.message ?: "unknown error"}")) }
         }
     }
 
@@ -242,58 +259,72 @@ class SettingsViewModel @Inject constructor(
 
     fun addMemory(content: String, kind: String = "fact") {
         viewModelScope.launch {
-            val memory = Memory(kind = kind, content = content)
-            memoryRepository.save(memory)
-            loadMemories()
+            runCatching {
+                val memory = Memory(kind = kind, content = content)
+                memoryRepository.save(memory)
+                loadMemories()
+            }.onSuccess { _messages.tryEmit(UiMessage.success("Memory saved")) }
+                .onFailure { _messages.tryEmit(UiMessage.error("Failed to save memory: ${it.message ?: "unknown error"}")) }
         }
     }
 
     fun deleteMemory(memoryId: String) {
         viewModelScope.launch {
-            memoryRepository.deleteById(memoryId)
-            loadMemories()
+            runCatching {
+                memoryRepository.deleteById(memoryId)
+                loadMemories()
+            }.onSuccess { _messages.tryEmit(UiMessage.success("Memory deleted")) }
+                .onFailure { _messages.tryEmit(UiMessage.error("Failed to delete memory: ${it.message ?: "unknown error"}")) }
         }
     }
 
     fun addProvider(config: ProviderConfig, apiKey: String) {
         viewModelScope.launch {
-            var configToSave = config
-            if (!config.isLocal) {
-                configToSave = fetchModelsForProvider(config, apiKey) ?: config
-            }
-            providerRepository.saveProvider(configToSave, apiKey)
-            if (configToSave.isLocal && !configToSave.modelPath.isNullOrBlank()) {
-                appSettings.setLocalLlamaModelPath(configToSave.modelPath)
-            }
-            refreshProvidersState()
+            runCatching {
+                var configToSave = config
+                if (!config.isLocal) {
+                    configToSave = fetchModelsForProvider(config, apiKey) ?: config
+                }
+                providerRepository.saveProvider(configToSave, apiKey)
+                if (configToSave.isLocal && !configToSave.modelPath.isNullOrBlank()) {
+                    appSettings.setLocalLlamaModelPath(configToSave.modelPath)
+                }
+                refreshProvidersState()
+            }.onSuccess { _messages.tryEmit(UiMessage.success("Provider added")) }
+                .onFailure { _messages.tryEmit(UiMessage.error("Failed to add provider: ${it.message ?: "unknown error"}")) }
         }
     }
 
     fun updateProvider(config: ProviderConfig, apiKey: String? = null) {
         viewModelScope.launch {
-            val key = apiKey ?: com.kolo.agent.core.providers.ProviderConfigKeyStore[config.id.value]
-            val existingProvider = providerRepository.getAllProviders().firstOrNull { it.id == config.id }
-            var configToSave = config.copy(updatedAt = System.currentTimeMillis())
-            val shouldRefreshModels = if (configToSave.isLocal) {
-                false
-            } else {
-                val endpointChanged = existingProvider == null ||
-                    existingProvider.baseUrl != configToSave.baseUrl ||
-                    existingProvider.modelsEndpoint != configToSave.modelsEndpoint ||
-                    existingProvider.kind != configToSave.kind
-                configToSave.models.isEmpty() || endpointChanged
-            }
-            if (shouldRefreshModels) {
-                configToSave = fetchModelsForProvider(configToSave, key) ?: configToSave
-            }
-            providerRepository.saveProvider(configToSave, key)
-            refreshProvidersState()
+            runCatching {
+                val key = apiKey ?: com.kolo.agent.core.providers.ProviderConfigKeyStore[config.id.value]
+                val existingProvider = providerRepository.getAllProviders().firstOrNull { it.id == config.id }
+                var configToSave = config.copy(updatedAt = System.currentTimeMillis())
+                val shouldRefreshModels = if (configToSave.isLocal) {
+                    false
+                } else {
+                    val endpointChanged = existingProvider == null ||
+                        existingProvider.baseUrl != configToSave.baseUrl ||
+                        existingProvider.modelsEndpoint != configToSave.modelsEndpoint ||
+                        existingProvider.kind != configToSave.kind
+                    configToSave.models.isEmpty() || endpointChanged
+                }
+                if (shouldRefreshModels) {
+                    configToSave = fetchModelsForProvider(configToSave, key) ?: configToSave
+                }
+                providerRepository.saveProvider(configToSave, key)
+                refreshProvidersState()
+            }.onSuccess { _messages.tryEmit(UiMessage.success("Provider updated")) }
+                .onFailure { _messages.tryEmit(UiMessage.error("Failed to update provider: ${it.message ?: "unknown error"}")) }
         }
     }
 
     fun deleteProvider(id: ProviderId) {
         viewModelScope.launch {
-            providerRepository.deleteProvider(id)
+            runCatching { providerRepository.deleteProvider(id) }
+                .onSuccess { _messages.tryEmit(UiMessage.success("Provider deleted")) }
+                .onFailure { _messages.tryEmit(UiMessage.error("Failed to delete provider: ${it.message ?: "unknown error"}")) }
         }
     }
 

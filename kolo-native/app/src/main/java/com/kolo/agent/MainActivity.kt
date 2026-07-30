@@ -1,6 +1,9 @@
 package com.kolo.agent
 
 import android.os.Bundle
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -51,6 +54,10 @@ fun KoloNavApp() {
         NavHost(
             navController = navController,
             startDestination = "chat",
+            enterTransition = { fadeIn(animationSpec = tween(180)) },
+            exitTransition = { fadeOut(animationSpec = tween(120)) },
+            popEnterTransition = { fadeIn(animationSpec = tween(180)) },
+            popExitTransition = { fadeOut(animationSpec = tween(120)) },
         ) {
         composable("chat") {
             val chatViewModel: ChatViewModel = hiltViewModel()
@@ -79,6 +86,7 @@ fun KoloNavApp() {
                 onDenyOnce = { chatViewModel.handleApprovalAction(ToolApprovalAction.DenyOnce(it)) },
                 onBlock = { chatViewModel.handleApprovalAction(ToolApprovalAction.Block(it)) },
                 onClearPendingApproval = { chatViewModel.clearPendingApproval() },
+                messages = chatViewModel.messages,
             )
         }
         composable("settings") {
@@ -108,6 +116,7 @@ fun KoloNavApp() {
                 onSetShowTokenUsage = { enabled -> settingsViewModel.setShowTokenUsage(enabled) },
                 onNavigateLocalModels = { navController.navigate("local_models") { launchSingleTop = true } },
                 onNavigateBack = { navController.popBackStack() },
+                messages = settingsViewModel.messages,
             )
         }
         composable("local_models") {
@@ -122,10 +131,12 @@ fun KoloNavApp() {
                 onManualPathChanged = { path -> localModelViewModel.updateManualPathDraft(path) },
                 onClearManualPathError = { localModelViewModel.clearManualPathError() },
                 onClearImportStatus = { localModelViewModel.clearImportStatus() },
+                onRetryImport = { localModelViewModel.retryLastImport() },
                 onConfirmDelete = { model -> localModelViewModel.confirmDelete(model) },
                 onDismissDeleteConfirm = { localModelViewModel.dismissDeleteConfirm() },
                 onEnsureLocalProvider = { localModelViewModel.ensureLocalProvider() },
                 onNavigateBack = { navController.popBackStack() },
+                messages = localModelViewModel.messages,
             )
         }
         }

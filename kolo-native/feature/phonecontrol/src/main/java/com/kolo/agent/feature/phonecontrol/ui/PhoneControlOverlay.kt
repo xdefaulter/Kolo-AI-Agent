@@ -8,7 +8,6 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.kolo.agent.core.designsystem.Spacing
@@ -37,11 +36,11 @@ fun PhoneControlOverlay(
             .fillMaxSize()
             .border(
                 width = if (isStopped) 6.dp else 4.dp,
-                color = if (isStopped) Color(0xFFFF1744) else MaterialTheme.colorScheme.error.copy(alpha = 0.7f),
+                color = MaterialTheme.colorScheme.error.copy(alpha = if (isStopped) 0.95f else 0.7f),
             )
     ) {
         Surface(
-            color = if (isStopped) Color(0xFFB71C1C) else MaterialTheme.colorScheme.errorContainer,
+            color = MaterialTheme.colorScheme.errorContainer,
             shadowElevation = 8.dp,
             modifier = Modifier.align(Alignment.TopCenter),
         ) {
@@ -59,7 +58,7 @@ fun PhoneControlOverlay(
                     Icon(
                         imageVector = if (isStopped) Icons.Filled.Block else Icons.Filled.GpsFixed,
                         contentDescription = null,
-                        tint = if (isStopped) Color.White else MaterialTheme.colorScheme.error,
+                        tint = MaterialTheme.colorScheme.error,
                         modifier = Modifier.size(20.dp),
                     )
                     Spacer(modifier = Modifier.width(8.dp))
@@ -67,14 +66,14 @@ fun PhoneControlOverlay(
                         Text(
                             text = if (isStopped) "STOPPED — Phone control blocked" else "Kolo is controlling your phone",
                             style = MaterialTheme.typography.labelLarge,
-                            color = if (isStopped) Color.White else MaterialTheme.colorScheme.onErrorContainer,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
                             fontWeight = FontWeight.SemiBold,
                         )
                         if (message.isNotBlank()) {
                             Text(
                                 text = message,
                                 style = MaterialTheme.typography.bodySmall,
-                                color = if (isStopped) Color.White.copy(alpha = 0.8f) else MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.8f),
+                                color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.8f),
                                 maxLines = 1,
                             )
                         }
@@ -89,7 +88,7 @@ fun PhoneControlOverlay(
                         },
                         colors = IconButtonDefaults.filledIconButtonColors(
                             containerColor = MaterialTheme.colorScheme.error,
-                            contentColor = Color.White,
+                            contentColor = MaterialTheme.colorScheme.onError,
                         ),
                         modifier = Modifier.size(48.dp),
                     ) {

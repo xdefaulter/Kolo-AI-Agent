@@ -7,6 +7,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.platform.LocalContext
 import com.kolo.agent.core.designsystem.KoloShapes
+import com.kolo.agent.core.designsystem.KoloTypography
 import com.kolo.agent.core.settings.AppSettings
 import dagger.hilt.EntryPoint
 import dagger.hilt.InstallIn
@@ -62,6 +63,7 @@ fun KoloTheme(content: @Composable () -> Unit) {
 
     MaterialTheme(
         colorScheme = colorScheme,
+        typography = KoloTypography,
         shapes = KoloShapes,
         content = content,
     )

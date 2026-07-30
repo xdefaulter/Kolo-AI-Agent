@@ -15,11 +15,20 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.kolo.agent.core.designsystem.EmptyState
+import com.kolo.agent.core.designsystem.KoloIconButton
+import com.kolo.agent.core.designsystem.KoloSnackbarHost
 import com.kolo.agent.core.designsystem.Spacing
+import com.kolo.agent.core.designsystem.destructiveOutlinedButtonColors
+import com.kolo.agent.core.designsystem.destructiveTextButtonColors
+import com.kolo.agent.core.designsystem.UiMessage
+import com.kolo.agent.core.designsystem.rememberKoloSnackbarController
 import com.kolo.agent.core.providers.local.ImportedModel
 import com.kolo.agent.core.providers.local.LocalModelManager
 import com.kolo.agent.feature.settings.LocalModelUiState
@@ -35,11 +44,16 @@ fun LocalModelScreen(
     onManualPathChanged: (String) -> Unit,
     onClearManualPathError: () -> Unit,
     onClearImportStatus: () -> Unit,
+    onRetryImport: () -> Unit = {},
     onConfirmDelete: (ImportedModel) -> Unit,
     onDismissDeleteConfirm: () -> Unit,
     onEnsureLocalProvider: () -> Unit,
     onNavigateBack: () -> Unit,
+    messages: kotlinx.coroutines.flow.Flow<UiMessage> = kotlinx.coroutines.flow.emptyFlow(),
 ) {
+    val snackbarController = rememberKoloSnackbarController()
+    LaunchedEffect(Unit) { messages.collect { snackbarController.show(it) } }
+
     val filePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument(),
     ) { uri: Uri? ->
@@ -66,7 +80,7 @@ fun LocalModelScreen(
             confirmButton = {
                 TextButton(
                     onClick = { onDeleteModel(model); onDismissDeleteConfirm() },
-                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                    colors = destructiveTextButtonColors(),
                 ) { Text("Delete") }
             },
             dismissButton = {
@@ -78,7 +92,7 @@ fun LocalModelScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Local Models", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold) },
+                title = { Text("Local Models", style = MaterialTheme.typography.titleMedium) },
                 navigationIcon = {
                     IconButton(onClick = onNavigateBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
@@ -87,6 +101,7 @@ fun LocalModelScreen(
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
             )
         },
+        snackbarHost = { KoloSnackbarHost(snackbarController) },
         floatingActionButton = {
             ExtendedFloatingActionButton(
                 onClick = { filePickerLauncher.launch(arrayOf("application/octet-stream", "*/*")) },
@@ -111,6 +126,7 @@ fun LocalModelScreen(
                     ImportStatusCard(
                         status = state.importStatus,
                         onDismiss = onClearImportStatus,
+                        onRetry = onRetryImport,
                     )
                 }
             }
@@ -178,7 +194,9 @@ fun LocalModelScreen(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text("Imported Models", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 6.dp, bottom = 4.dp))
+                        Text("Imported Models", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold, modifier = Modifier
+                            .padding(top = 6.dp, bottom = 4.dp)
+                            .semantics { heading() })
                         Text(state.totalModelsSize, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     OutlinedTextField(
@@ -191,10 +209,10 @@ fun LocalModelScreen(
                 }
                 if (filteredModels.isEmpty()) {
                     item {
-                        Text(
-                            if (modelSearch.isBlank()) "No models imported yet" else "No models match \"$modelSearch\"",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        EmptyState(
+                            icon = Icons.Filled.Search,
+                            title = "No models match",
+                            subtitle = "No imported models match \"$modelSearch\".",
                         )
                     }
                 }
@@ -275,7 +293,7 @@ private fun BridgeStatusCard(status: LocalModelManager.BridgeStatus) {
 }
 
 @Composable
-private fun ImportStatusCard(status: LocalModelManager.ImportStatus, onDismiss: () -> Unit) {
+private fun ImportStatusCard(status: LocalModelManager.ImportStatus, onDismiss: () -> Unit, onRetry: () -> Unit = {}) {
     Card(shape = MaterialTheme.shapes.small) {
         Row(
             modifier = Modifier.padding(12.dp),
@@ -329,9 +347,12 @@ private fun ImportStatusCard(status: LocalModelManager.ImportStatus, onDismiss: 
                         Text("Import complete", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.primary)
                         Text("${status.model.fileName} - ${status.model.sizeFormatted}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                    IconButton(onClick = onDismiss, modifier = Modifier.size(24.dp)) {
-                        Icon(Icons.Filled.Close, contentDescription = "Dismiss", modifier = Modifier.size(14.dp))
-                    }
+                    KoloIconButton(
+                        onClick = onDismiss,
+                        contentDescription = "Dismiss",
+                        icon = Icons.Filled.Close,
+                        iconSize = 16.dp,
+                    )
                 }
                 is LocalModelManager.ImportStatus.Error -> {
                     Icon(Icons.Filled.Error, contentDescription = null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(20.dp))
@@ -340,9 +361,18 @@ private fun ImportStatusCard(status: LocalModelManager.ImportStatus, onDismiss: 
                         Text("Import failed", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.error)
                         Text(status.message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                    IconButton(onClick = onDismiss, modifier = Modifier.size(24.dp)) {
-                        Icon(Icons.Filled.Close, contentDescription = "Dismiss", modifier = Modifier.size(14.dp))
-                    }
+                    KoloIconButton(
+                        onClick = onRetry,
+                        contentDescription = "Retry import",
+                        icon = Icons.Filled.Refresh,
+                        iconSize = 16.dp,
+                    )
+                    KoloIconButton(
+                        onClick = onDismiss,
+                        contentDescription = "Dismiss",
+                        icon = Icons.Filled.Close,
+                        iconSize = 16.dp,
+                    )
                 }
             }
         }
@@ -363,7 +393,7 @@ private fun ActiveModelCard(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Filled.PlayCircle, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
                 Spacer(modifier = Modifier.width(8.dp))
-                Text("Active Model", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+                Text("Active Model", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, modifier = Modifier.semantics { heading() })
             }
             Spacer(modifier = Modifier.height(6.dp))
             if (activeModel != null) {
@@ -458,7 +488,7 @@ private fun ImportedModelCard(
                         Text("Set Active", style = MaterialTheme.typography.labelSmall)
                     }
                 }
-                OutlinedButton(onClick = onDelete, colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error), contentPadding = PaddingValues(horizontal = 12.dp)) {
+                OutlinedButton(onClick = onDelete, colors = destructiveOutlinedButtonColors(), contentPadding = PaddingValues(horizontal = 12.dp)) {
                     Text("Delete", style = MaterialTheme.typography.labelSmall)
                 }
             }
@@ -469,13 +499,12 @@ private fun ImportedModelCard(
 @Composable
 private fun EmptyModelsCard() {
     Card(shape = MaterialTheme.shapes.small) {
-        Column(modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            Icon(Icons.Filled.Memory, contentDescription = null, modifier = Modifier.size(40.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f))
-            Spacer(modifier = Modifier.height(8.dp))
-            Text("No models imported yet", style = MaterialTheme.typography.bodyMedium)
-            Spacer(modifier = Modifier.height(4.dp))
-            Text("Tap \"Import GGUF\" to select a .gguf model file from your device.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 24.dp))
-        }
+        EmptyState(
+            icon = Icons.Filled.Memory,
+            title = "No models imported yet",
+            subtitle = "Tap \"Import GGUF\" to select a .gguf model file from your device.",
+            modifier = Modifier.padding(horizontal = 24.dp),
+        )
     }
 }
 
